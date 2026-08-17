@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - "codex/**"
   pull_request:
   workflow_dispatch:
 
