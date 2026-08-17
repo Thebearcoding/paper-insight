@@ -1,12 +1,12 @@
 <div align='center'>
 
-<img src="./images/readme-head.png" alt="Paper Insight research workflow" width="92%">
-<h1><a href="https://paper-insight.herobase.tech">Paper Insight</a></h1>
+<img src="./images/head.png" alt="Paper Insight research workflow" width="92%">
+<h1><a href="https://paper.athebear.me">Paper Insight</a></h1>
 <p><strong>Find the papers worth reading before you go deep.</strong></p>
 <p>Built for a research rhythm of at least five papers a day: conference browsing, arXiv analysis, paper chat, and a personal reading library.</p>
 
 <p>
-  <a href="https://paper-insight.herobase.tech">Live demo</a> ·
+  <a href="https://paper.athebear.me">Live demo</a> ·
   <a href="./develop.md">Developer guide</a> ·
   <a href="./README.md">简体中文</a>
 </p>
@@ -19,7 +19,7 @@ Paper Insight is a fast paper-screening and analysis tool for AI conference pape
 
 If the goal is to read at least five papers a day, the bottleneck is often not opening PDFs; it is quickly deciding which candidates deserve real attention. Paper Insight turns that judgment step into a stable, reusable research entrypoint.
 
-I firmly believe that no great paper should have its close reading replaced by AI; we still need to understand its details and subtleties ourselves. Paper Insight's goal is to make the initial screening step faster, so you can more efficiently find candidates worth reading in depth from a large volume of papers.
+No great paper should have its close reading replaced by AI; researchers still need to understand its details and subtleties themselves. Paper Insight makes the initial screening step faster, so users can more efficiently find candidates worth reading in depth from a large volume of papers.
 
 By default, each analysis focuses on four screening questions:
 
@@ -28,17 +28,19 @@ By default, each analysis focuses on four screening questions:
 - What evaluation metrics does it use?
 - Why is it better than the baseline?
 
-## Why This Exists
+## Project Background
 
-> *The starting point was simple: my advisor said that good ideas and insights come from reading enough papers, and I agree. I first built a Dify + Feishu workflow for paper reading, but it still required manually entering one paper at a time. Then I made several repositories to batch collect AI conference papers, so I could browse them and jump into the Dify workflow. Later I felt Dify was too slow, so I vibed a faster tool, Paper Insight, to analyze papers locally, look at summaries, keywords, and related-work recommendations, then save promising papers to Zotero for close reading. After that, I got tired of creating a new repository every time a new conference appeared, so I wrote a general crawler and import flow. Finally, I wanted to browse conference papers directly in the tool, so I added conference pages with pagination and keyword search. Convenience really is the first productive force. If you like this project, a star is welcome.*
+This personally maintained fork combines paper collection, conference browsing, LLM-assisted screening, full-text chat, and Zotero management in one self-hosted research workspace. It reduces repetitive organization work by sending conference papers, Hugging Face Daily Papers, and newly discovered arXiv papers through the same reading flow.
+
+The current version is maintained by [Athebear](https://github.com/Thebearcoding) and continuously deployed on a personal server. It builds on the upstream Paper Insight project and adds personal deployment tooling, a Zotero library, API search, and additional conference importers.
 
 ## Current Entrypoints
 
 | Entrypoint | What it is for |
 | --- | --- |
-| [ICLR 2026](https://paper-insight.herobase.tech/conference/iclr_2026) / [CHI 2026](https://paper-insight.herobase.tech/conference/chi_2026) / [CVPR 2026](https://paper-insight.herobase.tech/conference/cvpr_2026) / [NeurIPS 2025](https://paper-insight.herobase.tech/conference/neurips_2025) / [ICML 2025](https://paper-insight.herobase.tech/conference/icml_2025) | Browse conference papers with pagination, keyword search, and field filters |
-| [Hugging Face Daily Papers](https://paper-insight.herobase.tech/hf-daily) | Sync popular Daily Papers and send them through the same analysis flow |
-| [arXiv analysis](https://paper-insight.herobase.tech/arxiv) | Paste an arXiv link or ID to add a new paper to the analysis and reading flow |
+| [ICLR 2026](https://paper.athebear.me/conference/iclr_2026) / [CHI 2026](https://paper.athebear.me/conference/chi_2026) / [CVPR 2026](https://paper.athebear.me/conference/cvpr_2026) / [NeurIPS 2025](https://paper.athebear.me/conference/neurips_2025) / [ICML 2025](https://paper.athebear.me/conference/icml_2025) | Browse conference papers with pagination, keyword search, and field filters |
+| [Hugging Face Daily Papers](https://paper.athebear.me/hf-daily) | Sync popular Daily Papers and send them through the same analysis flow |
+| [arXiv analysis](https://paper.athebear.me/arxiv) | Paste an arXiv link or ID to add a new paper to the analysis and reading flow |
 
 ## Core Capabilities
 
@@ -80,6 +82,15 @@ For local development or self-hosting, see [develop.md](./develop.md). It covers
 
 Apache 2.0 License
 
+## Maintenance
+
+- Maintainer: [Athebear](https://github.com/Thebearcoding)
+- Repository: [Thebearcoding/paper-insight](https://github.com/Thebearcoding/paper-insight)
+- Live service: [paper.athebear.me](https://paper.athebear.me)
+- Feedback: [GitHub Issues](https://github.com/Thebearcoding/paper-insight/issues)
+
+This repository preserves the upstream project's commit history and Apache 2.0 license information. Athebear maintains the personal deployment and extensions in this branch.
+
 ## Acknowledgements
 
-Thanks to [StepFun](https://www.stepfun.com/) for providing token support, which made it possible for me to quickly analyze a large number of papers.
+Thanks to the upstream Paper Insight project and its contributors. The upstream project acknowledged [StepFun](https://www.stepfun.com/) for token support.

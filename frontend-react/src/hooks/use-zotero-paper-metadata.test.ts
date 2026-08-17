@@ -5,7 +5,7 @@ import type { Paper } from '@/types';
 import { buildZoteroPaperMetadata } from './use-zotero-paper-metadata';
 
 function metadataByName(paper: Paper, name: string): string[] {
-  return buildZoteroPaperMetadata(paper, { origin: 'https://paper-insight.herobase.tech' })
+  return buildZoteroPaperMetadata(paper, { origin: 'https://paper.athebear.me' })
     .filter((entry) => entry.name === name)
     .map((entry) => entry.content);
 }
@@ -28,10 +28,10 @@ describe('buildZoteroPaperMetadata', () => {
     expect(metadataByName(paper, 'citation_publication_date')).toEqual(['2026']);
     expect(metadataByName(paper, 'citation_keywords')).toEqual(['metadata; zotero']);
     expect(metadataByName(paper, 'citation_public_url')).toEqual([
-      'https://paper-insight.herobase.tech/papers/paper%2Fid',
+      'https://paper.athebear.me/papers/paper%2Fid',
     ]);
     expect(metadataByName(paper, 'citation_pdf_url')).toEqual([
-      'https://paper-insight.herobase.tech/pdfs/test.pdf',
+      'https://paper.athebear.me/pdfs/test.pdf',
     ]);
   });
 

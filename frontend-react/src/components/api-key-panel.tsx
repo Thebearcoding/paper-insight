@@ -36,7 +36,7 @@ function buildCurlExample(apiKeyValue?: string | null): string {
   // The example should always point at the API origin the user is currently on:
   // vite dev (5173) proxies nothing, so swap in the backend port; every other
   // case (backend-served :8000, production HTTPS) uses the current origin as-is.
-  let base = 'https://paper-insight.herobase.tech';
+  let base = 'https://paper.athebear.me';
   if (typeof window !== 'undefined') {
     const { protocol, hostname, port, origin } = window.location;
     base = port === '5173' ? `${protocol}//${hostname}:8000` : origin;

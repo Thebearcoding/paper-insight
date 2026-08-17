@@ -24,7 +24,7 @@ with mode `0600`.
 ## Automatic deployment from GitHub Actions
 
 The `Deploy production` CI job runs only for pushes to `master` in the
-`Thebearcoding/paper-insight` fork, and only after the backend and frontend jobs
+`Thebearcoding/paper-insight` repository, and only after the backend and frontend jobs
 pass. It uploads the exact tested commit over SSH, builds it in an isolated
 release directory, preserves `/opt/paper-insight/.env` and `config.yaml`, and
 switches the Compose project after the build succeeds.

@@ -1,12 +1,12 @@
 <div align='center'>
 
 <img src="./images/head.png" alt="Paper Insight research workflow" width="92%">
-<h1><a href="https://paper-insight.herobase.tech">Paper Insight</a></h1>
+<h1><a href="https://paper.athebear.me">Paper Insight</a></h1>
 <p><strong>AI 帮你快速初筛，把好论文留给自己精读</strong></p>
 <p>Paper Insight 帮你快速抓住论文重点，识别代码开源情况、任务设置、评价指标与核心贡献，把真正值得深入阅读的论文留给你自己。</p>
 
 <p>
-  <a href="https://paper-insight.herobase.tech">在线体验</a> ·
+  <a href="https://paper.athebear.me">在线体验</a> ·
   <a href="./develop.md">开发指南</a> ·
   <a href="./README_en.md">English</a>
 </p>
@@ -19,7 +19,7 @@ Paper Insight 是一个面向 AI 会议论文的快速筛选与分析工具。�
 
 如果每天至少要读五篇论文，真正卡住人的往往不是打开 PDF，而是在大量候选里快速判断哪几篇值得投入精力。Paper Insight 试图把这个判断过程变成稳定、可复用的研究入口。
 
-我始终认为，任何一篇优秀的论文都不应该由 AI 来替代精读，需要我们亲自去理解它的细节和精妙之处。Paper Insight 的目标是把“初筛”这一步做得更快，让你能更高效地在大量论文中找到值得精读的候选。
+任何一篇优秀的论文都不应该由 AI 替代精读，研究者仍需亲自理解其中的细节和精妙之处。Paper Insight 的目标是把“初筛”这一步做得更快，让用户能更高效地从大量论文中找到值得精读的候选。
 
 默认分析会优先回答 4 个研究筛选问题：
 
@@ -28,17 +28,19 @@ Paper Insight 是一个面向 AI 会议论文的快速筛选与分析工具。�
 - 使用什么评估指标？
 - 为什么优于 baseline？
 
-## 为什么做这个项目
+## 项目背景
 
-> *&emsp;&emsp;做这个工具的起因是，老师说要看足够多的论文才会有很好的 idea 或 insight ，我觉得很对。（感谢王老师的读论文 Prompt）所以用 dify 联合飞书做了工作流，但是每次只手动输入能看一篇；后来做了好几个仓库用于批量拉取AI会议的论文，这样我可以直接看然后跳转到 dify 工作流；再然后我觉得 dify 太慢了，于是 vibe 了一个更快的工具 paper insight，直接在本地就能快速分析论文，看看摘要、关键词、相关工作推荐等，觉得有潜力就收藏到zotero里精读；我又觉得每次新的会议出来我就得新搞一个仓库太麻烦了，于是写了一个通用的爬虫脚本，能批量导入会议论文；最后我觉得如果能直接在这个工具里浏览会议论文就更好了，于是又加了一个会议浏览的功能，支持分页和关键词搜索。so，果然省事才是第一生产力。如果你喜欢这个项目，欢迎点个star哦~*
+这个个人维护分支把论文抓取、会议浏览、LLM 初筛、全文对话和 Zotero 管理整合为一个可自托管的研究工作台。目标是减少重复整理工作，让会议论文、Hugging Face Daily Papers 和临时发现的 arXiv 论文都能进入同一套阅读流程。
+
+当前版本由 [Athebear](https://github.com/Thebearcoding) 维护，并在个人服务器上持续部署。它基于上游 Paper Insight 项目，并增加了个人部署、Zotero 文献库、API 搜索和更多会议数据导入能力。
 
 ## 当前入口
 
 | 入口 | 用来做什么 |
 | --- | --- |
-| [ICLR 2026](https://paper-insight.herobase.tech/conference/iclr_2026) / [CHI 2026](https://paper-insight.herobase.tech/conference/chi_2026) / [CVPR 2026](https://paper-insight.herobase.tech/conference/cvpr_2026) / [NeurIPS 2025](https://paper-insight.herobase.tech/conference/neurips_2025) / [ICML 2025](https://paper-insight.herobase.tech/conference/icml_2025) | 按会议批量浏览论文，支持分页、关键词搜索和字段过滤 |
-| [Hugging Face Daily Papers](https://paper-insight.herobase.tech/hf-daily) | 自动同步热门 Daily Papers，并进入同一套分析流程 |
-| [arXiv 分析](https://paper-insight.herobase.tech/arxiv) | 粘贴 arXiv 链接或 ID，把新论文加入分析与收藏流程 |
+| [ICLR 2026](https://paper.athebear.me/conference/iclr_2026) / [CHI 2026](https://paper.athebear.me/conference/chi_2026) / [CVPR 2026](https://paper.athebear.me/conference/cvpr_2026) / [NeurIPS 2025](https://paper.athebear.me/conference/neurips_2025) / [ICML 2025](https://paper.athebear.me/conference/icml_2025) | 按会议批量浏览论文，支持分页、关键词搜索和字段过滤 |
+| [Hugging Face Daily Papers](https://paper.athebear.me/hf-daily) | 自动同步热门 Daily Papers，并进入同一套分析流程 |
+| [arXiv 分析](https://paper.athebear.me/arxiv) | 粘贴 arXiv 链接或 ID，把新论文加入分析与收藏流程 |
 
 ## 核心能力
 
@@ -80,6 +82,15 @@ Paper Insight 不试图替你读完论文，而是帮你把每天的论文筛选
 
 Apache 2.0 License
 
+## 维护信息
+
+- 当前维护者：[Athebear](https://github.com/Thebearcoding)
+- 代码仓库：[Thebearcoding/paper-insight](https://github.com/Thebearcoding/paper-insight)
+- 在线服务：[paper.athebear.me](https://paper.athebear.me)
+- 问题反馈：[GitHub Issues](https://github.com/Thebearcoding/paper-insight/issues)
+
+本仓库保留上游项目的提交历史与 Apache 2.0 许可信息，当前分支中的个人部署和扩展功能由 Athebear 维护。
+
 ## 致谢
 
-感谢 [StepFun](https://www.stepfun.com/) 提供 Token 支持，让我得以对大量论文进行快速分析。
+感谢上游 Paper Insight 项目及其贡献者；上游项目曾鸣谢 [StepFun](https://www.stepfun.com/) 提供 Token 支持。

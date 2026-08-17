@@ -112,8 +112,8 @@ hf_daily:
 
 生产 GitHub OAuth App 推荐单独创建：
 
-- Homepage URL：`https://paper-insight.herobase.tech`
-- Authorization callback URL：`https://paper-insight.herobase.tech/auth/github/callback`
+- Homepage URL：`https://paper.athebear.me`
+- Authorization callback URL：`https://paper.athebear.me/auth/github/callback`
 
 ## 初始化数据库
 
@@ -316,36 +316,40 @@ docker build -t paper-insight .
 
 当前生产环境使用：
 
-- 域名：`paper-insight.herobase.tech`
-- 部署目录：`/opt/paper_online`
-- 更新脚本：`/opt/paper_online/deploy.sh`
+- 域名：`paper.athebear.me`
+- 代码仓库：`Thebearcoding/paper-insight`
+- 部署分支：`master`
+- 部署目录：`/opt/paper-insight`
+- 受限部署入口：`/usr/local/sbin/deploy-paper-insight`
 - Caddy 反代：`127.0.0.1:8000`
 
-日常更新路径：
+日常更新通过 GitHub Actions 完成。推送到个人仓库的 `master` 后，后端测试、前端测试、Lint 和生产构建全部通过才会连接服务器：
 
 ```bash
-ssh root@165.22.4.203 /opt/paper_online/deploy.sh
+git push origin master
 ```
+
+部署任务会把已测试的提交上传到独立 release 目录，保留服务器上的 `.env`、`config.yaml` 和 Docker 数据卷，健康检查通过后再切换当前版本。
 
 部署后验证：
 
 ```bash
-curl -sS -o /dev/null -w "%{http_code}\n" https://paper-insight.herobase.tech/
-curl -sS "https://paper-insight.herobase.tech/conference/iclr_2026/papers?limit=1"
+curl -sS -o /dev/null -w "%{http_code}\n" https://paper.athebear.me/
+curl -sS "https://paper.athebear.me/conference/iclr_2026/papers?limit=1"
 ```
 
 端口策略必须保持：
 
 - Caddy 对外监听 `80/443`
 - Docker app 只绑定 `127.0.0.1:8000->8000`
-- Docker Postgres 只绑定 `127.0.0.1:5432->5432`
+- Docker Postgres 只绑定到 `127.0.0.1` 上配置的数据库端口
 
-不要把 `8000` 或 `5432` 暴露到公网。
+不要把应用端口或数据库端口暴露到公网。
 
 ## 项目结构
 
 ```text
-paper_online/
+paper-insight/
 ├── backend/
 │   ├── app.py              # FastAPI 主应用
 │   ├── auth.py             # 密码哈希与 session token 工具

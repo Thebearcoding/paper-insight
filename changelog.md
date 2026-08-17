@@ -1,9 +1,4 @@
-[![扫码加入 Paper Insight 微信交流群](/images/wechat-group.png)](/images/wechat-group.png)
-
-*欢迎加入 Paper Insight 微信交流群，交流论文、功能建议与使用反馈。*\
-*如果想给作者发邮件的话，请前往作者 Github 主页的邮箱地址联系。*
-
-> 注：请勿在群内发布广告、招聘、刷屏等信息，违者将被移出群聊。
+本分支由 [Athebear](https://github.com/Thebearcoding) 维护。功能建议和问题请提交到 [Thebearcoding/paper-insight Issues](https://github.com/Thebearcoding/paper-insight/issues)。
 
 ## 2026-07-17
 
