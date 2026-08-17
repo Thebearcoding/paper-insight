@@ -1,5 +1,10 @@
 .git
 .gitignore
+.env
+.env.*
+!.env.server.example
+config.yaml
+*.pem
 .venv
 .pytest_cache
 __pycache__
@@ -8,3 +13,4 @@ app/node_modules
 frontend-react/node_modules
 frontend-react/dist
 crawled_data
+data

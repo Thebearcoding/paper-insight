@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=30
+    mem_limit: 384m
+    cpus: 0.50
+    pids_limit: 100
+
+  app:
+    build:
+      args:
+        DOCKERHUB_PREFIX: ${DOCKERHUB_PREFIX:-}
+        PYPI_FILES_MIRROR: ${PYPI_FILES_MIRROR:-}
+    mem_limit: 1152m
+    cpus: 1.25
+    pids_limit: 256
+
+  caddy:
+    image: ${CADDY_IMAGE:-caddy:2-alpine}
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PAPER_DOMAIN: ${PAPER_DOMAIN:?PAPER_DOMAIN is required}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/personal/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 100
+
+volumes:
+  caddy_data:
+  caddy_config:

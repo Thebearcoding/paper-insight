@@ -9,6 +9,8 @@ import { SearchPage } from '@/pages/search-page';
 import { AdminPage } from '@/pages/admin-page';
 import { AuthPage } from '@/pages/auth-page';
 import { ProfilePage } from '@/pages/profile-page';
+import { ZoteroItemPage } from '@/pages/zotero-item-page';
+import { ZoteroPage } from '@/pages/zotero-page';
 import { useAppLocation } from '@/lib/router';
 
 function App() {
@@ -33,6 +35,11 @@ function App() {
     content = <AdminPage />;
   } else if (pathname === '/me') {
     content = <ProfilePage />;
+  } else if (pathname === '/zotero') {
+    content = <ZoteroPage />;
+  } else if (pathname.startsWith('/zotero/items/')) {
+    const itemKey = decodeURIComponent(pathname.replace('/zotero/items/', '').split('/')[0]);
+    content = <ZoteroItemPage itemKey={itemKey} />;
   } else if (pathname.startsWith('/conference/')) {
     const venue = pathname.replace('/conference/', '').split('/')[0];
     content = <ConferencePage venue={venue} />;

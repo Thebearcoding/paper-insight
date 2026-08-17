@@ -1,0 +1,65 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+
+database:
+  url: postgresql://paper:replace-with-the-same-postgres-password@postgres:5432/paper_online
+
+admin:
+  email: replace-with-your-admin-email
+  initial_password: replace-with-a-long-random-password
+
+llm:
+  openai_api_key:
+  siliconflow_api_key:
+  open_router_api_key:
+  step_api_key:
+  arkplan_api_key:
+  deepseek_api_key:
+
+paths:
+  paper_content_cache_dir: data/paper_cache
+  zotero_content_cache_dir: data/zotero_cache
+
+zotero:
+  credential_encryption_key: replace-with-output-of-openssl-rand-hex-32
+  api_base_url: https://api.zotero.org
+  request_timeout_seconds: 30
+  max_attachment_mb: 50
+
+auth:
+  require_email_verification: false
+  session_cookie_name: paper_session
+  session_ttl_days: 30
+  cookie_secure: true
+  cookie_samesite: lax
+  password_min_length: 12
+  github_client_id:
+  github_client_secret:
+  github_callback_url: https://replace-with-paper-domain/auth/github/callback
+  frontend_base_url: https://replace-with-paper-domain
+
+presence:
+  online_timeout_seconds: 30
+  snapshot_interval_seconds: 60
+  retention_days: 90
+
+background_analysis:
+  enabled: false
+  check_interval_seconds: 86400
+
+hf_daily:
+  enabled: true
+  api_url: https://huggingface.co/api/daily_papers
+  fetch_time: "22:00"
+  timezone: Asia/Hong_Kong
+  top_n: 5
+
+feishu_notifications:
+  enabled: false
+  push_time: "10:00"
+  max_daily_push_count: 5
+
+cors:
+  allowed_origins:
+    - https://replace-with-paper-domain

@@ -1,5 +1,5 @@
 import { type SVGProps, useEffect, useRef, useState } from 'react';
-import { BookMarked, Github, LogOut, MessageSquare, Radio, ScrollText, Shield } from 'lucide-react';
+import { BookMarked, Github, Library, LogOut, MessageSquare, Radio, ScrollText, Shield } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { fetchOnlineCount, sendHeartbeat } from '@/lib/api';
@@ -41,7 +41,7 @@ export function SiteNavbar() {
   const [isVisible, setIsVisible] = useState(true);
   const [onlineCount, setOnlineCount] = useState(0);
   const lastScrollYRef = useRef(0);
-  const isPaperPage = location.pathname.startsWith('/papers/');
+  const isPaperPage = location.pathname.startsWith('/papers/') || location.pathname.startsWith('/zotero/items/');
 
   useEffect(() => {
     const handleScroll = () => {
@@ -140,6 +140,14 @@ export function SiteNavbar() {
               >
                 <BookMarked className="mr-1.5 h-4 w-4 text-[#2563eb]" />
                 <span className="hidden sm:inline">我的论文</span>
+              </Button>
+              <Button
+                variant="outline"
+                className={location.pathname.startsWith('/zotero') ? navDockActiveButtonClass : navDockButtonClass}
+                onClick={() => navigate('/zotero')}
+              >
+                <Library className="mr-1.5 h-4 w-4 text-[#b91c1c]" />
+                <span className="hidden sm:inline">Zotero</span>
               </Button>
               {user.role === 'admin' ? (
                 <Button

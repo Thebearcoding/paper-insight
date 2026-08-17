@@ -82,6 +82,15 @@ class LlmConfig:
 @dataclass(frozen=True)
 class PathsConfig:
     paper_content_cache_dir: str | None = None
+    zotero_content_cache_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class ZoteroConfig:
+    credential_encryption_key: str | None = None
+    api_base_url: str = "https://api.zotero.org"
+    request_timeout_seconds: int = 30
+    max_attachment_mb: int = 50
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,7 @@ class AppConfig:
     database: DatabaseConfig
     llm: LlmConfig
     paths: PathsConfig
+    zotero: ZoteroConfig
     server: ServerConfig
     admin: AdminConfig
     auth: AuthConfig
@@ -164,6 +174,7 @@ def load_app_config() -> AppConfig:
     raw_database = raw.get("database") if isinstance(raw.get("database"), dict) else {}
     raw_llm = raw.get("llm") if isinstance(raw.get("llm"), dict) else {}
     raw_paths = raw.get("paths") if isinstance(raw.get("paths"), dict) else {}
+    raw_zotero = raw.get("zotero") if isinstance(raw.get("zotero"), dict) else {}
     raw_server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
     raw_admin = raw.get("admin") if isinstance(raw.get("admin"), dict) else {}
 
@@ -298,7 +309,22 @@ def load_app_config() -> AppConfig:
             arkplan_api_key=raw_llm.get("arkplan_api_key"),
             deepseek_api_key=raw_llm.get("deepseek_api_key"),
         ),
-        paths=PathsConfig(paper_content_cache_dir=raw_paths.get("paper_content_cache_dir")),
+        paths=PathsConfig(
+            paper_content_cache_dir=raw_paths.get("paper_content_cache_dir"),
+            zotero_content_cache_dir=raw_paths.get("zotero_content_cache_dir"),
+        ),
+        zotero=ZoteroConfig(
+            credential_encryption_key=raw_zotero.get("credential_encryption_key"),
+            api_base_url=_as_str(raw_zotero.get("api_base_url"), ZoteroConfig.api_base_url),
+            request_timeout_seconds=_as_int(
+                raw_zotero.get("request_timeout_seconds"),
+                ZoteroConfig.request_timeout_seconds,
+            ),
+            max_attachment_mb=_as_int(
+                raw_zotero.get("max_attachment_mb"),
+                ZoteroConfig.max_attachment_mb,
+            ),
+        ),
         server=ServerConfig(
             host=_as_str(raw_server.get("host"), ServerConfig.host),
             port=_as_int(raw_server.get("port"), ServerConfig.port),

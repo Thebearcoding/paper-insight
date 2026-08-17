@@ -83,6 +83,9 @@ from database import (
     delete_chat_session,
     delete_user,
     delete_last_chat_message_pair,
+    delete_last_zotero_chat_message_pair,
+    delete_zotero_chat_session,
+    delete_zotero_connection,
     ensure_admin_user,
     ensure_default_llm_providers,
     add_llm_model,
@@ -91,6 +94,12 @@ from database import (
     get_chat_messages,
     get_chat_session,
     get_chat_sessions_for_account,
+    get_zotero_chat_messages,
+    get_zotero_chat_session,
+    get_zotero_chat_session_ids_for_user,
+    get_zotero_chat_sessions,
+    get_zotero_connection,
+    get_zotero_item,
     get_arxiv_papers,
     get_conference_papers,
     get_hf_daily_papers,
@@ -114,6 +123,8 @@ from database import (
     list_enabled_feishu_settings,
     list_marked_papers,
     list_llm_providers,
+    list_zotero_collections,
+    list_zotero_items,
     list_users,
     migrate_anonymous_data,
     record_presence,
@@ -124,6 +135,8 @@ from database import (
     revoke_session,
     revoke_user_sessions,
     save_chat_message,
+    save_zotero_chat_message,
+    save_zotero_connection,
     save_paper,
     search_all_papers,
     select_daily_push_papers_for_user,
@@ -134,6 +147,7 @@ from database import (
     create_llm_provider,
     update_feishu_test_result,
     update_llm_response,
+    update_zotero_analysis,
     update_llm_provider,
     upsert_arxiv_paper,
     upsert_fetched_llm_models,
@@ -141,11 +155,22 @@ from database import (
     update_user_admin_fields,
     update_user_last_login,
     update_user_password,
+    apply_zotero_sync,
+    create_zotero_chat_session,
+    reset_running_zotero_syncs,
+    set_zotero_sync_status,
 )
 from chat import ChatSession
 from background_tasks import BackgroundAnalyzer
 from markdown_utils import normalize_llm_markdown
-from prompt import build_open_in_ai_prompt
+from prompt import ZOTERO_DEEP_READING_PROMPT, build_open_in_ai_prompt
+from zotero import (
+    ZoteroAuthError,
+    ZoteroClient,
+    ZoteroError,
+    delete_user_cache as delete_zotero_user_cache,
+    get_item_reading_context,
+)
 
 logger = logging.getLogger(__name__)
 GITHUB_OAUTH_STATE_COOKIE = "paper_github_oauth_state"
@@ -154,6 +179,8 @@ GITHUB_OAUTH_COOKIE_MAX_AGE_SECONDS = 600
 
 llm = ManagedLLM()
 chat_sessions: dict[str, ChatSession] = {}
+zotero_chat_sessions: dict[str, ChatSession] = {}
+zotero_sync_tasks: dict[str, asyncio.Task] = {}
 background_analyzer = BackgroundAnalyzer(llm, check_interval=settings.background_analysis.check_interval_seconds)
 background_task = None
 presence_snapshot_task = None
@@ -705,6 +732,11 @@ async def lifespan(app: FastAPI):
     except DatabaseError as exc:
         logger.warning("LLM 供应商初始化失败: %s", exc)
 
+    try:
+        await asyncio.to_thread(reset_running_zotero_syncs)
+    except DatabaseError as exc:
+        logger.warning("Zotero 同步状态恢复失败: %s", exc)
+
     if background_analysis_enabled:
         start_background_analysis_task()
     else:
@@ -723,7 +755,14 @@ async def lifespan(app: FastAPI):
     yield
 
     background_analyzer.stop()
-    for task in (background_task, presence_snapshot_task, hf_daily_task, feishu_push_task, *hf_daily_analysis_tasks):
+    for task in (
+        background_task,
+        presence_snapshot_task,
+        hf_daily_task,
+        feishu_push_task,
+        *hf_daily_analysis_tasks,
+        *zotero_sync_tasks.values(),
+    ):
         if not task:
             continue
         task.cancel()
@@ -748,6 +787,10 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str
     user_id: str | None = None
+
+
+class ZoteroConnectionRequest(BaseModel):
+    api_key: str
 
 
 class AuthRequest(BaseModel):
@@ -1101,6 +1144,134 @@ def assert_chat_owner(session_id: str, user_id: str) -> dict | None:
     return session_row
 
 
+def public_zotero_connection(connection: dict | None) -> dict:
+    if not connection:
+        return {
+            "configured": False,
+            "credential_encryption_configured": bool(
+                settings.zotero.credential_encryption_key
+            ),
+            "sync_status": "idle",
+        }
+    return {
+        "configured": True,
+        "credential_encryption_configured": bool(
+            settings.zotero.credential_encryption_key
+        ),
+        "zotero_user_id": connection.get("zotero_user_id"),
+        "username": connection.get("username"),
+        "display_name": connection.get("display_name"),
+        "can_read": bool(connection.get("can_read")),
+        "can_write": bool(connection.get("can_write")),
+        "library_version": int(connection.get("library_version") or 0),
+        "sync_status": connection.get("sync_status") or "idle",
+        "last_sync_at": connection.get("last_sync_at"),
+        "last_sync_error": connection.get("last_sync_error"),
+    }
+
+
+def public_zotero_item(item: dict) -> dict:
+    result = {
+        key: value
+        for key, value in item.items()
+        if key not in {"raw", "user_id", "children"}
+    }
+    if "children" in item:
+        result["children"] = [
+            {
+                key: value
+                for key, value in child.items()
+                if key not in {"raw", "user_id"}
+            }
+            for child in item.get("children") or []
+        ]
+    return result
+
+
+def require_zotero_connection(user_id: str, *, include_api_key: bool = False) -> dict:
+    connection = get_zotero_connection(user_id, include_api_key=include_api_key)
+    if not connection:
+        raise HTTPException(status_code=404, detail="请先连接 Zotero 文库")
+    return connection
+
+
+def assert_zotero_chat_owner(session_id: str, user_id: str, item_key: str | None = None) -> dict | None:
+    session_row = get_zotero_chat_session(session_id)
+    if session_row and session_row.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="无权访问该 Zotero 会话")
+    if session_row and item_key and session_row.get("item_key") != item_key:
+        raise HTTPException(status_code=409, detail="会话不属于当前 Zotero 条目")
+    return session_row
+
+
+async def run_zotero_sync(user_id: str) -> None:
+    try:
+        connection = await asyncio.to_thread(
+            get_zotero_connection,
+            user_id,
+            True,
+        )
+        if not connection:
+            return
+        client = ZoteroClient(connection["api_key"])
+        payload = await asyncio.to_thread(
+            client.fetch_sync_data,
+            int(connection["zotero_user_id"]),
+            int(connection.get("library_version") or 0),
+        )
+        await asyncio.to_thread(apply_zotero_sync, user_id, payload)
+    except Exception as exc:
+        logger.exception("Zotero sync failed for user %s", user_id)
+        try:
+            await asyncio.to_thread(set_zotero_sync_status, user_id, "error", str(exc)[:1000])
+        except DatabaseError:
+            logger.exception("Failed to record Zotero sync error for user %s", user_id)
+    finally:
+        zotero_sync_tasks.pop(user_id, None)
+
+
+async def load_zotero_reading_context(user_id: str, item: dict) -> tuple[str, str, str | None]:
+    connection = await asyncio.to_thread(get_zotero_connection, user_id, True)
+    if not connection:
+        raise HTTPException(status_code=404, detail="请先连接 Zotero 文库")
+    client = ZoteroClient(connection["api_key"])
+    return await asyncio.to_thread(
+        get_item_reading_context,
+        user_id=user_id,
+        zotero_user_id=int(connection["zotero_user_id"]),
+        item=item,
+        children=item.get("children") or [],
+        client=client,
+    )
+
+
+async def build_zotero_chat_runtime(
+    user_id: str,
+    item_key: str,
+    session_id: str,
+    session_exists: bool,
+) -> ChatSession:
+    item = await asyncio.to_thread(get_zotero_item, user_id, item_key)
+    if not item:
+        raise HTTPException(status_code=404, detail="Zotero 条目不存在")
+    context, source, warning = await load_zotero_reading_context(user_id, item)
+    context_parts = [context, f"正文来源：{source}"]
+    if warning:
+        context_parts.append(f"正文读取提示：{warning}")
+    if item.get("llm_response"):
+        context_parts.append(f"已有深度阅读报告：\n{item['llm_response']}")
+    history_rows = (
+        await asyncio.to_thread(get_zotero_chat_messages, session_id)
+        if session_exists
+        else []
+    )
+    history = [
+        {"role": row["role"], "content": row["content"]}
+        for row in history_rows
+    ] or None
+    return ChatSession(llm, context="\n\n".join(context_parts), history=history)
+
+
 @app.post("/auth/register")
 async def register():
     raise HTTPException(status_code=410, detail="当前仅支持使用 GitHub 注册")
@@ -1302,6 +1473,345 @@ async def my_reading_overview(
         return get_reading_overview(user["id"], safe_days)
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.get("/healthz")
+async def healthcheck():
+    return {"status": "ok"}
+
+
+@app.get("/me/zotero/connection")
+async def get_my_zotero_connection(user: dict = Depends(require_current_user)):
+    try:
+        return public_zotero_connection(get_zotero_connection(user["id"]))
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.put("/me/zotero/connection")
+async def update_my_zotero_connection(
+    req: ZoteroConnectionRequest,
+    user: dict = Depends(require_current_user),
+):
+    if not settings.zotero.credential_encryption_key:
+        raise HTTPException(
+            status_code=503,
+            detail="服务器尚未配置 zotero.credential_encryption_key",
+        )
+    try:
+        client = ZoteroClient(req.api_key)
+        key_metadata = await asyncio.to_thread(client.verify_key)
+        connection = await asyncio.to_thread(
+            save_zotero_connection,
+            user["id"],
+            req.api_key.strip(),
+            key_metadata,
+        )
+        return public_zotero_connection(connection)
+    except ZoteroAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ZoteroError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.delete("/me/zotero/connection")
+async def remove_my_zotero_connection(user: dict = Depends(require_current_user)):
+    user_id = user["id"]
+    task = zotero_sync_tasks.get(user_id)
+    if task and not task.done():
+        task.cancel()
+    zotero_chat_sessions_to_remove = []
+    try:
+        zotero_chat_sessions_to_remove = await asyncio.to_thread(
+            get_zotero_chat_session_ids_for_user,
+            user_id,
+        )
+    except DatabaseError:
+        pass
+    try:
+        await asyncio.to_thread(delete_zotero_connection, user_id)
+        await asyncio.to_thread(delete_zotero_user_cache, user_id)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+    for session_id in zotero_chat_sessions_to_remove:
+        zotero_chat_sessions.pop(session_id, None)
+    return {"ok": True}
+
+
+@app.post("/me/zotero/sync")
+async def sync_my_zotero_library(user: dict = Depends(require_current_user)):
+    user_id = user["id"]
+    try:
+        require_zotero_connection(user_id)
+        existing_task = zotero_sync_tasks.get(user_id)
+        if existing_task and not existing_task.done():
+            return {"accepted": False, "sync_status": "running"}
+        await asyncio.to_thread(set_zotero_sync_status, user_id, "running", None)
+        task = asyncio.create_task(run_zotero_sync(user_id))
+        zotero_sync_tasks[user_id] = task
+        return {"accepted": True, "sync_status": "running"}
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.get("/me/zotero/collections")
+async def get_my_zotero_collections(user: dict = Depends(require_current_user)):
+    try:
+        require_zotero_connection(user["id"])
+        return {"collections": list_zotero_collections(user["id"])}
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.get("/me/zotero/items")
+async def get_my_zotero_items(
+    page: int = 1,
+    limit: int = 30,
+    search: str = "",
+    collection_key: str | None = None,
+    user: dict = Depends(require_current_user),
+):
+    safe_page = max(page, 1)
+    safe_limit = min(max(limit, 1), 100)
+    try:
+        require_zotero_connection(user["id"])
+        items, total = list_zotero_items(
+            user["id"],
+            offset=(safe_page - 1) * safe_limit,
+            limit=safe_limit,
+            search=search,
+            collection_key=collection_key,
+        )
+        return {
+            "items": [public_zotero_item(item) for item in items],
+            "total": total,
+            "page": safe_page,
+            "pages": math.ceil(total / safe_limit) if total else 1,
+        }
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.get("/me/zotero/items/{item_key}")
+async def get_my_zotero_item(item_key: str, user: dict = Depends(require_current_user)):
+    try:
+        item = get_zotero_item(user["id"], item_key)
+        if not item:
+            raise HTTPException(status_code=404, detail="Zotero 条目不存在")
+        return public_zotero_item(item)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.get("/me/zotero/items/{item_key}/analysis")
+async def analyze_my_zotero_item(
+    item_key: str,
+    reanalyze: bool = False,
+    user: dict = Depends(require_current_user),
+):
+    user_id = user["id"]
+
+    async def generate():
+        if not llm.is_configured():
+            yield {"event": "error", "data": "当前 LLM 供应商、模型或 API Key 未配置"}
+            return
+        try:
+            item = await asyncio.to_thread(get_zotero_item, user_id, item_key)
+            if not item:
+                yield {"event": "error", "data": "Zotero 条目不存在"}
+                return
+            if not reanalyze and item.get("llm_response"):
+                normalized = normalize_llm_markdown(item["llm_response"], analysis_mode=True)
+                if normalized != item["llm_response"]:
+                    await asyncio.to_thread(update_zotero_analysis, user_id, item_key, normalized)
+                yield {"data": normalized}
+                yield {"event": "done", "data": ""}
+                return
+
+            yield {"event": "status", "data": "正在读取 Zotero 全文、笔记和批注..."}
+            context, source, warning = await load_zotero_reading_context(user_id, item)
+            if warning:
+                yield {"event": "status", "data": f"{warning}，将基于现有材料继续分析"}
+            yield {"event": "source", "data": source}
+            yield {"event": "status", "data": "正在生成深度阅读报告..."}
+            chunks: list[str] = []
+            async for stream_chunk in llm.get_response_stream_events(
+                context,
+                _analysis_instruction=ZOTERO_DEEP_READING_PROMPT,
+                _usage_context="zotero_analysis_stream",
+            ):
+                if stream_chunk.kind == "reasoning":
+                    yield {"event": "reasoning", "data": stream_chunk.content}
+                    continue
+                chunks.append(stream_chunk.content)
+                yield {"data": stream_chunk.content}
+            normalized = normalize_llm_markdown("".join(chunks), analysis_mode=True)
+            await asyncio.to_thread(update_zotero_analysis, user_id, item_key, normalized)
+            yield {"event": "final", "data": normalized}
+            yield {"event": "done", "data": ""}
+        except (ZoteroError, DatabaseError) as exc:
+            yield {"event": "error", "data": str(exc)}
+        except Exception as exc:
+            logger.exception("Zotero analysis failed for %s/%s", user_id, item_key)
+            yield {"event": "error", "data": f"深度阅读失败：{exc}"}
+
+    return EventSourceResponse(generate())
+
+
+@app.post("/me/zotero/items/{item_key}/chat")
+async def chat_with_my_zotero_item(
+    item_key: str,
+    req: ChatRequest,
+    user: dict = Depends(require_current_user),
+):
+    ensure_llm_configured()
+    user_id = user["id"]
+    try:
+        session_row = assert_zotero_chat_owner(req.session_id, user_id, item_key)
+        session = zotero_chat_sessions.get(req.session_id)
+        is_new_session = session_row is None
+        if not session:
+            session = await build_zotero_chat_runtime(
+                user_id,
+                item_key,
+                req.session_id,
+                session_exists=not is_new_session,
+            )
+            zotero_chat_sessions[req.session_id] = session
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+    except ZoteroError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async def generate():
+        try:
+            if is_new_session:
+                await asyncio.to_thread(
+                    create_zotero_chat_session,
+                    req.session_id,
+                    user_id,
+                    item_key,
+                    req.message[:50],
+                )
+            chunks: list[str] = []
+            async for stream_chunk in session.send_stream_events(
+                req.message,
+                _usage_context="zotero_chat_stream",
+            ):
+                if stream_chunk.kind == "reasoning":
+                    yield {"event": "reasoning", "data": stream_chunk.content}
+                    continue
+                chunks.append(stream_chunk.content)
+                yield {"data": stream_chunk.content}
+            normalized = normalize_llm_markdown("".join(chunks))
+            await asyncio.to_thread(save_zotero_chat_message, req.session_id, "user", req.message)
+            await asyncio.to_thread(save_zotero_chat_message, req.session_id, "assistant", normalized)
+            yield {"event": "final", "data": normalized}
+            yield {"event": "done", "data": ""}
+        except Exception as exc:
+            logger.exception("Zotero chat failed for session %s", req.session_id)
+            yield {"event": "error", "data": str(exc)}
+
+    return EventSourceResponse(generate())
+
+
+@app.get("/me/zotero/items/{item_key}/chat/sessions")
+async def list_my_zotero_chat_sessions(
+    item_key: str,
+    user: dict = Depends(require_current_user),
+):
+    try:
+        return get_zotero_chat_sessions(user["id"], item_key)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.get("/me/zotero/chat/{session_id}/messages")
+async def list_my_zotero_chat_messages(
+    session_id: str,
+    user: dict = Depends(require_current_user),
+):
+    try:
+        session = assert_zotero_chat_owner(session_id, user["id"])
+        if not session:
+            raise HTTPException(status_code=404, detail="Zotero 会话不存在")
+        return get_zotero_chat_messages(session_id)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.delete("/me/zotero/chat/{session_id}")
+async def delete_my_zotero_chat_session(
+    session_id: str,
+    user: dict = Depends(require_current_user),
+):
+    try:
+        session = assert_zotero_chat_owner(session_id, user["id"])
+        if not session:
+            raise HTTPException(status_code=404, detail="Zotero 会话不存在")
+        await asyncio.to_thread(delete_zotero_chat_session, session_id)
+        zotero_chat_sessions.pop(session_id, None)
+        return {"ok": True}
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.post("/me/zotero/items/{item_key}/chat/regenerate")
+async def regenerate_my_zotero_chat(
+    item_key: str,
+    req: ChatRequest,
+    user: dict = Depends(require_current_user),
+):
+    ensure_llm_configured()
+    user_id = user["id"]
+    try:
+        session_row = assert_zotero_chat_owner(req.session_id, user_id, item_key)
+        if not session_row:
+            raise HTTPException(status_code=404, detail="Zotero 会话不存在")
+        session = zotero_chat_sessions.get(req.session_id)
+        if session and len(session.history) >= 2:
+            session.history = session.history[:-2]
+        else:
+            zotero_chat_sessions.pop(req.session_id, None)
+            session = None
+        await asyncio.to_thread(delete_last_zotero_chat_message_pair, req.session_id)
+        if not session:
+            session = await build_zotero_chat_runtime(
+                user_id,
+                item_key,
+                req.session_id,
+                session_exists=True,
+            )
+            zotero_chat_sessions[req.session_id] = session
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+    except ZoteroError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async def generate():
+        try:
+            chunks: list[str] = []
+            async for stream_chunk in session.send_stream_events(
+                req.message,
+                _usage_context="zotero_chat_regenerate_stream",
+            ):
+                if stream_chunk.kind == "reasoning":
+                    yield {"event": "reasoning", "data": stream_chunk.content}
+                    continue
+                chunks.append(stream_chunk.content)
+                yield {"data": stream_chunk.content}
+            normalized = normalize_llm_markdown("".join(chunks))
+            await asyncio.to_thread(save_zotero_chat_message, req.session_id, "user", req.message)
+            await asyncio.to_thread(save_zotero_chat_message, req.session_id, "assistant", normalized)
+            yield {"event": "final", "data": normalized}
+            yield {"event": "done", "data": ""}
+        except Exception as exc:
+            logger.exception("Zotero chat regeneration failed for session %s", req.session_id)
+            yield {"event": "error", "data": str(exc)}
+
+    return EventSourceResponse(generate())
 
 
 @app.get("/me/feishu-webhook")
@@ -2656,6 +3166,16 @@ async def serve_admin_frontend():
 @app.get("/me")
 async def serve_me_frontend():
     return FileResponse(get_frontend_index(), headers=FRONTEND_INDEX_HEADERS)
+
+
+@app.get("/zotero")
+async def serve_zotero_frontend():
+    return FileResponse(get_frontend_index())
+
+
+@app.get("/zotero/items/{item_key}")
+async def serve_zotero_item_frontend(item_key: str):
+    return FileResponse(get_frontend_index())
 
 
 @app.get("/hf-daily")

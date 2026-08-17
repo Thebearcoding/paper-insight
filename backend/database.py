@@ -2911,6 +2911,678 @@ def delete_last_chat_message_pair(session_id: str):
     _run_with_retry(operation, f"delete_last_chat_message_pair:{session_id}")
 
 
+def _zotero_encryption_key() -> str:
+    key = (settings.zotero.credential_encryption_key or "").strip()
+    if not key:
+        raise DatabaseError("zotero.credential_encryption_key is not configured")
+    return key
+
+
+def _normalize_zotero_connection(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    normalized = dict(row)
+    normalized["user_id"] = str(normalized["user_id"])
+    if normalized.get("zotero_user_id") is not None:
+        normalized["zotero_user_id"] = int(normalized["zotero_user_id"])
+    return normalized
+
+
+def get_zotero_connection(user_id: str, include_api_key: bool = False) -> dict | None:
+    if not DATABASE_URL:
+        return None
+
+    def operation() -> dict | None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                if include_api_key:
+                    cur.execute(
+                        """
+                        SELECT user_id, zotero_user_id, username, display_name,
+                               can_read, can_write, library_version, sync_status,
+                               last_sync_at, last_sync_error, created_at, updated_at,
+                               pgp_sym_decrypt(encrypted_api_key, %s)::text AS api_key
+                        FROM zotero_connections
+                        WHERE user_id = %s
+                        """,
+                        (_zotero_encryption_key(), user_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT user_id, zotero_user_id, username, display_name,
+                               can_read, can_write, library_version, sync_status,
+                               last_sync_at, last_sync_error, created_at, updated_at
+                        FROM zotero_connections
+                        WHERE user_id = %s
+                        """,
+                        (user_id,),
+                    )
+                return _normalize_zotero_connection(cur.fetchone())
+
+    return _run_with_retry(operation, f"get_zotero_connection:{user_id}")
+
+
+def save_zotero_connection(user_id: str, api_key: str, key_metadata: dict) -> dict:
+    if not DATABASE_URL:
+        raise DatabaseError("DATABASE_URL is not configured")
+
+    def operation() -> dict:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT zotero_user_id FROM zotero_connections WHERE user_id = %s FOR UPDATE",
+                    (user_id,),
+                )
+                existing = cur.fetchone()
+                if existing and int(existing["zotero_user_id"]) != int(key_metadata["zotero_user_id"]):
+                    cur.execute("DELETE FROM zotero_items WHERE user_id = %s", (user_id,))
+                    cur.execute("DELETE FROM zotero_collections WHERE user_id = %s", (user_id,))
+                cur.execute(
+                    """
+                    INSERT INTO zotero_connections (
+                        user_id, encrypted_api_key, zotero_user_id, username,
+                        display_name, can_read, can_write, library_version,
+                        sync_status, last_sync_error, updated_at
+                    )
+                    VALUES (
+                        %s, pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256'), %s, %s,
+                        %s, %s, %s, 0, 'idle', NULL, NOW()
+                    )
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        encrypted_api_key = EXCLUDED.encrypted_api_key,
+                        username = EXCLUDED.username,
+                        display_name = EXCLUDED.display_name,
+                        can_read = EXCLUDED.can_read,
+                        can_write = EXCLUDED.can_write,
+                        library_version = CASE
+                            WHEN zotero_connections.zotero_user_id = EXCLUDED.zotero_user_id
+                            THEN zotero_connections.library_version
+                            ELSE 0
+                        END,
+                        zotero_user_id = EXCLUDED.zotero_user_id,
+                        sync_status = 'idle',
+                        last_sync_error = NULL,
+                        updated_at = NOW()
+                    RETURNING user_id, zotero_user_id, username, display_name,
+                              can_read, can_write, library_version, sync_status,
+                              last_sync_at, last_sync_error, created_at, updated_at
+                    """,
+                    (
+                        user_id,
+                        api_key,
+                        _zotero_encryption_key(),
+                        key_metadata["zotero_user_id"],
+                        key_metadata.get("username"),
+                        key_metadata.get("display_name"),
+                        bool(key_metadata.get("can_read")),
+                        bool(key_metadata.get("can_write")),
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return _normalize_zotero_connection(row) or {}
+
+    return _run_with_retry(operation, f"save_zotero_connection:{user_id}")
+
+
+def delete_zotero_connection(user_id: str) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM zotero_connections WHERE user_id = %s", (user_id,))
+                cur.execute("DELETE FROM zotero_collections WHERE user_id = %s", (user_id,))
+                cur.execute("DELETE FROM zotero_items WHERE user_id = %s", (user_id,))
+            conn.commit()
+
+    _run_with_retry(operation, f"delete_zotero_connection:{user_id}")
+
+
+def set_zotero_sync_status(user_id: str, status: str, error: str | None = None) -> None:
+    if not DATABASE_URL:
+        return
+    if status not in {"idle", "running", "error"}:
+        raise ValueError("unsupported Zotero sync status")
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE zotero_connections
+                    SET sync_status = %s,
+                        last_sync_error = %s,
+                        updated_at = NOW()
+                    WHERE user_id = %s
+                    """,
+                    (status, error, user_id),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"set_zotero_sync_status:{user_id}:{status}")
+
+
+def reset_running_zotero_syncs() -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE zotero_connections
+                    SET sync_status = 'error',
+                        last_sync_error = '服务重启，中断了上一次同步，请重新同步',
+                        updated_at = NOW()
+                    WHERE sync_status = 'running'
+                    """
+                )
+            conn.commit()
+
+    _run_with_retry(operation, "reset_running_zotero_syncs")
+
+
+def apply_zotero_sync(user_id: str, payload: dict) -> dict:
+    if not DATABASE_URL:
+        raise DatabaseError("DATABASE_URL is not configured")
+    collections = payload.get("collections") or []
+    items = payload.get("items") or []
+    deleted_collection_keys = payload.get("deleted_collection_keys") or []
+    deleted_item_keys = payload.get("deleted_item_keys") or []
+    library_version = int(payload.get("library_version") or 0)
+    zotero_user_id = int(payload.get("zotero_user_id") or 0)
+
+    def operation() -> dict:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT zotero_user_id FROM zotero_connections WHERE user_id = %s FOR UPDATE",
+                    (user_id,),
+                )
+                connection = cur.fetchone()
+                if not connection:
+                    raise DatabaseError("Zotero connection no longer exists")
+                if zotero_user_id and int(connection["zotero_user_id"]) != zotero_user_id:
+                    raise DatabaseError("Zotero connection changed while sync was running")
+                for collection in collections:
+                    cur.execute(
+                        """
+                        INSERT INTO zotero_collections (
+                            user_id, collection_key, collection_version, name,
+                            parent_collection, raw, updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (user_id, collection_key) DO UPDATE SET
+                            collection_version = EXCLUDED.collection_version,
+                            name = EXCLUDED.name,
+                            parent_collection = EXCLUDED.parent_collection,
+                            raw = EXCLUDED.raw,
+                            updated_at = NOW()
+                        """,
+                        (
+                            user_id,
+                            collection["collection_key"],
+                            collection["collection_version"],
+                            collection["name"],
+                            collection.get("parent_collection"),
+                            Jsonb(collection.get("raw") or {}),
+                        ),
+                    )
+
+                changed_parent_keys: set[str] = set()
+                for item in items:
+                    if item.get("parent_item_key"):
+                        changed_parent_keys.add(str(item["parent_item_key"]))
+                    cur.execute(
+                        """
+                        INSERT INTO zotero_items (
+                            user_id, item_key, item_version, item_type, parent_item_key,
+                            title, abstract_note, publication_title, item_date, doi, url,
+                            creators, tags, collections, content_type, link_mode, filename,
+                            note, annotation_text, annotation_comment, raw, updated_at
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+                        )
+                        ON CONFLICT (user_id, item_key) DO UPDATE SET
+                            item_version = EXCLUDED.item_version,
+                            item_type = EXCLUDED.item_type,
+                            parent_item_key = EXCLUDED.parent_item_key,
+                            title = EXCLUDED.title,
+                            abstract_note = EXCLUDED.abstract_note,
+                            publication_title = EXCLUDED.publication_title,
+                            item_date = EXCLUDED.item_date,
+                            doi = EXCLUDED.doi,
+                            url = EXCLUDED.url,
+                            creators = EXCLUDED.creators,
+                            tags = EXCLUDED.tags,
+                            collections = EXCLUDED.collections,
+                            content_type = EXCLUDED.content_type,
+                            link_mode = EXCLUDED.link_mode,
+                            filename = EXCLUDED.filename,
+                            note = EXCLUDED.note,
+                            annotation_text = EXCLUDED.annotation_text,
+                            annotation_comment = EXCLUDED.annotation_comment,
+                            raw = EXCLUDED.raw,
+                            llm_response = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.llm_response
+                                ELSE NULL
+                            END,
+                            analyzed_at = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analyzed_at
+                                ELSE NULL
+                            END,
+                            updated_at = NOW()
+                        """,
+                        (
+                            user_id,
+                            item["item_key"],
+                            item["item_version"],
+                            item["item_type"],
+                            item.get("parent_item_key"),
+                            item.get("title"),
+                            item.get("abstract_note"),
+                            item.get("publication_title"),
+                            item.get("item_date"),
+                            item.get("doi"),
+                            item.get("url"),
+                            Jsonb(item.get("creators") or []),
+                            Jsonb(item.get("tags") or []),
+                            Jsonb(item.get("collections") or []),
+                            item.get("content_type"),
+                            item.get("link_mode"),
+                            item.get("filename"),
+                            item.get("note"),
+                            item.get("annotation_text"),
+                            item.get("annotation_comment"),
+                            Jsonb(item.get("raw") or {}),
+                        ),
+                    )
+
+                if changed_parent_keys:
+                    cur.execute(
+                        """
+                        WITH RECURSIVE ancestors AS (
+                            SELECT item_key, parent_item_key
+                            FROM zotero_items
+                            WHERE user_id = %s AND item_key = ANY(%s)
+                            UNION
+                            SELECT parent.item_key, parent.parent_item_key
+                            FROM zotero_items parent
+                            JOIN ancestors child
+                              ON child.parent_item_key = parent.item_key
+                            WHERE parent.user_id = %s
+                        )
+                        UPDATE zotero_items
+                        SET llm_response = NULL, analyzed_at = NULL
+                        WHERE user_id = %s
+                          AND item_key IN (SELECT item_key FROM ancestors)
+                        """,
+                        (user_id, list(changed_parent_keys), user_id, user_id),
+                    )
+                if deleted_collection_keys:
+                    cur.execute(
+                        """
+                        DELETE FROM zotero_collections
+                        WHERE user_id = %s AND collection_key = ANY(%s)
+                        """,
+                        (user_id, list(deleted_collection_keys)),
+                    )
+                if deleted_item_keys:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT parent_item_key
+                        FROM zotero_items
+                        WHERE user_id = %s
+                          AND item_key = ANY(%s)
+                          AND parent_item_key IS NOT NULL
+                        """,
+                        (user_id, list(deleted_item_keys)),
+                    )
+                    deleted_parent_keys = [
+                        row["parent_item_key"] for row in cur.fetchall() if row.get("parent_item_key")
+                    ]
+                    if deleted_parent_keys:
+                        cur.execute(
+                            """
+                            WITH RECURSIVE ancestors AS (
+                                SELECT item_key, parent_item_key
+                                FROM zotero_items
+                                WHERE user_id = %s AND item_key = ANY(%s)
+                                UNION
+                                SELECT parent.item_key, parent.parent_item_key
+                                FROM zotero_items parent
+                                JOIN ancestors child
+                                  ON child.parent_item_key = parent.item_key
+                                WHERE parent.user_id = %s
+                            )
+                            UPDATE zotero_items
+                            SET llm_response = NULL, analyzed_at = NULL
+                            WHERE user_id = %s
+                              AND item_key IN (SELECT item_key FROM ancestors)
+                            """,
+                            (user_id, deleted_parent_keys, user_id, user_id),
+                        )
+                    cur.execute(
+                        """
+                        DELETE FROM zotero_items
+                        WHERE user_id = %s AND item_key = ANY(%s)
+                        """,
+                        (user_id, list(deleted_item_keys)),
+                    )
+                cur.execute(
+                    """
+                    UPDATE zotero_connections
+                    SET library_version = GREATEST(library_version, %s),
+                        sync_status = 'idle',
+                        last_sync_at = NOW(),
+                        last_sync_error = NULL,
+                        updated_at = NOW()
+                    WHERE user_id = %s
+                    """,
+                    (library_version, user_id),
+                )
+            conn.commit()
+        return {
+            "library_version": library_version,
+            "collections_changed": len(collections),
+            "items_changed": len(items),
+            "collections_deleted": len(deleted_collection_keys),
+            "items_deleted": len(deleted_item_keys),
+        }
+
+    return _run_with_retry(operation, f"apply_zotero_sync:{user_id}")
+
+
+def list_zotero_collections(user_id: str) -> list[dict]:
+    if not DATABASE_URL:
+        return []
+
+    def operation() -> list[dict]:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT collection_key, collection_version, name, parent_collection,
+                           created_at, updated_at
+                    FROM zotero_collections
+                    WHERE user_id = %s
+                    ORDER BY lower(name), collection_key
+                    """,
+                    (user_id,),
+                )
+                return cur.fetchall()
+
+    return _run_with_retry(operation, f"list_zotero_collections:{user_id}")
+
+
+def list_zotero_items(
+    user_id: str,
+    *,
+    offset: int = 0,
+    limit: int = 30,
+    search: str = "",
+    collection_key: str | None = None,
+) -> tuple[list[dict], int]:
+    if not DATABASE_URL:
+        return [], 0
+
+    def operation() -> tuple[list[dict], int]:
+        filters = [
+            "user_id = %s",
+            "parent_item_key IS NULL",
+            "item_type NOT IN ('attachment', 'note', 'annotation')",
+        ]
+        params: list[object] = [user_id]
+        normalized_search = search.strip()
+        if normalized_search:
+            filters.append(
+                "(title ILIKE %s OR abstract_note ILIKE %s OR doi ILIKE %s OR publication_title ILIKE %s)"
+            )
+            pattern = f"%{normalized_search}%"
+            params.extend([pattern, pattern, pattern, pattern])
+        if collection_key:
+            filters.append("collections @> %s")
+            params.append(Jsonb([collection_key]))
+        where_sql = " AND ".join(filters)
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) AS total FROM zotero_items WHERE {where_sql}", params)
+                total = int((cur.fetchone() or {}).get("total") or 0)
+                cur.execute(
+                    f"""
+                    SELECT item_key, item_version, item_type, title, abstract_note,
+                           publication_title, item_date, doi, url, creators, tags,
+                           collections, llm_response IS NOT NULL AS analyzed,
+                           analyzed_at, updated_at
+                    FROM zotero_items
+                    WHERE {where_sql}
+                    ORDER BY updated_at DESC, lower(COALESCE(title, '')), item_key
+                    LIMIT %s OFFSET %s
+                    """,
+                    [*params, limit, offset],
+                )
+                return cur.fetchall(), total
+
+    return _run_with_retry(operation, f"list_zotero_items:{user_id}")
+
+
+def get_zotero_item(user_id: str, item_key: str) -> dict | None:
+    if not DATABASE_URL:
+        return None
+
+    def operation() -> dict | None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM zotero_items WHERE user_id = %s AND item_key = %s",
+                    (user_id, item_key),
+                )
+                item = cur.fetchone()
+                if not item:
+                    return None
+                cur.execute(
+                    """
+                    WITH direct_children AS (
+                        SELECT item_key
+                        FROM zotero_items
+                        WHERE user_id = %s AND parent_item_key = %s
+                    )
+                    SELECT child.*
+                    FROM zotero_items child
+                    WHERE child.user_id = %s
+                      AND (
+                          child.parent_item_key = %s
+                          OR child.parent_item_key IN (SELECT item_key FROM direct_children)
+                      )
+                    ORDER BY item_type, created_at, item_key
+                    """,
+                    (user_id, item_key, user_id, item_key),
+                )
+                result = dict(item)
+                result["children"] = cur.fetchall()
+                return result
+
+    return _run_with_retry(operation, f"get_zotero_item:{user_id}:{item_key}")
+
+
+def update_zotero_analysis(user_id: str, item_key: str, response: str) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE zotero_items
+                    SET llm_response = %s, analyzed_at = NOW(), updated_at = NOW()
+                    WHERE user_id = %s AND item_key = %s
+                    """,
+                    (response, user_id, item_key),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"update_zotero_analysis:{user_id}:{item_key}")
+
+
+def get_zotero_chat_sessions(user_id: str, item_key: str) -> list[dict]:
+    if not DATABASE_URL:
+        return []
+
+    def operation() -> list[dict]:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, item_key, title, created_at
+                    FROM zotero_chat_sessions
+                    WHERE user_id = %s AND item_key = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (user_id, item_key),
+                )
+                rows = cur.fetchall()
+                for row in rows:
+                    row["user_id"] = str(row["user_id"])
+                return rows
+
+    return _run_with_retry(operation, f"get_zotero_chat_sessions:{user_id}:{item_key}")
+
+
+def get_zotero_chat_session_ids_for_user(user_id: str) -> list[str]:
+    if not DATABASE_URL:
+        return []
+
+    def operation() -> list[str]:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM zotero_chat_sessions WHERE user_id = %s",
+                    (user_id,),
+                )
+                return [str(row["id"]) for row in cur.fetchall()]
+
+    return _run_with_retry(operation, f"get_zotero_chat_session_ids_for_user:{user_id}")
+
+
+def get_zotero_chat_session(session_id: str) -> dict | None:
+    if not DATABASE_URL:
+        return None
+
+    def operation() -> dict | None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM zotero_chat_sessions WHERE id = %s", (session_id,))
+                row = cur.fetchone()
+                if row:
+                    row["user_id"] = str(row["user_id"])
+                return row
+
+    return _run_with_retry(operation, f"get_zotero_chat_session:{session_id}")
+
+
+def create_zotero_chat_session(session_id: str, user_id: str, item_key: str, title: str) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO zotero_chat_sessions (id, user_id, item_key, title)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    (session_id, user_id, item_key, title),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"create_zotero_chat_session:{session_id}")
+
+
+def get_zotero_chat_messages(session_id: str) -> list[dict]:
+    if not DATABASE_URL:
+        return []
+
+    def operation() -> list[dict]:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content, created_at
+                    FROM zotero_chat_messages
+                    WHERE session_id = %s
+                    ORDER BY created_at, id
+                    """,
+                    (session_id,),
+                )
+                return cur.fetchall()
+
+    return _run_with_retry(operation, f"get_zotero_chat_messages:{session_id}")
+
+
+def save_zotero_chat_message(session_id: str, role: str, content: str) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO zotero_chat_messages (session_id, role, content) VALUES (%s, %s, %s)",
+                    (session_id, role, content),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"save_zotero_chat_message:{session_id}:{role}")
+
+
+def delete_zotero_chat_session(session_id: str) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM zotero_chat_sessions WHERE id = %s", (session_id,))
+            conn.commit()
+
+    _run_with_retry(operation, f"delete_zotero_chat_session:{session_id}")
+
+
+def delete_last_zotero_chat_message_pair(session_id: str) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM zotero_chat_messages
+                    WHERE id IN (
+                        SELECT id FROM zotero_chat_messages
+                        WHERE session_id = %s
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 2
+                    )
+                    """,
+                    (session_id,),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"delete_last_zotero_chat_message_pair:{session_id}")
+
+
 def _build_cache_key(
     venue_prefix: str | None,
     offset: int,

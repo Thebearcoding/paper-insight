@@ -104,6 +104,70 @@ export interface ChatSessionSummary {
   created_at: string;
 }
 
+export interface ZoteroConnection {
+  configured: boolean;
+  credential_encryption_configured: boolean;
+  zotero_user_id?: number;
+  username?: string | null;
+  display_name?: string | null;
+  can_read?: boolean;
+  can_write?: boolean;
+  library_version?: number;
+  sync_status: 'idle' | 'running' | 'error';
+  last_sync_at?: string | null;
+  last_sync_error?: string | null;
+}
+
+export interface ZoteroCollection {
+  collection_key: string;
+  collection_version: number;
+  name: string;
+  parent_collection?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ZoteroCreator {
+  creatorType?: string;
+  firstName?: string;
+  lastName?: string;
+  name?: string;
+}
+
+export interface ZoteroItem {
+  item_key: string;
+  item_version: number;
+  item_type: string;
+  parent_item_key?: string | null;
+  title?: string | null;
+  abstract_note?: string | null;
+  publication_title?: string | null;
+  item_date?: string | null;
+  doi?: string | null;
+  url?: string | null;
+  creators: ZoteroCreator[];
+  tags: string[];
+  collections: string[];
+  content_type?: string | null;
+  link_mode?: string | null;
+  filename?: string | null;
+  note?: string | null;
+  annotation_text?: string | null;
+  annotation_comment?: string | null;
+  llm_response?: string | null;
+  analyzed?: boolean;
+  analyzed_at?: string | null;
+  updated_at?: string;
+  children?: ZoteroItem[];
+}
+
+export interface ZoteroItemListResponse {
+  items: ZoteroItem[];
+  total: number;
+  page: number;
+  pages: number;
+}
+
 export interface OnlineCount {
   count: number;
   authenticated_count?: number;

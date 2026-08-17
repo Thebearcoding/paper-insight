@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   ArrowLeft,
   History,
@@ -14,7 +14,17 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { deleteChatSession, fetchChatMessages, fetchChatSessions, paperApiPath, streamSse } from '@/lib/api';
+import {
+  deleteChatSession,
+  deleteZoteroChatSession,
+  fetchChatMessages,
+  fetchChatSessions,
+  fetchZoteroChatMessages,
+  fetchZoteroChatSessions,
+  paperApiPath,
+  streamSse,
+  zoteroItemApiPath,
+} from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import {
   chatWidgetReducer,
@@ -28,7 +38,8 @@ import { RichContent } from '@/components/rich-content';
 import type { ChatMessage, ChatSessionSummary } from '@/types';
 
 interface ChatPanelProps {
-  paperId: string;
+  paperId?: string;
+  zoteroItemKey?: string;
 }
 
 interface LocalChatMessage {
@@ -46,7 +57,9 @@ function toLocalMessages(messages: ChatMessage[]): LocalChatMessage[] {
   }));
 }
 
-export function ChatPanel({ paperId }: ChatPanelProps) {
+export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
+  const resourceId = zoteroItemKey ?? paperId ?? '';
+  const isZotero = Boolean(zoteroItemKey);
   const { user, isLoading: isAuthLoading } = useAuth();
   const [widgetState, dispatchWidget] = useReducer(chatWidgetReducer, INITIAL_CHAT_WIDGET_STATE);
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
@@ -68,6 +81,24 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
   const focusComposer = () => {
     window.requestAnimationFrame(() => textareaRef.current?.focus());
   };
+  const loadSessionsForResource = useCallback(
+    () => isZotero ? fetchZoteroChatSessions(resourceId) : fetchChatSessions(resourceId),
+    [isZotero, resourceId],
+  );
+  const loadMessagesForSession = useCallback(
+    (sessionId: string) => isZotero ? fetchZoteroChatMessages(sessionId) : fetchChatMessages(sessionId),
+    [isZotero],
+  );
+  const removeChatSession = useCallback(
+    (sessionId: string) => isZotero ? deleteZoteroChatSession(sessionId) : deleteChatSession(sessionId),
+    [isZotero],
+  );
+  const chatPath = useCallback(
+    (suffix = '') => isZotero
+      ? zoteroItemApiPath(resourceId, `/chat${suffix}`)
+      : paperApiPath(resourceId, `/chat${suffix}`),
+    [isZotero, resourceId],
+  );
 
   useEffect(() => {
     const viewport = messagesViewportRef.current;
@@ -97,7 +128,7 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
       setIsLoadingSessions(true);
       setSessionsError(null);
       try {
-        const nextSessions = await fetchChatSessions(paperId);
+        const nextSessions = await loadSessionsForResource();
         if (active) {
           setSessions(nextSessions);
         }
@@ -117,7 +148,7 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
     return () => {
       active = false;
     };
-  }, [isAuthLoading, paperId, user]);
+  }, [isAuthLoading, loadSessionsForResource, resourceId, user]);
 
   const refreshSessions = async () => {
     if (isAuthLoading || !user) {
@@ -127,7 +158,7 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
     setIsLoadingSessions(true);
     setSessionsError(null);
     try {
-      const nextSessions = await fetchChatSessions(paperId);
+      const nextSessions = await loadSessionsForResource();
       setSessions(nextSessions);
     } catch {
       setSessions([]);
@@ -163,7 +194,7 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
     dispatchWidget({ type: 'show-chat' });
     focusComposer();
     try {
-      const nextMessages = await fetchChatMessages(sessionId);
+      const nextMessages = await loadMessagesForSession(sessionId);
       if (sessionRequestIdRef.current !== requestId) {
         return;
       }
@@ -189,7 +220,7 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
     }
     setSessionsError(null);
     try {
-      await deleteChatSession(sessionId);
+      await removeChatSession(sessionId);
     } catch {
       setSessionsError('删除会话失败，请稍后重试。');
       return;
@@ -290,7 +321,7 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
     setStreamingAssistantId(assistantId);
 
     try {
-      await sendStream(paperApiPath(paperId, '/chat'), {
+      await sendStream(chatPath(), {
         message: trimmed,
         session_id: sessionId,
       }, assistantId);
@@ -338,7 +369,7 @@ export function ChatPanel({ paperId }: ChatPanelProps) {
     setStreamingAssistantId(assistantId);
 
     try {
-      await sendStream(paperApiPath(paperId, '/chat/regenerate'), {
+      await sendStream(chatPath('/regenerate'), {
         message: lastUserMessage,
         session_id: currentSessionId,
       }, assistantId);

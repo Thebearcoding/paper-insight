@@ -153,6 +153,11 @@ def _pop_usage_context(params: dict, default_request_type: str) -> str:
     return str(request_type or default_request_type)
 
 
+def _pop_analysis_instruction(params: dict) -> str:
+    instruction = params.pop("_analysis_instruction", None)
+    return str(instruction or PAPER_ANALYSIS_PROMPT)
+
+
 def _stream_params_with_usage(params: dict) -> dict:
     next_params = dict(params)
     stream_options = next_params.get("stream_options")
@@ -265,6 +270,7 @@ class BaseLLM:
     async def get_response(self, prompt: str, **kwargs) -> str:
         params = dict(kwargs)
         request_type = _pop_usage_context(params, "analysis")
+        analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
 
         async def _call():
@@ -272,7 +278,7 @@ class BaseLLM:
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant for academic research."},
-                    {"role": "user", "content": prompt + "\n\n" + PAPER_ANALYSIS_PROMPT}
+                    {"role": "user", "content": prompt + "\n\n" + analysis_instruction}
                 ],
                 **params,
             )
@@ -290,6 +296,7 @@ class BaseLLM:
     async def get_response_stream_events(self, prompt: str, **kwargs):
         params = dict(kwargs)
         request_type = _pop_usage_context(params, "analysis_stream")
+        analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
         response = await _create_streaming_completion(
             self.client,
@@ -298,7 +305,7 @@ class BaseLLM:
                 "stream": True,
                 "messages": [
                     {"role": "system", "content": "You are a helpful assistant for academic research."},
-                    {"role": "user", "content": prompt + "\n\n" + PAPER_ANALYSIS_PROMPT}
+                    {"role": "user", "content": prompt + "\n\n" + analysis_instruction}
                 ],
                 **params,
             },
@@ -425,6 +432,7 @@ class ManagedLLM:
         client = self._client_for_config(config)
         params = self._parameters(config, kwargs)
         request_type = _pop_usage_context(params, "analysis")
+        analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
 
         async def _call():
@@ -432,7 +440,7 @@ class ManagedLLM:
                 model=config["model_name"],
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant for academic research."},
-                    {"role": "user", "content": prompt + "\n\n" + PAPER_ANALYSIS_PROMPT},
+                    {"role": "user", "content": prompt + "\n\n" + analysis_instruction},
                 ],
                 **params,
             )
@@ -453,6 +461,7 @@ class ManagedLLM:
         client = self._client_for_config(config)
         params = self._parameters(config, kwargs)
         request_type = _pop_usage_context(params, "analysis_stream")
+        analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
         response = await _create_streaming_completion(
             client,
@@ -461,7 +470,7 @@ class ManagedLLM:
                 "stream": True,
                 "messages": [
                     {"role": "system", "content": "You are a helpful assistant for academic research."},
-                    {"role": "user", "content": prompt + "\n\n" + PAPER_ANALYSIS_PROMPT},
+                    {"role": "user", "content": prompt + "\n\n" + analysis_instruction},
                 ],
                 **params,
             },

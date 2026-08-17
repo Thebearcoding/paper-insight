@@ -1,0 +1,17 @@
+services:
+  postgres:
+    mem_limit: 768m
+    cpus: 0.75
+
+  app:
+    mem_limit: 2g
+    cpus: 1.5
+    stop_grace_period: 30s
+    networks:
+      - default
+      - sub2api
+
+networks:
+  sub2api:
+    external: true
+    name: ${SUB2API_DOCKER_NETWORK:-sub2api-deploy_sub2api-network}

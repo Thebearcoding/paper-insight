@@ -27,6 +27,15 @@ llm:
 
 paths:
   paper_content_cache_dir: data/paper_cache
+  zotero_content_cache_dir: data/zotero_cache
+
+zotero:
+  # Required before a user can connect Zotero. Generate with:
+  # openssl rand -hex 32
+  credential_encryption_key:
+  api_base_url: https://api.zotero.org
+  request_timeout_seconds: 30
+  max_attachment_mb: 50
 
 auth:
   require_email_verification: false

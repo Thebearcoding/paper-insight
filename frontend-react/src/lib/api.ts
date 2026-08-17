@@ -34,6 +34,10 @@ import type {
   HfDailySyncResponse,
   SearchFilters,
   SortDirection,
+  ZoteroCollection,
+  ZoteroConnection,
+  ZoteroItem,
+  ZoteroItemListResponse,
 } from '@/types';
 
 const DEV_API_BASE =
@@ -49,6 +53,10 @@ export function apiUrl(path: string): string {
 
 export function paperApiPath(paperId: string, suffix = ''): string {
   return `/paper/${encodeURIComponent(paperId)}${suffix}`;
+}
+
+export function zoteroItemApiPath(itemKey: string, suffix = ''): string {
+  return `/me/zotero/items/${encodeURIComponent(itemKey)}${suffix}`;
 }
 
 function paperMarkApiPath(paperId: string): string {
@@ -213,6 +221,62 @@ export async function fetchChatMessages(sessionId: string): Promise<ChatMessage[
 
 export async function deleteChatSession(sessionId: string): Promise<void> {
   await apiFetch<{ ok: boolean }>(`/chat/${sessionId}`, { method: 'DELETE' });
+}
+
+export async function fetchZoteroConnection(): Promise<ZoteroConnection> {
+  return apiFetch<ZoteroConnection>('/me/zotero/connection');
+}
+
+export async function saveZoteroConnection(apiKey: string): Promise<ZoteroConnection> {
+  return apiFetch<ZoteroConnection>('/me/zotero/connection', {
+    method: 'PUT',
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
+export async function deleteZoteroConnection(): Promise<void> {
+  await apiFetch<{ ok: boolean }>('/me/zotero/connection', { method: 'DELETE' });
+}
+
+export async function startZoteroSync(): Promise<{ accepted: boolean; sync_status: string }> {
+  return apiFetch('/me/zotero/sync', { method: 'POST' });
+}
+
+export async function fetchZoteroCollections(): Promise<ZoteroCollection[]> {
+  const payload = await apiFetch<{ collections: ZoteroCollection[] }>('/me/zotero/collections');
+  return payload.collections;
+}
+
+export async function fetchZoteroItems(
+  page = 1,
+  search = '',
+  collectionKey?: string | null,
+  limit = 30,
+): Promise<ZoteroItemListResponse> {
+  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+  if (search.trim()) {
+    params.set('search', search.trim());
+  }
+  if (collectionKey) {
+    params.set('collection_key', collectionKey);
+  }
+  return apiFetch<ZoteroItemListResponse>(`/me/zotero/items?${params.toString()}`);
+}
+
+export async function fetchZoteroItem(itemKey: string): Promise<ZoteroItem> {
+  return apiFetch<ZoteroItem>(zoteroItemApiPath(itemKey));
+}
+
+export async function fetchZoteroChatSessions(itemKey: string): Promise<ChatSessionSummary[]> {
+  return apiFetch<ChatSessionSummary[]>(zoteroItemApiPath(itemKey, '/chat/sessions'));
+}
+
+export async function fetchZoteroChatMessages(sessionId: string): Promise<ChatMessage[]> {
+  return apiFetch<ChatMessage[]>(`/me/zotero/chat/${sessionId}/messages`);
+}
+
+export async function deleteZoteroChatSession(sessionId: string): Promise<void> {
+  await apiFetch<{ ok: boolean }>(`/me/zotero/chat/${sessionId}`, { method: 'DELETE' });
 }
 
 export async function fetchOnlineCount(): Promise<number> {
