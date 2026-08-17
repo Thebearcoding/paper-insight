@@ -17,6 +17,7 @@ services:
       retries: 10
 
   app:
+    image: ${PAPER_INSIGHT_IMAGE:-paper-insight-app}
     build:
       context: .
     restart: unless-stopped
