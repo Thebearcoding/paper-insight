@@ -10,8 +10,26 @@ database:
   # Docker Compose app container example:
   # url: postgresql://paper:change-me@postgres:5432/paper_online
 
+typesense:
+  # Docker Compose overrides enabled/host/api_key with environment variables.
+  enabled: false
+  protocol: http
+  host: 127.0.0.1
+  port: 8108
+  api_key:
+  collection_alias: papers
+  # Built-in multilingual model for Chinese queries over English papers.
+  embedding_model: ts/multilingual-e5-small
+  semantic_search_enabled: true
+  # 0 = keyword only, 1 = vector only.
+  vector_alpha: 0.4
+  vector_k: 500
+  vector_distance_threshold: 0.45
+  timeout_seconds: 10
+
 docker:
   postgres_port: 5432
+  typesense_port: 8108
 
 admin:
   email: admin@example.com

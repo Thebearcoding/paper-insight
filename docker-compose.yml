@@ -16,6 +16,17 @@ services:
       timeout: 5s
       retries: 10
 
+  typesense:
+    image: typesense/typesense:30.2
+    restart: unless-stopped
+    command:
+      - "--data-dir=/data"
+      - "--api-key=${TYPESENSE_API_KEY:?TYPESENSE_API_KEY is required}"
+    ports:
+      - "127.0.0.1:${TYPESENSE_HTTP_PORT:-8108}:8108"
+    volumes:
+      - typesense_data:/data
+
   app:
     image: ${PAPER_INSIGHT_IMAGE:-paper-insight-app}
     build:
@@ -24,6 +35,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      typesense:
+        condition: service_started
+    environment:
+      TYPESENSE_ENABLED: "true"
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: "8108"
+      TYPESENSE_API_KEY: ${TYPESENSE_API_KEY:?TYPESENSE_API_KEY is required}
     ports:
       - "127.0.0.1:${PORT:-8000}:8000"
     volumes:
@@ -39,3 +57,4 @@ services:
 volumes:
   postgres_data:
   app_data:
+  typesense_data:

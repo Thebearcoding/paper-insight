@@ -21,7 +21,7 @@ Paper Insight 当前使用：
 - 数据库：PostgreSQL 16
 - 数据访问：`psycopg`
 - 配置入口：`config.yaml`
-- 搜索：PostgreSQL Full Text Search + GIN index
+- 搜索：Typesense 关键词/向量混合检索，PostgreSQL Full Text Search 作为回退
 - 论文正文：缓存到 `data/paper_cache/`，不写入主业务表
 - 账号：GitHub OAuth 注册，旧邮箱密码账号可继续登录
 
@@ -304,6 +304,21 @@ cp config.yaml.example config.yaml
 uv run python scripts/docker_compose.py up --build -d
 ```
 
+`scripts/docker_compose.py` 会在首次运行时生成随机 Typesense API Key，保存到权限为
+`0600` 的 `.docker/compose.env`，后续更新会继续复用同一个 key。
+
+Compose 会同时启动 PostgreSQL、Typesense 和应用。应用首次启动时会在后台建立
+Typesense 索引；在索引完成前或 Typesense 暂时不可用时，搜索自动回退到 PostgreSQL。
+默认使用 `ts/multilingual-e5-small`，首次建索引会下载模型文件。
+
+需要手动完整重建搜索索引时执行：
+
+```bash
+docker compose exec app python /app/scripts/reindex_typesense.py
+```
+
+重建过程先写入新的物理 collection，完成后原子切换 `papers` alias，搜索不需要停机。
+
 如果只想构建单个应用镜像：
 
 ```bash
@@ -343,8 +358,9 @@ curl -sS "https://paper.athebear.me/conference/iclr_2026/papers?limit=1"
 - Caddy 对外监听 `80/443`
 - Docker app 只绑定 `127.0.0.1:8000->8000`
 - Docker Postgres 只绑定到 `127.0.0.1` 上配置的数据库端口
+- Docker Typesense 只绑定 `127.0.0.1:8108->8108`
 
-不要把应用端口或数据库端口暴露到公网。
+不要把应用端口、数据库端口或 Typesense 的 `8108` 端口暴露到公网。
 
 ## 项目结构
 

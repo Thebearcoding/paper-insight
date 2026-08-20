@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import secrets
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +41,15 @@ def write_compose_env(config: dict) -> None:
     server_port = str((config.get("server") or {}).get("port") or 8000)
     docker_config = config.get("docker") or {}
     postgres_port = str(docker_config.get("postgres_port") or 5432)
+    typesense_port = str(docker_config.get("typesense_port") or 8108)
+    configured_typesense_key = str((config.get("typesense") or {}).get("api_key") or "").strip()
+    existing_typesense_key = ""
+    if generated_env_path.exists():
+        for line in generated_env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("TYPESENSE_API_KEY="):
+                existing_typesense_key = line.split("=", 1)[1].strip()
+                break
+    typesense_api_key = configured_typesense_key or existing_typesense_key or secrets.token_hex(32)
 
     generated_dir.mkdir(exist_ok=True)
     generated_env_path.write_text(
@@ -49,12 +59,15 @@ def write_compose_env(config: dict) -> None:
                 f"POSTGRES_USER={db_user}",
                 f"POSTGRES_PASSWORD={db_password}",
                 f"POSTGRES_PORT={postgres_port}",
+                f"TYPESENSE_API_KEY={typesense_api_key}",
+                f"TYPESENSE_HTTP_PORT={typesense_port}",
                 f"PORT={server_port}",
                 "",
             ]
         ),
         encoding="utf-8",
     )
+    generated_env_path.chmod(0o600)
 
 
 def main() -> int:

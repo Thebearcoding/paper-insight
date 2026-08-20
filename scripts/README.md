@@ -13,6 +13,7 @@
 
 - `scripts/apply_migrations.py`：按顺序执行 `db/migrations/*.sql`
 - `scripts/import_papers.py`：将 `crawled_data/{conference}` 下的 JSONL 导入 PostgreSQL
+- `scripts/reindex_typesense.py`：从 PostgreSQL 全量重建 Typesense 论文搜索索引
 - `scripts/download_icml_2026_openreview.py`：登录 OpenReview 后低速下载 ICML 2026 metadata JSONL，不导入数据库
 - `scripts/build_chi_2026_jsonl.py`：从 DBLP + OpenAlex 生成 CHI 2026 的导入 JSONL
 - `scripts/build_cvpr_2026_jsonl.py`：从 CVF Open Access 生成 CVPR 2026 的导入 JSONL
@@ -62,6 +63,28 @@ ICML 2026 的下载脚本只抓取 OpenReview note metadata，默认单线程、
 CHI 2026 的生成脚本默认只保留 OpenAlex 提供的非 ACM PDF 论文，避免把服务器无法读取的 ACM DL PDF 链接导入线上库。维护者如需全量元数据，可显式加 `--include-acm-only`。
 
 CVPR 2026 的生成脚本使用 CVF Open Access 的 `day=all` 页面，导入时写入 `sort_order`，会议页默认按 CVF 官方列表顺序展示。
+
+## Typesense 搜索索引
+
+PostgreSQL 是唯一数据源，Typesense 索引可以随时重建。先在 `config.yaml` 或环境变量中
+启用 Typesense，并设置 `TYPESENSE_API_KEY`，然后执行：
+
+```bash
+uv run python scripts/reindex_typesense.py
+```
+
+常用选项：
+
+```bash
+# collection 已有数据时跳过，适合启动脚本
+uv run python scripts/reindex_typesense.py --if-empty
+
+# 切换 alias 后保留旧的物理 collection
+uv run python scripts/reindex_typesense.py --keep-old
+```
+
+普通论文写入、arXiv/HF Daily 同步、关键词补全和代码状态更新会自动尝试增量更新
+Typesense。同步失败不会回滚 PostgreSQL 写入，之后可用全量重建恢复一致性。
 
 ## 维护者：从 Supabase 导出现有数据
 

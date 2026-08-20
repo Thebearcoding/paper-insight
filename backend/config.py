@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,22 @@ class DatabaseConfig:
 
 
 @dataclass(frozen=True)
+class TypesenseConfig:
+    enabled: bool = False
+    protocol: str = "http"
+    host: str = "127.0.0.1"
+    port: int = 8108
+    api_key: str | None = None
+    collection_alias: str = "papers"
+    embedding_model: str = "ts/multilingual-e5-small"
+    semantic_search_enabled: bool = True
+    vector_alpha: float = 0.4
+    vector_k: int = 500
+    vector_distance_threshold: float = 0.45
+    timeout_seconds: int = 10
+
+
+@dataclass(frozen=True)
 class LlmConfig:
     openai_api_key: str | None = None
     siliconflow_api_key: str | None = None
@@ -108,6 +125,7 @@ class AdminConfig:
 @dataclass(frozen=True)
 class AppConfig:
     database: DatabaseConfig
+    typesense: TypesenseConfig
     llm: LlmConfig
     paths: PathsConfig
     zotero: ZoteroConfig
@@ -150,6 +168,15 @@ def _as_int(value: object, default: int) -> int:
         return default
 
 
+def _as_float(value: object, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(str(value))
+    except ValueError:
+        return default
+
+
 def _as_str(value: object, default: str) -> str:
     if value is None:
         return default
@@ -172,6 +199,7 @@ def load_app_config() -> AppConfig:
     raw_api_search = raw.get("api_search") if isinstance(raw.get("api_search"), dict) else {}
     raw_cors = raw.get("cors") if isinstance(raw.get("cors"), dict) else {}
     raw_database = raw.get("database") if isinstance(raw.get("database"), dict) else {}
+    raw_typesense = raw.get("typesense") if isinstance(raw.get("typesense"), dict) else {}
     raw_llm = raw.get("llm") if isinstance(raw.get("llm"), dict) else {}
     raw_paths = raw.get("paths") if isinstance(raw.get("paths"), dict) else {}
     raw_zotero = raw.get("zotero") if isinstance(raw.get("zotero"), dict) else {}
@@ -298,8 +326,82 @@ def load_app_config() -> AppConfig:
         allowed_origins=_as_origins(raw_cors.get("allowed_origins"), default_cors.allowed_origins),
     )
 
+    default_typesense = TypesenseConfig()
+    typesense = TypesenseConfig(
+        enabled=_as_bool(
+            os.getenv("TYPESENSE_ENABLED", raw_typesense.get("enabled")),
+            default_typesense.enabled,
+        ),
+        protocol=_as_str(
+            os.getenv("TYPESENSE_PROTOCOL", raw_typesense.get("protocol")),
+            default_typesense.protocol,
+        ),
+        host=_as_str(
+            os.getenv("TYPESENSE_HOST", raw_typesense.get("host")),
+            default_typesense.host,
+        ),
+        port=_as_int(
+            os.getenv("TYPESENSE_PORT", raw_typesense.get("port")),
+            default_typesense.port,
+        ),
+        api_key=os.getenv("TYPESENSE_API_KEY") or raw_typesense.get("api_key"),
+        collection_alias=_as_str(
+            os.getenv("TYPESENSE_COLLECTION", raw_typesense.get("collection_alias")),
+            default_typesense.collection_alias,
+        ),
+        embedding_model=_as_str(
+            os.getenv("TYPESENSE_EMBEDDING_MODEL", raw_typesense.get("embedding_model")),
+            default_typesense.embedding_model,
+        ),
+        semantic_search_enabled=_as_bool(
+            os.getenv(
+                "TYPESENSE_SEMANTIC_SEARCH_ENABLED",
+                raw_typesense.get("semantic_search_enabled"),
+            ),
+            default_typesense.semantic_search_enabled,
+        ),
+        vector_alpha=min(
+            max(
+                _as_float(
+                    os.getenv("TYPESENSE_VECTOR_ALPHA", raw_typesense.get("vector_alpha")),
+                    default_typesense.vector_alpha,
+                ),
+                0.0,
+            ),
+            1.0,
+        ),
+        vector_k=max(
+            _as_int(
+                os.getenv("TYPESENSE_VECTOR_K", raw_typesense.get("vector_k")),
+                default_typesense.vector_k,
+            ),
+            1,
+        ),
+        vector_distance_threshold=min(
+            max(
+                _as_float(
+                    os.getenv(
+                        "TYPESENSE_VECTOR_DISTANCE_THRESHOLD",
+                        raw_typesense.get("vector_distance_threshold"),
+                    ),
+                    default_typesense.vector_distance_threshold,
+                ),
+                0.0,
+            ),
+            2.0,
+        ),
+        timeout_seconds=max(
+            _as_int(
+                os.getenv("TYPESENSE_TIMEOUT_SECONDS", raw_typesense.get("timeout_seconds")),
+                default_typesense.timeout_seconds,
+            ),
+            1,
+        ),
+    )
+
     return AppConfig(
         database=DatabaseConfig(url=raw_database.get("url")),
+        typesense=typesense,
         llm=LlmConfig(
             openai_api_key=raw_llm.get("openai_api_key"),
             siliconflow_api_key=raw_llm.get("siliconflow_api_key"),

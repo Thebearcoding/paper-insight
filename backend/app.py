@@ -171,6 +171,7 @@ from zotero import (
     delete_user_cache as delete_zotero_user_cache,
     get_item_reading_context,
 )
+import typesense_search
 
 logger = logging.getLogger(__name__)
 GITHUB_OAUTH_STATE_COOKIE = "paper_github_oauth_state"
@@ -186,9 +187,31 @@ background_task = None
 presence_snapshot_task = None
 hf_daily_task = None
 feishu_push_task = None
+typesense_index_task = None
 hf_daily_analysis_tasks: set[asyncio.Task] = set()
 background_analysis_enabled = settings.background_analysis.enabled
 background_analysis_lock = asyncio.Lock()
+
+
+async def ensure_typesense_index() -> None:
+    if not typesense_search.is_enabled():
+        logger.info("Typesense 搜索未启用")
+        return
+
+    for attempt in range(1, 13):
+        try:
+            document_count = await asyncio.to_thread(typesense_search.collection_document_count)
+            if document_count is None or document_count == 0:
+                logger.info("Typesense 索引为空，开始后台重建")
+                document_count = await asyncio.to_thread(typesense_search.rebuild_index)
+            logger.info("Typesense 搜索已就绪，共 %s 篇论文", document_count)
+            return
+        except Exception as exc:
+            if attempt == 12:
+                logger.warning("Typesense 索引初始化失败，继续使用 PostgreSQL 搜索: %s", exc)
+                return
+            logger.warning("Typesense 尚未就绪（%s/12）: %s", attempt, exc)
+            await asyncio.sleep(5)
 
 
 async def run_presence_snapshots():
@@ -715,7 +738,7 @@ def ensure_llm_configured() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global background_task, presence_snapshot_task, hf_daily_task, feishu_push_task
+    global background_task, presence_snapshot_task, hf_daily_task, feishu_push_task, typesense_index_task
     try:
         await asyncio.to_thread(apply_migrations)
     except Exception as exc:
@@ -751,6 +774,7 @@ async def lifespan(app: FastAPI):
         feishu_push_task = asyncio.create_task(run_feishu_push_scheduler())
     else:
         logger.info("Feishu 每日推送任务未启用")
+    typesense_index_task = asyncio.create_task(ensure_typesense_index())
 
     yield
 
@@ -760,6 +784,7 @@ async def lifespan(app: FastAPI):
         presence_snapshot_task,
         hf_daily_task,
         feishu_push_task,
+        typesense_index_task,
         *hf_daily_analysis_tasks,
         *zotero_sync_tasks.values(),
     ):
@@ -2802,6 +2827,13 @@ async def get_conference_papers_endpoint(
                 code_filter=validated_code_filter,
             )
             if user_id
+            and not typesense_search.should_use_search(
+                search,
+                search_title,
+                search_abstract,
+                search_keywords,
+                validated_read_status,
+            )
             else None
         )
     except DatabaseError as e:
@@ -2968,6 +3000,13 @@ async def search_all_papers_endpoint(
                 code_filter=validated_code_filter,
             )
             if user_id
+            and not typesense_search.should_use_search(
+                search,
+                search_title,
+                search_abstract,
+                search_keywords,
+                validated_read_status,
+            )
             else None
         )
     except DatabaseError as e:

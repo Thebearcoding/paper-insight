@@ -11,6 +11,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from config import settings
+import typesense_search
 from utils import get_openreview_pdf_url, normalize_paper_pdf_url
 
 DATABASE_URL = settings.database.url
@@ -172,6 +173,15 @@ def _fetch_keywords_for_papers(conn: psycopg.Connection, paper_ids: list[str]) -
     for row in rows:
         keywords_by_paper.setdefault(row["paper_id"], []).append(row["keyword"])
     return keywords_by_paper
+
+
+def _sync_typesense_papers(paper_ids: list[str]) -> None:
+    if not typesense_search.is_enabled() or not paper_ids:
+        return
+    try:
+        typesense_search.upsert_papers(paper_ids)
+    except Exception as exc:
+        logger.warning("Typesense paper sync failed for %s papers: %s", len(paper_ids), exc)
 
 
 def _arxiv_meta_from_row(row: dict | None) -> dict | None:
@@ -350,6 +360,7 @@ def save_paper(paper_info: dict, llm_response: str = None):
             conn.commit()
 
     _run_with_retry(operation, f"save_paper:{paper_info['id']}")
+    _sync_typesense_papers([paper_info["id"]])
 
 
 def upsert_arxiv_paper(
@@ -499,7 +510,9 @@ def upsert_arxiv_paper(
         paper["arxiv"] = _arxiv_meta_from_row(arxiv_row)
         return paper
 
-    return _run_with_retry(operation, f"upsert_arxiv_paper:{paper_info['id']}")
+    result = _run_with_retry(operation, f"upsert_arxiv_paper:{paper_info['id']}")
+    _sync_typesense_papers([paper_info["id"]])
+    return result
 
 
 def upsert_hf_daily_papers(daily_date: date, entries: list[dict]) -> list[str]:
@@ -673,7 +686,9 @@ def upsert_hf_daily_papers(daily_date: date, entries: list[dict]) -> list[str]:
         _cache_timestamp.clear()
         return analyzable_paper_ids
 
-    return _run_with_retry(operation, f"upsert_hf_daily_papers:{daily_date.isoformat()}")
+    result = _run_with_retry(operation, f"upsert_hf_daily_papers:{daily_date.isoformat()}")
+    _sync_typesense_papers([entry["paper"]["id"] for entry in entries])
+    return result
 
 
 def update_llm_response(paper_id: str, response: str):
@@ -734,6 +749,7 @@ def update_paper_code_availability(
         _cache_timestamp.clear()
 
     _run_with_retry(operation, f"update_paper_code_availability:{paper_id}")
+    _sync_typesense_papers([paper_id])
 
 
 def get_papers_pending_code_availability(limit: int = 10) -> list:
@@ -858,6 +874,7 @@ def update_paper_generated_keywords(
         _cache_timestamp.clear()
 
     _run_with_retry(operation, f"update_paper_generated_keywords:{paper_id}")
+    _sync_typesense_papers([paper_id])
 
 
 def get_papers_pending_keyword_enrichment(limit: int = 10) -> list:
@@ -3634,6 +3651,69 @@ def _load_keywords_for_papers(papers: list[dict]) -> tuple[list[dict], bool]:
     return papers, True
 
 
+def _load_papers_by_ids(paper_ids: list[str]) -> list[dict]:
+    if not paper_ids:
+        return []
+
+    with _get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM papers WHERE id = ANY(%s)", (paper_ids,))
+            rows = cur.fetchall()
+        keywords_by_paper = _fetch_keywords_for_papers(conn, paper_ids)
+
+    papers_by_id = {row["id"]: row for row in rows}
+    ordered_papers: list[dict] = []
+    for paper_id in paper_ids:
+        paper = papers_by_id.get(paper_id)
+        if not paper:
+            continue
+        paper["keywords"] = keywords_by_paper.get(paper_id, [])
+        paper["pdf"] = normalize_paper_pdf_url(paper_id, paper.get("pdf")) or paper.get("pdf")
+        ordered_papers.append(paper)
+    return ordered_papers
+
+
+def _load_api_papers_by_ids(paper_ids: list[str]) -> list[dict]:
+    if not paper_ids:
+        return []
+
+    with _get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    p.title,
+                    p.abstract,
+                    p.venue,
+                    p.code_status,
+                    COALESCE(
+                        (
+                            SELECT array_agg(a.author_name ORDER BY a.author_order)
+                            FROM authors a
+                            WHERE a.paper_id = p.id
+                        ),
+                        ARRAY[]::TEXT[]
+                    ) AS authors,
+                    COALESCE(
+                        (
+                            SELECT array_agg(k.keyword ORDER BY k.id)
+                            FROM keywords k
+                            WHERE k.paper_id = p.id
+                        ),
+                        ARRAY[]::TEXT[]
+                    ) AS keywords
+                FROM papers p
+                WHERE p.id = ANY(%s)
+                """,
+                (paper_ids,),
+            )
+            rows = cur.fetchall()
+
+    papers_by_id = {row["id"]: row for row in rows}
+    return [papers_by_id[paper_id] for paper_id in paper_ids if paper_id in papers_by_id]
+
+
 def _read_counts_payload(total: object, read_total: object) -> dict[str, int]:
     total_count = _as_nonnegative_int(total)
     read_count = min(_as_nonnegative_int(read_total), total_count)
@@ -3925,6 +4005,33 @@ def _search_papers(
 
     if search and not (search_title or search_abstract or search_keywords):
         return [], 0
+
+    if typesense_search.should_use_search(
+        search,
+        search_title,
+        search_abstract,
+        search_keywords,
+    ):
+        try:
+            safe_limit = max(limit, 1)
+            paper_ids, total = typesense_search.search_paper_ids(
+                search or "",
+                venue_prefix,
+                offset // safe_limit + 1,
+                safe_limit,
+                search_title,
+                search_abstract,
+                search_keywords,
+                code_filter,
+            )
+            return _load_papers_by_ids(paper_ids), total
+        except Exception as exc:
+            logger.warning(
+                "Falling back to PostgreSQL paper search for venue_prefix=%r search=%r: %s",
+                venue_prefix,
+                search,
+                exc,
+            )
 
     cache_key = _build_cache_key(
         venue_prefix, offset, limit, search, search_title, search_abstract, search_keywords, code_filter
@@ -5212,11 +5319,42 @@ def api_search_papers(
     limit: int,
     offset: int,
 ) -> tuple[list[dict], int]:
-    """Run the API search via the minimal-column SQL function.
+    """Search through Typesense when available, with the SQL function as fallback."""
 
-    Ranking mirrors the site's search_papers_optimized exactly, so results
-    match the website; authors/keywords arrive pre-aggregated from SQL.
-    """
+    if typesense_search.should_use_search(search, True, True, True):
+        try:
+            safe_limit = max(limit, 1)
+            paper_ids, total = typesense_search.search_paper_ids(
+                search,
+                venue_prefix,
+                offset // safe_limit + 1,
+                safe_limit,
+                True,
+                True,
+                True,
+                code_filter,
+            )
+            rows = _load_api_papers_by_ids(paper_ids)
+            papers = [
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "abstract": row["abstract"],
+                    "venue": row["venue"],
+                    "code_status": row["code_status"] or "unknown",
+                    "authors": list(row["authors"] or []),
+                    "keywords": list(row["keywords"] or []),
+                }
+                for row in rows
+            ]
+            return papers, total
+        except Exception as exc:
+            logger.warning(
+                "Falling back to PostgreSQL API search for venue_prefix=%r search=%r: %s",
+                venue_prefix,
+                search,
+                exc,
+            )
 
     def operation() -> tuple[list[dict], int]:
         with _get_connection() as conn:

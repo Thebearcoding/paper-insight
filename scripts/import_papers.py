@@ -11,6 +11,8 @@ repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root / "backend"))
 
 from config import settings
+from typesense_search import is_enabled as typesense_enabled
+from typesense_search import upsert_papers as upsert_typesense_papers
 
 DATABASE_URL = settings.database.url
 OPENREVIEW_URL_PATTERN = re.compile(r"^https://openreview\.net/(?:attachment|pdf)\?")
@@ -171,6 +173,12 @@ def _insert_batch(
                 )
 
         conn.commit()
+
+    if typesense_enabled():
+        try:
+            upsert_typesense_papers(paper_ids)
+        except Exception as exc:
+            print(f"  Warning: Typesense sync failed for this batch: {exc}")
 
 
 if __name__ == "__main__":
