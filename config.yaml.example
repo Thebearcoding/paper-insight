@@ -36,6 +36,9 @@ admin:
   initial_password: change-this-admin-password
 
 llm:
+  # Required before storing provider API keys in the database. Generate with:
+  # openssl rand -hex 32
+  credential_encryption_key:
   openai_api_key:
   siliconflow_api_key:
   open_router_api_key:

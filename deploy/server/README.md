@@ -51,10 +51,17 @@ After the VM returns, verify `free -h`, `docker ps`, and the Sub2API health stat
 cp .env.server.example .env
 cp config.server.yaml.example config.yaml
 openssl rand -hex 32
+openssl rand -hex 32
 openssl rand -base64 36
 ```
 
-Put the hexadecimal value in `zotero.credential_encryption_key`. Use a separate random value for `POSTGRES_PASSWORD`, and put the same PostgreSQL password in `config.yaml`'s database URL. Replace the admin email, admin password, public domain, callback URL, and CORS origin.
+Put the two independent hexadecimal values in `llm.credential_encryption_key`
+and `zotero.credential_encryption_key`. Provider API keys stored through the
+admin UI are encrypted with PostgreSQL `pgcrypto`; the legacy plaintext column
+is cleared during application startup. Use a separate random value for
+`POSTGRES_PASSWORD`, and put the same PostgreSQL password in `config.yaml`'s
+database URL. Replace the admin email, admin password, public domain, callback
+URL, and CORS origin.
 
 The existing Sub2API network on the target server is:
 

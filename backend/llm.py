@@ -1,13 +1,26 @@
 from openai import AsyncOpenAI, APIError, APITimeoutError, RateLimitError
 import asyncio
+import copy
+import json
 import logging
+import secrets
+import uuid
 from dataclasses import dataclass
 from typing import Any
+import httpx
 from config import settings
 from prompt import PAPER_ANALYSIS_PROMPT
 
 MISSING_API_KEY_PLACEHOLDER = "missing-api-key"
 DEFAULT_ANALYSIS_TEMPERATURE = 0.3
+ANTHROPIC_CLAUDE_CODE_PROTOCOL = "anthropic_claude_code"
+CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude."
+CLAUDE_CODE_BETA_HEADER = (
+    "claude-code-20250219,"
+    "interleaved-thinking-2025-05-14,"
+    "fine-grained-tool-streaming-2025-05-14"
+)
+CLAUDE_CODE_DEVICE_ID = secrets.token_hex(32)
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +37,137 @@ class LLMUsageTokens:
     cache_input_tokens: int
     cache_output_tokens: int
     total_tokens: int
+
+
+def _provider_api_protocol(config: dict) -> str:
+    params = config.get("default_parameters") or {}
+    if not isinstance(params, dict):
+        return "openai"
+    return str(params.get("_api_protocol") or "openai").strip().lower()
+
+
+def _claude_code_headers(api_key: str) -> dict[str, str]:
+    return {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": CLAUDE_CODE_BETA_HEADER,
+        "content-type": "application/json",
+        "user-agent": "claude-cli/2.1.220 (external, cli)",
+        "x-stainless-lang": "js",
+        "x-stainless-package-version": "0.94.0",
+        "x-stainless-os": "Linux",
+        "x-stainless-arch": "arm64",
+        "x-stainless-runtime": "node",
+        "x-stainless-runtime-version": "v24.3.0",
+        "x-stainless-retry-count": "0",
+        "x-stainless-timeout": "600",
+        "x-app": "cli",
+        "anthropic-dangerous-direct-browser-access": "true",
+    }
+
+
+def _content_blocks(content: Any) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, dict):
+        content = [content]
+    if not isinstance(content, list):
+        return [{"type": "text", "text": str(content or "")}]
+
+    blocks: list[dict] = []
+    for item in content:
+        if isinstance(item, str):
+            blocks.append({"type": "text", "text": item})
+            continue
+        if not isinstance(item, dict):
+            blocks.append({"type": "text", "text": str(item)})
+            continue
+        block_type = str(item.get("type") or "")
+        if block_type in {"text", "image", "tool_use", "tool_result", "thinking"}:
+            blocks.append(copy.deepcopy(item))
+        elif block_type == "image_url":
+            blocks.append({"type": "text", "text": "[Image attachment omitted by the LLM gateway]"})
+        else:
+            blocks.append({"type": "text", "text": json.dumps(item, ensure_ascii=False)})
+    return blocks or [{"type": "text", "text": ""}]
+
+
+def _claude_code_payload(model: str, messages: list, params: dict) -> dict:
+    request_params = dict(params)
+    max_tokens = request_params.pop("max_tokens", None)
+    if max_tokens is None:
+        max_tokens = request_params.pop("max_completion_tokens", 4096)
+    try:
+        max_tokens = max(int(max_tokens), 1)
+    except (TypeError, ValueError):
+        max_tokens = 4096
+
+    system_blocks: list[dict] = [
+        {
+            "type": "text",
+            "text": CLAUDE_CODE_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    anthropic_messages: list[dict] = []
+    for message in messages:
+        role = str(message.get("role") or "user").lower()
+        blocks = _content_blocks(message.get("content"))
+        if role == "system":
+            system_blocks.extend(blocks)
+            continue
+        if role not in {"user", "assistant"}:
+            role = "user"
+        if anthropic_messages and anthropic_messages[-1]["role"] == role:
+            anthropic_messages[-1]["content"].extend(blocks)
+        else:
+            anthropic_messages.append({"role": role, "content": blocks})
+
+    if not anthropic_messages:
+        anthropic_messages.append({"role": "user", "content": [{"type": "text", "text": "hi"}]})
+
+    for message in reversed(anthropic_messages):
+        if message["role"] != "user":
+            continue
+        for block in reversed(message["content"]):
+            if block.get("type") == "text":
+                block.setdefault("cache_control", {"type": "ephemeral"})
+                break
+        break
+
+    metadata_user_id = json.dumps(
+        {
+            "device_id": CLAUDE_CODE_DEVICE_ID,
+            "account_uuid": "",
+            "session_id": str(uuid.uuid4()),
+        },
+        separators=(",", ":"),
+    )
+    payload = {
+        "model": model,
+        "messages": anthropic_messages,
+        "system": system_blocks,
+        "metadata": {"user_id": metadata_user_id},
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+
+    supported = {
+        "temperature",
+        "top_p",
+        "top_k",
+        "tools",
+        "tool_choice",
+        "thinking",
+        "context_management",
+    }
+    for key in supported:
+        if key in request_params and request_params[key] is not None:
+            payload[key] = request_params[key]
+    if request_params.get("stop") is not None:
+        stop = request_params["stop"]
+        payload["stop_sequences"] = stop if isinstance(stop, list) else [stop]
+    return payload
 
 
 def _object_to_dict(value: Any) -> dict:
@@ -410,7 +554,93 @@ class ManagedLLM:
 
     def _default_parameters(self, config: dict) -> dict:
         params = config.get("default_parameters") or {}
-        return dict(params) if isinstance(params, dict) else {}
+        if not isinstance(params, dict):
+            return {}
+        return {key: value for key, value in params.items() if not str(key).startswith("_")}
+
+    def _uses_anthropic_claude_code(self, config: dict) -> bool:
+        return _provider_api_protocol(config) == ANTHROPIC_CLAUDE_CODE_PROTOCOL
+
+    def _anthropic_messages_url(self, config: dict) -> str:
+        base_url = str(config.get("base_url") or "").strip().rstrip("/")
+        if base_url.endswith("/v1/messages"):
+            return base_url
+        if base_url.endswith("/v1"):
+            return base_url + "/messages"
+        return base_url + "/v1/messages"
+
+    async def _anthropic_claude_code_stream_events(
+        self,
+        config: dict,
+        messages: list,
+        params: dict,
+        request_type: str,
+    ):
+        payload = _claude_code_payload(config["model_name"], messages, params)
+        timeout = httpx.Timeout(180.0, connect=20.0)
+        usage: dict[str, Any] = {}
+
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream(
+                "POST",
+                self._anthropic_messages_url(config),
+                headers=_claude_code_headers(config["api_key"]),
+                json=payload,
+            ) as response:
+                if response.status_code < 200 or response.status_code >= 300:
+                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"LLM upstream returned HTTP {response.status_code}: {body[:1000]}"
+                    )
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw_data = line[len("data:"):].strip()
+                    if not raw_data or raw_data == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(raw_data)
+                    except json.JSONDecodeError:
+                        logger.debug("忽略无法解析的 Anthropic SSE 数据行")
+                        continue
+
+                    event_type = event.get("type")
+                    event_usage = event.get("usage")
+                    if event_type == "message_start":
+                        event_usage = (event.get("message") or {}).get("usage") or event_usage
+                    if isinstance(event_usage, dict):
+                        usage.update(event_usage)
+
+                    if event_type == "error":
+                        error = event.get("error") or {}
+                        raise RuntimeError(str(error.get("message") or "LLM upstream stream error"))
+
+                    if event_type == "content_block_start":
+                        block = event.get("content_block") or {}
+                        if block.get("type") == "text" and block.get("text"):
+                            yield LLMStreamChunk(kind="content", content=str(block["text"]))
+                        elif block.get("type") == "thinking" and block.get("thinking"):
+                            yield LLMStreamChunk(kind="reasoning", content=str(block["thinking"]))
+                        continue
+
+                    if event_type != "content_block_delta":
+                        continue
+                    delta = event.get("delta") or {}
+                    delta_type = delta.get("type")
+                    if delta_type == "text_delta" and delta.get("text"):
+                        yield LLMStreamChunk(kind="content", content=str(delta["text"]))
+                    elif delta_type == "thinking_delta" and delta.get("thinking"):
+                        yield LLMStreamChunk(kind="reasoning", content=str(delta["thinking"]))
+
+        _record_llm_usage(
+            usage,
+            provider_id=str(config.get("id")) if config.get("id") else None,
+            provider_key=config.get("provider_key"),
+            provider_name=config.get("name"),
+            model_name=config["model_name"],
+            request_type=request_type,
+        )
 
     def _require_config(self) -> dict:
         config = self._get_active_config()
@@ -429,19 +659,33 @@ class ManagedLLM:
 
     async def get_response(self, prompt: str, **kwargs) -> str:
         config = self._require_config()
-        client = self._client_for_config(config)
         params = self._parameters(config, kwargs)
         request_type = _pop_usage_context(params, "analysis")
         analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant for academic research."},
+            {"role": "user", "content": prompt + "\n\n" + analysis_instruction},
+        ]
+
+        if self._uses_anthropic_claude_code(config):
+            chunks: list[str] = []
+            async for chunk in self._anthropic_claude_code_stream_events(
+                config,
+                messages,
+                params,
+                request_type,
+            ):
+                if chunk.kind == "content":
+                    chunks.append(chunk.content)
+            return "".join(chunks)
+
+        client = self._client_for_config(config)
 
         async def _call():
             response = await client.chat.completions.create(
                 model=config["model_name"],
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant for academic research."},
-                    {"role": "user", "content": prompt + "\n\n" + analysis_instruction},
-                ],
+                messages=messages,
                 **params,
             )
             _record_llm_usage(
@@ -458,20 +702,32 @@ class ManagedLLM:
 
     async def get_response_stream_events(self, prompt: str, **kwargs):
         config = self._require_config()
-        client = self._client_for_config(config)
         params = self._parameters(config, kwargs)
         request_type = _pop_usage_context(params, "analysis_stream")
         analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant for academic research."},
+            {"role": "user", "content": prompt + "\n\n" + analysis_instruction},
+        ]
+
+        if self._uses_anthropic_claude_code(config):
+            async for chunk in self._anthropic_claude_code_stream_events(
+                config,
+                messages,
+                params,
+                request_type,
+            ):
+                yield chunk
+            return
+
+        client = self._client_for_config(config)
         response = await _create_streaming_completion(
             client,
             {
                 "model": config["model_name"],
                 "stream": True,
-                "messages": [
-                    {"role": "system", "content": "You are a helpful assistant for academic research."},
-                    {"role": "user", "content": prompt + "\n\n" + analysis_instruction},
-                ],
+                "messages": messages,
                 **params,
             },
         )
@@ -498,10 +754,23 @@ class ManagedLLM:
 
     async def chat(self, messages: list, **kwargs) -> str:
         config = self._require_config()
-        client = self._client_for_config(config)
         params = self._parameters(config, kwargs)
         request_type = _pop_usage_context(params, "chat")
         params.setdefault("temperature", 1.0)
+
+        if self._uses_anthropic_claude_code(config):
+            chunks: list[str] = []
+            async for chunk in self._anthropic_claude_code_stream_events(
+                config,
+                messages,
+                params,
+                request_type,
+            ):
+                if chunk.kind == "content":
+                    chunks.append(chunk.content)
+            return "".join(chunks)
+
+        client = self._client_for_config(config)
 
         async def _call():
             response = await client.chat.completions.create(
@@ -523,10 +792,21 @@ class ManagedLLM:
 
     async def chat_stream_events(self, messages: list, **kwargs):
         config = self._require_config()
-        client = self._client_for_config(config)
         params = self._parameters(config, kwargs)
         request_type = _pop_usage_context(params, "chat_stream")
         params.setdefault("temperature", 1.0)
+
+        if self._uses_anthropic_claude_code(config):
+            async for chunk in self._anthropic_claude_code_stream_events(
+                config,
+                messages,
+                params,
+                request_type,
+            ):
+                yield chunk
+            return
+
+        client = self._client_for_config(config)
         response = await _create_streaming_completion(
             client,
             {
@@ -559,9 +839,28 @@ class ManagedLLM:
 
     async def test_one_token(self) -> dict:
         config = self._require_config()
-        client = self._client_for_config(config)
         messages = [{"role": "user", "content": "Output exactly one digit."}]
         base_params = self._default_parameters(config)
+
+        if self._uses_anthropic_claude_code(config):
+            chunks: list[str] = []
+            params = {**base_params, "max_tokens": 128, "temperature": 0}
+            async for chunk in self._anthropic_claude_code_stream_events(
+                config,
+                messages,
+                params,
+                "admin_test",
+            ):
+                if chunk.kind == "content":
+                    chunks.append(chunk.content)
+            return {
+                "provider_id": str(config["id"]),
+                "provider_name": config["name"],
+                "model_name": config["model_name"],
+                "output": "".join(chunks),
+            }
+
+        client = self._client_for_config(config)
 
         async def _call(params: dict):
             response = await client.chat.completions.create(

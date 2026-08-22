@@ -254,7 +254,7 @@ hf_daily:
 brew services start postgresql@16
 createdb paper_online
 cp config.yaml.example config.yaml
-# 编辑 config.yaml，填入 database.url、LLM key、GitHub OAuth 和初始管理员
+# 编辑 config.yaml，填入 database.url、LLM 凭据加密密钥、GitHub OAuth 和初始管理员
 uv run python scripts/apply_migrations.py --seed dev
 (cd backend && uv run uvicorn app:app --reload --host 127.0.0.1 --port 8000)
 (cd frontend-react && npm run dev)
@@ -300,7 +300,7 @@ cp config.yaml.example config.yaml
 # 编辑 config.yaml：
 # - server.host 改为 0.0.0.0
 # - database.url 改为 postgresql://paper:<password>@postgres:5432/paper_online
-# - 填入 LLM key、GitHub OAuth 和初始管理员
+# - 填入 llm.credential_encryption_key、GitHub OAuth 和初始管理员
 uv run python scripts/docker_compose.py up --build -d
 ```
 

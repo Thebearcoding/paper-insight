@@ -25,6 +25,7 @@ done
 umask 077
 db_password="$(openssl rand -hex 24)"
 admin_password="$(openssl rand -hex 16)"
+llm_key="$(openssl rand -hex 32)"
 zotero_key="$(openssl rand -hex 32)"
 
 env_tmp="$(mktemp)"
@@ -58,6 +59,7 @@ admin:
   initial_password: $admin_password
 
 llm:
+  credential_encryption_key: $llm_key
   openai_api_key:
   siliconflow_api_key:
   open_router_api_key:
@@ -120,6 +122,7 @@ Admin email: $admin_email
 Admin password: $admin_password
 PostgreSQL user: paper
 PostgreSQL password: $db_password
+LLM encryption key: $llm_key
 Zotero encryption key: $zotero_key
 Sub2API base URL: https://sub2api.athebear.me/v1
 Sub2API API token/model: configure in the Paper Insight admin UI

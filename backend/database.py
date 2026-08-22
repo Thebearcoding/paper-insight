@@ -1460,6 +1460,31 @@ def _unique_llm_provider_key(cur: psycopg.Cursor, name: str) -> str:
         provider_key = f"{base_key}-{uuid.uuid4().hex[:8]}"
 
 
+def _llm_encryption_key() -> str:
+    key = (settings.llm.credential_encryption_key or "").strip()
+    if not key:
+        raise DatabaseError("llm.credential_encryption_key is not configured")
+    return key
+
+
+def _migrate_legacy_llm_api_keys(cur: psycopg.Cursor, encryption_key: str) -> None:
+    cur.execute(
+        """
+        UPDATE llm_providers
+        SET encrypted_api_key = pgp_sym_encrypt(
+              api_key,
+              %s,
+              'cipher-algo=aes256'
+            ),
+            api_key = NULL,
+            updated_at = NOW()
+        WHERE encrypted_api_key IS NULL
+          AND COALESCE(api_key, '') <> ''
+        """,
+        (encryption_key,),
+    )
+
+
 def _fetch_llm_models_for_provider(
     conn: psycopg.Connection,
     provider_ids: list[uuid.UUID],
@@ -1488,8 +1513,10 @@ def _fetch_llm_models_for_provider(
 
 def ensure_default_llm_providers(provider_specs: list[dict]) -> None:
     def operation() -> None:
+        encryption_key = _llm_encryption_key()
         with _get_connection() as conn:
             with conn.cursor() as cur:
+                _migrate_legacy_llm_api_keys(cur, encryption_key)
                 for spec in provider_specs:
                     provider_key = spec["provider_key"]
                     name = spec["name"].strip()
@@ -1501,18 +1528,26 @@ def ensure_default_llm_providers(provider_specs: list[dict]) -> None:
                     cur.execute(
                         """
                         INSERT INTO llm_providers (
-                          provider_key, name, base_url, api_key, is_builtin,
+                          provider_key, name, base_url, encrypted_api_key, api_key, is_builtin,
                           active_model, default_parameters
                         )
-                        VALUES (%s, %s, %s, %s, TRUE, %s, %s)
+                        VALUES (
+                          %s, %s, %s,
+                          CASE
+                            WHEN %s::text IS NULL THEN NULL
+                            ELSE pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256')
+                          END,
+                          NULL, TRUE, %s, %s
+                        )
                         ON CONFLICT (provider_key) DO UPDATE SET
                           name = EXCLUDED.name,
                           base_url = EXCLUDED.base_url,
-                          api_key = CASE
-                            WHEN COALESCE(llm_providers.api_key, '') = ''
-                              THEN EXCLUDED.api_key
-                            ELSE llm_providers.api_key
+                          encrypted_api_key = CASE
+                            WHEN llm_providers.encrypted_api_key IS NULL
+                              THEN EXCLUDED.encrypted_api_key
+                            ELSE llm_providers.encrypted_api_key
                           END,
+                          api_key = NULL,
                           is_builtin = TRUE,
                           active_model = COALESCE(NULLIF(llm_providers.active_model, ''), EXCLUDED.active_model),
                           default_parameters = EXCLUDED.default_parameters,
@@ -1524,6 +1559,8 @@ def ensure_default_llm_providers(provider_specs: list[dict]) -> None:
                             name,
                             base_url,
                             api_key,
+                            api_key,
+                            encryption_key,
                             active_model,
                             Jsonb(default_parameters),
                         ),
@@ -1575,16 +1612,24 @@ def ensure_default_llm_providers(provider_specs: list[dict]) -> None:
 
 def list_llm_providers(include_models: bool = True) -> list[dict]:
     def operation() -> list[dict]:
+        encryption_key = _llm_encryption_key()
         with _get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, provider_key, name, base_url, api_key, is_active, is_enabled,
+                    SELECT id, provider_key, name, base_url,
+                           CASE
+                             WHEN encrypted_api_key IS NOT NULL
+                               THEN pgp_sym_decrypt(encrypted_api_key, %s)::text
+                             ELSE api_key
+                           END AS api_key,
+                           is_active, is_enabled,
                            is_builtin, active_model, default_parameters, models_fetched_at,
                            created_at, updated_at
                     FROM llm_providers
                     ORDER BY is_active DESC, is_builtin DESC, name
-                    """
+                    """,
+                    (encryption_key,),
                 )
                 provider_rows = cur.fetchall()
 
@@ -1604,17 +1649,24 @@ def list_llm_providers(include_models: bool = True) -> list[dict]:
 
 def get_llm_provider(provider_id: str, include_models: bool = True) -> dict | None:
     def operation() -> dict | None:
+        encryption_key = _llm_encryption_key()
         with _get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, provider_key, name, base_url, api_key, is_active, is_enabled,
+                    SELECT id, provider_key, name, base_url,
+                           CASE
+                             WHEN encrypted_api_key IS NOT NULL
+                               THEN pgp_sym_decrypt(encrypted_api_key, %s)::text
+                             ELSE api_key
+                           END AS api_key,
+                           is_active, is_enabled,
                            is_builtin, active_model, default_parameters, models_fetched_at,
                            created_at, updated_at
                     FROM llm_providers
                     WHERE id = %s
                     """,
-                    (provider_id,),
+                    (encryption_key, provider_id),
                 )
                 row = cur.fetchone()
             if not row:
@@ -1629,11 +1681,18 @@ def get_llm_provider(provider_id: str, include_models: bool = True) -> dict | No
 
 def get_active_llm_config() -> dict | None:
     def operation() -> dict | None:
+        encryption_key = _llm_encryption_key()
         with _get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT p.id, p.provider_key, p.name, p.base_url, p.api_key, p.is_active,
+                    SELECT p.id, p.provider_key, p.name, p.base_url,
+                           CASE
+                             WHEN p.encrypted_api_key IS NOT NULL
+                               THEN pgp_sym_decrypt(p.encrypted_api_key, %s)::text
+                             ELSE p.api_key
+                           END AS api_key,
+                           p.is_active,
                            p.is_enabled, p.is_builtin, p.active_model, p.default_parameters,
                            p.models_fetched_at, p.created_at, p.updated_at,
                            COALESCE(
@@ -1649,7 +1708,8 @@ def get_active_llm_config() -> dict | None:
                     FROM llm_providers p
                     WHERE p.is_active AND p.is_enabled
                     LIMIT 1
-                    """
+                    """,
+                    (encryption_key,),
                 )
                 row = cur.fetchone()
         return _normalize_llm_provider_row(row)
@@ -1665,12 +1725,14 @@ def create_llm_provider(
     active_model: str | None = None,
 ) -> dict:
     def operation() -> dict:
+        encryption_key = _llm_encryption_key()
         normalized_models = _normalize_model_names(model_names)
         selected_model = (active_model or "").strip()
         if selected_model and selected_model not in normalized_models:
             normalized_models.insert(0, selected_model)
         if not selected_model and normalized_models:
             selected_model = normalized_models[0]
+        normalized_api_key = (api_key or "").strip() or None
 
         with _get_connection() as conn:
             with conn.cursor() as cur:
@@ -1678,10 +1740,24 @@ def create_llm_provider(
                 cur.execute(
                     """
                     INSERT INTO llm_providers (
-                      provider_key, name, base_url, api_key, is_builtin, active_model
+                      provider_key, name, base_url, encrypted_api_key, api_key,
+                      is_builtin, active_model
                     )
-                    VALUES (%s, %s, %s, %s, FALSE, %s)
-                    RETURNING id, provider_key, name, base_url, api_key, is_active, is_enabled,
+                    VALUES (
+                      %s, %s, %s,
+                      CASE
+                        WHEN %s::text IS NULL THEN NULL
+                        ELSE pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256')
+                      END,
+                      NULL, FALSE, %s
+                    )
+                    RETURNING id, provider_key, name, base_url,
+                              CASE
+                                WHEN encrypted_api_key IS NOT NULL
+                                  THEN pgp_sym_decrypt(encrypted_api_key, %s)::text
+                                ELSE api_key
+                              END AS api_key,
+                              is_active, is_enabled,
                               is_builtin, active_model, default_parameters, models_fetched_at,
                               created_at, updated_at
                     """,
@@ -1689,8 +1765,11 @@ def create_llm_provider(
                         provider_key,
                         name.strip(),
                         base_url.strip().rstrip("/"),
-                        (api_key or "").strip() or None,
+                        normalized_api_key,
+                        normalized_api_key,
+                        encryption_key,
                         selected_model or None,
+                        encryption_key,
                     ),
                 )
                 provider_row = cur.fetchone()
@@ -1722,6 +1801,7 @@ def update_llm_provider(
     is_enabled: bool | None = None,
 ) -> dict | None:
     def operation() -> dict | None:
+        encryption_key = _llm_encryption_key()
         updates: list[str] = []
         params: list[object] = []
 
@@ -1732,8 +1812,14 @@ def update_llm_provider(
             updates.append("base_url = %s")
             params.append(base_url.strip().rstrip("/"))
         if api_key_provided:
-            updates.append("api_key = %s")
-            params.append((api_key or "").strip() or None)
+            normalized_api_key = (api_key or "").strip() or None
+            updates.append(
+                "encrypted_api_key = CASE "
+                "WHEN %s::text IS NULL THEN NULL "
+                "ELSE pgp_sym_encrypt(%s, %s, 'cipher-algo=aes256') END"
+            )
+            params.extend((normalized_api_key, normalized_api_key, encryption_key))
+            updates.append("api_key = NULL")
         if is_enabled is not None:
             updates.append("is_enabled = %s")
             params.append(is_enabled)
@@ -1749,7 +1835,7 @@ def update_llm_provider(
                     UPDATE llm_providers
                     SET {", ".join(updates)}, updated_at = NOW()
                     WHERE id = %s
-                    RETURNING id, provider_key, name, base_url, api_key, is_active, is_enabled,
+                    RETURNING id,
                               is_builtin, active_model, default_parameters, models_fetched_at,
                               created_at, updated_at
                     """,
@@ -1923,9 +2009,7 @@ def set_active_llm_provider(provider_id: str, model_name: str | None = None) -> 
                         active_model = NULLIF(%s, ''),
                         updated_at = NOW()
                     WHERE id = %s
-                    RETURNING id, provider_key, name, base_url, api_key, is_active, is_enabled,
-                              is_builtin, active_model, default_parameters, models_fetched_at,
-                              created_at, updated_at
+                    RETURNING id
                     """,
                     (selected_model, provider_id),
                 )

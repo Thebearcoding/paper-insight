@@ -87,6 +87,7 @@ class TypesenseConfig:
 
 @dataclass(frozen=True)
 class LlmConfig:
+    credential_encryption_key: str | None = None
     openai_api_key: str | None = None
     siliconflow_api_key: str | None = None
     open_router_api_key: str | None = None
@@ -403,6 +404,10 @@ def load_app_config() -> AppConfig:
         database=DatabaseConfig(url=raw_database.get("url")),
         typesense=typesense,
         llm=LlmConfig(
+            credential_encryption_key=os.getenv(
+                "LLM_CREDENTIAL_ENCRYPTION_KEY",
+                raw_llm.get("credential_encryption_key"),
+            ),
             openai_api_key=raw_llm.get("openai_api_key"),
             siliconflow_api_key=raw_llm.get("siliconflow_api_key"),
             open_router_api_key=raw_llm.get("open_router_api_key"),

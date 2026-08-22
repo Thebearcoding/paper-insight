@@ -10,6 +10,7 @@ admin:
   initial_password: replace-with-a-long-random-password
 
 llm:
+  credential_encryption_key: replace-with-output-of-openssl-rand-hex-32
   openai_api_key:
   siliconflow_api_key:
   open_router_api_key:
