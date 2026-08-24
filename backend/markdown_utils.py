@@ -213,3 +213,20 @@ def missing_zotero_report_sections(content: str | None) -> list[int]:
         for section in range(1, ZOTERO_REPORT_SECTION_COUNT + 1)
         if not re.search(rf"(?m)^## {section}\.\s+\S", normalized)
     ]
+
+
+def zotero_report_part_completion_marker(sections: tuple[int, ...]) -> str:
+    section_suffix = "_".join(str(section) for section in sections)
+    return f"[[ZOTERO_REPORT_PART_COMPLETE_{section_suffix}]]"
+
+
+def normalize_zotero_report_part(
+    content: str | None,
+    sections: tuple[int, ...],
+) -> tuple[str, bool]:
+    raw_content = content or ""
+    marker = zotero_report_part_completion_marker(sections)
+    marker_position = raw_content.rfind(marker)
+    is_complete = marker_position >= max(0, len(raw_content) - 500)
+    cleaned = raw_content.replace(marker, "")
+    return normalize_zotero_report(cleaned), is_complete

@@ -166,6 +166,8 @@ from markdown_utils import (
     missing_zotero_report_sections,
     normalize_llm_markdown,
     normalize_zotero_report,
+    normalize_zotero_report_part,
+    zotero_report_part_completion_marker,
 )
 from prompt import (
     ZOTERO_DEEP_READING_PROMPT_PARTS,
@@ -1681,11 +1683,19 @@ async def analyze_my_zotero_item(
                 yield {"event": "status", "data": f"正在生成报告{part_label}..."}
                 normalized_part = ""
                 missing_part_sections = list(expected_sections)
+                part_complete = False
+                completion_marker = zotero_report_part_completion_marker(expected_sections)
+                completion_instruction = (
+                    f"{part_prompt}\n\n"
+                    "完整写完本段后，最后独占一行原样输出以下完成标记；"
+                    "如果正文尚未完成，不要提前输出：\n"
+                    f"{completion_marker}"
+                )
                 for attempt in range(1, 3):
                     part_chunks: list[str] = []
                     async for stream_chunk in llm.get_response_stream_events(
                         context,
-                        _analysis_instruction=part_prompt,
+                        _analysis_instruction=completion_instruction,
                         _usage_context=f"zotero_analysis_stream_part_{part_index}_attempt_{attempt}",
                         max_tokens=8192,
                     ):
@@ -1693,24 +1703,32 @@ async def analyze_my_zotero_item(
                             yield {"event": "reasoning", "data": stream_chunk.content}
                             continue
                         part_chunks.append(stream_chunk.content)
-                    normalized_part = normalize_zotero_report("".join(part_chunks))
+                    normalized_part, part_complete = normalize_zotero_report_part(
+                        "".join(part_chunks),
+                        expected_sections,
+                    )
                     missing_part_sections = [
                         section
                         for section in expected_sections
                         if section in missing_zotero_report_sections(normalized_part)
                     ]
-                    if not missing_part_sections:
+                    if not missing_part_sections and part_complete:
                         break
                     if attempt == 1:
                         yield {
                             "event": "status",
                             "data": f"报告{part_label}输出不完整，正在重试...",
                         }
-                if missing_part_sections:
+                if missing_part_sections or not part_complete:
                     missing_labels = "、".join(str(section) for section in missing_part_sections)
+                    failure_reason = (
+                        f"缺少第 {missing_labels} 节"
+                        if missing_part_sections
+                        else "上游输出被截断"
+                    )
                     yield {
                         "event": "error",
-                        "data": f"报告{part_label}生成失败（缺少第 {missing_labels} 节），已保留原报告",
+                        "data": f"报告{part_label}生成失败（{failure_reason}），已保留原报告",
                     }
                     return
                 if chunks:

@@ -7,6 +7,8 @@ from markdown_utils import (
     missing_zotero_report_sections,
     normalize_llm_markdown,
     normalize_zotero_report,
+    normalize_zotero_report_part,
+    zotero_report_part_completion_marker,
 )
 from prompt import (
     ZOTERO_DEEP_READING_PROMPT_PARTS,
@@ -97,7 +99,26 @@ def test_missing_zotero_report_sections_detects_truncation():
 def test_zotero_segmented_prompts_cover_each_required_section_once():
     combined = "\n".join(prompt for _label, prompt in ZOTERO_DEEP_READING_PROMPT_PARTS)
 
-    assert len(ZOTERO_DEEP_READING_PROMPT_PARTS) == 4
-    assert ZOTERO_DEEP_READING_SECTION_GROUPS == ((1, 2, 3), (4,), (5,), (6, 7))
+    assert len(ZOTERO_DEEP_READING_PROMPT_PARTS) == 5
+    assert ZOTERO_DEEP_READING_SECTION_GROUPS == ((1, 2), (3,), (4,), (5,), (6, 7))
     for section in range(1, 8):
         assert combined.count(f"## {section}.") == 1
+
+
+def test_zotero_report_part_requires_completion_marker_at_end():
+    sections = (3,)
+    marker = zotero_report_part_completion_marker(sections)
+
+    complete, is_complete = normalize_zotero_report_part(
+        f"## 3. Method\nBody finished.\n\n{marker}",
+        sections,
+    )
+    truncated, is_truncated_complete = normalize_zotero_report_part(
+        "## 3. Method\nBody cut off mid-sentence",
+        sections,
+    )
+
+    assert is_complete is True
+    assert marker not in complete
+    assert is_truncated_complete is False
+    assert truncated.endswith("mid-sentence")
