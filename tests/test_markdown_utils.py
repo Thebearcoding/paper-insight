@@ -3,7 +3,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from markdown_utils import normalize_llm_markdown
+from markdown_utils import (
+    missing_zotero_report_sections,
+    normalize_llm_markdown,
+    normalize_zotero_report,
+)
 
 
 def test_normalize_llm_markdown_repairs_markdown_and_math():
@@ -52,3 +56,35 @@ def test_normalize_llm_markdown_production_repairs_are_idempotent():
     normalized = normalize_llm_markdown(content, analysis_mode=True)
 
     assert normalize_llm_markdown(normalized, analysis_mode=True) == normalized
+
+
+def test_normalize_zotero_report_repairs_section_hierarchy():
+    report = "\n".join(
+        [
+            "# Paper report",
+            "# 1. Summary",
+            "## 2. Background",
+            "## 3. Method",
+            "## 3.1 Adapter",
+            "# 4. Experiments",
+            "# 5. Limitations",
+            "# 6. Notes",
+            "# 7. Checklist",
+        ]
+    )
+
+    normalized = normalize_zotero_report(report)
+
+    assert "# Paper report" in normalized
+    assert "## 1. Summary" in normalized
+    assert "## 2. Background" in normalized
+    assert "### 3.1 Adapter" in normalized
+    assert missing_zotero_report_sections(normalized) == []
+
+
+def test_missing_zotero_report_sections_detects_truncation():
+    incomplete = normalize_zotero_report(
+        "# Report\n# 1. Summary\n# 2. Background\n# 3. Method\n# 4. Experiments"
+    )
+
+    assert missing_zotero_report_sections(incomplete) == [5, 6, 7]

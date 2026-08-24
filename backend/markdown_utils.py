@@ -3,6 +3,7 @@ import re
 
 CODE_SEGMENT_PATTERN = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
 SAME_LINE_BLOCK_MATH_PATTERN = re.compile(r"^([ \t]*)\$\$[ \t]*(\S(?:.*?\S)?)[ \t]*\$\$[ \t]*$", re.MULTILINE)
+ZOTERO_REPORT_SECTION_COUNT = 7
 
 
 def _mask_code_segments(content: str) -> tuple[str, list[str]]:
@@ -183,3 +184,32 @@ def normalize_llm_markdown(content: str | None, analysis_mode: bool = False) -> 
     normalized = "\n".join(normalized_lines)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).rstrip()
     return _unmask_code_segments(normalized, segments)
+
+
+def normalize_zotero_report(content: str | None) -> str:
+    normalized = normalize_llm_markdown(content, analysis_mode=True)
+    lines: list[str] = []
+    in_fence = False
+    for line in normalized.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            lines.append(line)
+            continue
+        if not in_fence:
+            subsection = re.match(r"^[ \t]*#{1,6}[ \t]+(\d+\.\d+(?:\.\d+)*\s+.+)$", line)
+            section = re.match(r"^[ \t]*#{1,6}[ \t]+([1-7]\.\s+.+)$", line)
+            if subsection:
+                line = f"### {subsection.group(1).strip()}"
+            elif section:
+                line = f"## {section.group(1).strip()}"
+        lines.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip()
+
+
+def missing_zotero_report_sections(content: str | None) -> list[int]:
+    normalized = content or ""
+    return [
+        section
+        for section in range(1, ZOTERO_REPORT_SECTION_COUNT + 1)
+        if not re.search(rf"(?m)^## {section}\.\s+\S", normalized)
+    ]

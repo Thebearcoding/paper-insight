@@ -162,7 +162,11 @@ from database import (
 )
 from chat import ChatSession
 from background_tasks import BackgroundAnalyzer
-from markdown_utils import normalize_llm_markdown
+from markdown_utils import (
+    missing_zotero_report_sections,
+    normalize_llm_markdown,
+    normalize_zotero_report,
+)
 from prompt import ZOTERO_DEEP_READING_PROMPT, build_open_in_ai_prompt
 from zotero import (
     ZoteroAuthError,
@@ -1648,7 +1652,7 @@ async def analyze_my_zotero_item(
                 yield {"event": "error", "data": "Zotero 条目不存在"}
                 return
             if not reanalyze and item.get("llm_response"):
-                normalized = normalize_llm_markdown(item["llm_response"], analysis_mode=True)
+                normalized = normalize_zotero_report(item["llm_response"])
                 if normalized != item["llm_response"]:
                     await asyncio.to_thread(update_zotero_analysis, user_id, item_key, normalized)
                 yield {"data": normalized}
@@ -1666,13 +1670,22 @@ async def analyze_my_zotero_item(
                 context,
                 _analysis_instruction=ZOTERO_DEEP_READING_PROMPT,
                 _usage_context="zotero_analysis_stream",
+                max_tokens=8192,
             ):
                 if stream_chunk.kind == "reasoning":
                     yield {"event": "reasoning", "data": stream_chunk.content}
                     continue
                 chunks.append(stream_chunk.content)
                 yield {"data": stream_chunk.content}
-            normalized = normalize_llm_markdown("".join(chunks), analysis_mode=True)
+            normalized = normalize_zotero_report("".join(chunks))
+            missing_sections = missing_zotero_report_sections(normalized)
+            if missing_sections:
+                missing_labels = "、".join(str(section) for section in missing_sections)
+                yield {
+                    "event": "error",
+                    "data": f"深度阅读报告输出不完整（缺少第 {missing_labels} 节），已保留原报告",
+                }
+                return
             await asyncio.to_thread(update_zotero_analysis, user_id, item_key, normalized)
             yield {"event": "final", "data": normalized}
             yield {"event": "done", "data": ""}
