@@ -167,7 +167,10 @@ from markdown_utils import (
     normalize_llm_markdown,
     normalize_zotero_report,
 )
-from prompt import ZOTERO_DEEP_READING_PROMPT, build_open_in_ai_prompt
+from prompt import (
+    ZOTERO_DEEP_READING_PROMPT_PARTS,
+    build_open_in_ai_prompt,
+)
 from zotero import (
     ZoteroAuthError,
     ZoteroClient,
@@ -1666,17 +1669,25 @@ async def analyze_my_zotero_item(
             yield {"event": "source", "data": source}
             yield {"event": "status", "data": "正在生成深度阅读报告..."}
             chunks: list[str] = []
-            async for stream_chunk in llm.get_response_stream_events(
-                context,
-                _analysis_instruction=ZOTERO_DEEP_READING_PROMPT,
-                _usage_context="zotero_analysis_stream",
-                max_tokens=8192,
+            for part_index, (part_label, part_prompt) in enumerate(
+                ZOTERO_DEEP_READING_PROMPT_PARTS,
+                start=1,
             ):
-                if stream_chunk.kind == "reasoning":
-                    yield {"event": "reasoning", "data": stream_chunk.content}
-                    continue
-                chunks.append(stream_chunk.content)
-                yield {"data": stream_chunk.content}
+                yield {"event": "status", "data": f"正在生成报告{part_label}..."}
+                if chunks:
+                    chunks.append("\n\n")
+                    yield {"data": "\n\n"}
+                async for stream_chunk in llm.get_response_stream_events(
+                    context,
+                    _analysis_instruction=part_prompt,
+                    _usage_context=f"zotero_analysis_stream_part_{part_index}",
+                    max_tokens=4096,
+                ):
+                    if stream_chunk.kind == "reasoning":
+                        yield {"event": "reasoning", "data": stream_chunk.content}
+                        continue
+                    chunks.append(stream_chunk.content)
+                    yield {"data": stream_chunk.content}
             normalized = normalize_zotero_report("".join(chunks))
             missing_sections = missing_zotero_report_sections(normalized)
             if missing_sections:
