@@ -134,6 +134,20 @@ export interface ZoteroCreator {
   name?: string;
 }
 
+export interface ZoteroAnalysisFigure {
+  id: string;
+  kind: 'framework' | string;
+  label: string;
+  caption: string;
+  source: string;
+  source_url?: string | null;
+  page_number?: number | null;
+  width?: number | null;
+  height?: number | null;
+  media_type?: string | null;
+  url: string;
+}
+
 export interface ZoteroItem {
   item_key: string;
   item_version: number;
@@ -155,6 +169,7 @@ export interface ZoteroItem {
   annotation_text?: string | null;
   annotation_comment?: string | null;
   llm_response?: string | null;
+  analysis_figures?: ZoteroAnalysisFigure[];
   analyzed?: boolean;
   analyzed_at?: string | null;
   updated_at?: string;

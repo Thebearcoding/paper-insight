@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ExternalLink, FileText, Loader2, RefreshCw, Sparkles } from 'lucide-react';
+import { ArrowLeft, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles } from 'lucide-react';
 
 import { ActiveModelBadge } from '@/components/active-model-badge';
 import { ChatPanel } from '@/components/chat-panel';
@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { fetchZoteroItem, streamSse, zoteroItemApiPath } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { navigate } from '@/lib/router';
-import type { ZoteroItem } from '@/types';
+import type { ZoteroAnalysisFigure, ZoteroItem } from '@/types';
 
 
 interface ZoteroItemPageProps {
@@ -31,6 +31,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState('');
+  const [analysisFigures, setAnalysisFigures] = useState<ZoteroAnalysisFigure[]>([]);
   const [reasoning, setReasoning] = useState('');
   const [analysisStatus, setAnalysisStatus] = useState('');
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -51,6 +52,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
       .then((payload) => {
         if (active) {
           setItem(payload);
+          setAnalysisFigures(payload.analysis_figures ?? []);
         }
       })
       .catch((nextError) => {
@@ -90,6 +92,13 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
               setReasoning((current) => current + data);
             } else if (event === 'final') {
               setAnalysis(data);
+            } else if (event === 'figures') {
+              try {
+                const figures = JSON.parse(data) as ZoteroAnalysisFigure[];
+                setAnalysisFigures(Array.isArray(figures) ? figures : []);
+              } catch {
+                setAnalysisFigures([]);
+              }
             } else if (event === 'error') {
               throw new Error(data || '深度阅读失败');
             } else if (event === 'done') {
@@ -200,6 +209,37 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
         ) : (
           <div className="mt-6 space-y-4">
             <ReasoningStreamPanel reasoning={analyzing ? reasoning : ''} />
+            {analysisFigures.map((figure) => (
+              <figure
+                key={figure.id}
+                className="overflow-hidden rounded-2xl border border-[#e8edf4] bg-[#f8fafc]"
+              >
+                <div className="flex items-center gap-2 border-b border-[#e8edf4] bg-white px-4 py-3 text-sm font-medium text-[#334155]">
+                  <Images className="h-4 w-4 text-[#ff9900]" />
+                  论文框架图 · {figure.label}
+                </div>
+                <a href={figure.url} target="_blank" rel="noreferrer" className="block bg-white p-3 sm:p-5">
+                  <img
+                    src={figure.url}
+                    alt={figure.caption || `${item.title || '论文'}框架图`}
+                    className="mx-auto max-h-[42rem] w-auto max-w-full rounded-lg object-contain"
+                    loading="lazy"
+                  />
+                </a>
+                <figcaption className="space-y-2 px-4 py-3 text-sm leading-6 text-[#64748b]">
+                  <p>{figure.caption}</p>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#94a3b8]">
+                    <span>来源：{figure.source}</span>
+                    {figure.page_number ? <span>PDF 第 {figure.page_number} 页</span> : null}
+                    {figure.source_url ? (
+                      <a href={figure.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+                        查看原图 <ExternalLink className="ml-1 inline h-3 w-3" />
+                      </a>
+                    ) : null}
+                  </div>
+                </figcaption>
+              </figure>
+            ))}
             {analysis ? (
               <RichContent
                 content={analysis}

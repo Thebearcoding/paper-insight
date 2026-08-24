@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import logging
 import secrets
@@ -173,6 +174,10 @@ from prompt import (
     ZOTERO_DEEP_READING_PROMPT_PARTS,
     ZOTERO_DEEP_READING_SECTION_GROUPS,
     build_open_in_ai_prompt,
+)
+from paper_figures import (
+    extract_and_save_zotero_framework_figure,
+    zotero_figure_path,
 )
 from zotero import (
     ZoteroAuthError,
@@ -1205,6 +1210,19 @@ def public_zotero_connection(connection: dict | None) -> dict:
     }
 
 
+def public_zotero_analysis_figures(item_key: str, figures: list[dict] | None) -> list[dict]:
+    return [
+        {
+            key: value
+            for key, value in figure.items()
+            if key != "filename"
+        }
+        | {"url": f"/me/zotero/items/{item_key}/figures/{figure.get('id')}"}
+        for figure in figures or []
+        if isinstance(figure, dict) and figure.get("id")
+    ]
+
+
 def public_zotero_item(item: dict) -> dict:
     result = {
         key: value
@@ -1220,6 +1238,10 @@ def public_zotero_item(item: dict) -> dict:
             }
             for child in item.get("children") or []
         ]
+    result["analysis_figures"] = public_zotero_analysis_figures(
+        str(item.get("item_key") or ""),
+        item.get("analysis_figures"),
+    )
     return result
 
 
@@ -1277,6 +1299,26 @@ async def load_zotero_reading_context(user_id: str, item: dict) -> tuple[str, st
         item=item,
         children=item.get("children") or [],
         client=client,
+    )
+
+
+async def extract_zotero_framework_figure(
+    user_id: str,
+    item: dict,
+    reading_context: str,
+) -> dict | None:
+    connection = await asyncio.to_thread(get_zotero_connection, user_id, True)
+    if not connection:
+        raise HTTPException(status_code=404, detail="请先连接 Zotero 文库")
+    client = ZoteroClient(connection["api_key"])
+    return await asyncio.to_thread(
+        extract_and_save_zotero_framework_figure,
+        user_id=user_id,
+        zotero_user_id=int(connection["zotero_user_id"]),
+        item=item,
+        children=item.get("children") or [],
+        client=client,
+        reading_context=reading_context,
     )
 
 
@@ -1640,6 +1682,38 @@ async def get_my_zotero_item(item_key: str, user: dict = Depends(require_current
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
 
 
+@app.get("/me/zotero/items/{item_key}/figures/{figure_id}")
+async def get_my_zotero_item_figure(
+    item_key: str,
+    figure_id: str,
+    user: dict = Depends(require_current_user),
+):
+    try:
+        item = await asyncio.to_thread(get_zotero_item, user["id"], item_key)
+        if not item:
+            raise HTTPException(status_code=404, detail="Zotero 条目不存在")
+        figure = next(
+            (
+                entry
+                for entry in item.get("analysis_figures") or []
+                if isinstance(entry, dict) and str(entry.get("id")) == figure_id
+            ),
+            None,
+        )
+        if not figure or not figure.get("filename"):
+            raise HTTPException(status_code=404, detail="论文框架图不存在")
+        path = zotero_figure_path(user["id"], item_key, str(figure["filename"]))
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="论文框架图文件不存在")
+        return FileResponse(
+            path,
+            media_type=str(figure.get("media_type") or "image/png"),
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
 @app.get("/me/zotero/items/{item_key}/analysis")
 async def analyze_my_zotero_item(
     item_key: str,
@@ -1670,6 +1744,28 @@ async def analyze_my_zotero_item(
             if warning:
                 yield {"event": "status", "data": f"{warning}，将基于现有材料继续分析"}
             yield {"event": "source", "data": source}
+            analysis_figures = list(item.get("analysis_figures") or [])
+            yield {"event": "status", "data": "正在识别并提取论文框架图..."}
+            try:
+                framework_figure = await extract_zotero_framework_figure(
+                    user_id,
+                    item,
+                    context,
+                )
+                if framework_figure:
+                    analysis_figures = [framework_figure]
+                    yield {
+                        "event": "figures",
+                        "data": json.dumps(
+                            public_zotero_analysis_figures(item_key, analysis_figures),
+                            ensure_ascii=False,
+                        ),
+                    }
+                else:
+                    yield {"event": "status", "data": "未识别到明确的论文框架图，将继续生成报告"}
+            except Exception as exc:
+                logger.info("Unable to extract Zotero framework figure %s: %s", item_key, exc)
+                yield {"event": "status", "data": "框架图提取失败，将继续生成文字报告"}
             yield {"event": "status", "data": "正在生成深度阅读报告..."}
             chunks: list[str] = []
             for part_index, ((part_label, part_prompt), expected_sections) in enumerate(
@@ -1745,7 +1841,13 @@ async def analyze_my_zotero_item(
                     "data": f"深度阅读报告输出不完整（缺少第 {missing_labels} 节），已保留原报告",
                 }
                 return
-            await asyncio.to_thread(update_zotero_analysis, user_id, item_key, normalized)
+            await asyncio.to_thread(
+                update_zotero_analysis,
+                user_id,
+                item_key,
+                normalized,
+                analysis_figures,
+            )
             yield {"event": "final", "data": normalized}
             yield {"event": "done", "data": ""}
         except (ZoteroError, DatabaseError) as exc:

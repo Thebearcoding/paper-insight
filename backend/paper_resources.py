@@ -387,7 +387,7 @@ def _is_public_url(url: str) -> bool:
         return False
 
 
-def _download_pdf_text(url: str) -> str:
+def download_public_pdf_bytes(url: str) -> bytes:
     current_url = url
     max_bytes = max(settings.zotero.max_attachment_mb, 1) * 1024 * 1024
     for _ in range(MAX_REDIRECTS + 1):
@@ -424,10 +424,14 @@ def _download_pdf_text(url: str) -> str:
             content_type = response.headers.get("Content-Type", "")
             if "pdf" not in content_type.casefold() and not content.startswith(b"%PDF"):
                 raise ReaderError(f"公开地址返回的不是 PDF: {content_type or 'unknown'}")
-            return extract_pdf_text_bounded(content, current_url)
+            return content
         finally:
             response.close()
     raise ReaderError("PDF 下载重定向次数过多")
+
+
+def _download_pdf_text(url: str) -> str:
+    return extract_pdf_text_bounded(download_public_pdf_bytes(url), url)
 
 
 def _pdf_extraction_worker(pdf_bytes: bytes, source_url: str, result_queue: Any) -> None:

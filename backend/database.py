@@ -3275,6 +3275,11 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                                 THEN zotero_items.llm_response
                                 ELSE NULL
                             END,
+                            analysis_figures = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analysis_figures
+                                ELSE '[]'::jsonb
+                            END,
                             analyzed_at = CASE
                                 WHEN zotero_items.item_version = EXCLUDED.item_version
                                 THEN zotero_items.analyzed_at
@@ -3322,7 +3327,9 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                             WHERE parent.user_id = %s
                         )
                         UPDATE zotero_items
-                        SET llm_response = NULL, analyzed_at = NULL
+                        SET llm_response = NULL,
+                            analysis_figures = '[]'::jsonb,
+                            analyzed_at = NULL
                         WHERE user_id = %s
                           AND item_key IN (SELECT item_key FROM ancestors)
                         """,
@@ -3365,7 +3372,9 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                                 WHERE parent.user_id = %s
                             )
                             UPDATE zotero_items
-                            SET llm_response = NULL, analyzed_at = NULL
+                            SET llm_response = NULL,
+                                analysis_figures = '[]'::jsonb,
+                                analyzed_at = NULL
                             WHERE user_id = %s
                               AND item_key IN (SELECT item_key FROM ancestors)
                             """,
@@ -3514,21 +3523,39 @@ def get_zotero_item(user_id: str, item_key: str) -> dict | None:
     return _run_with_retry(operation, f"get_zotero_item:{user_id}:{item_key}")
 
 
-def update_zotero_analysis(user_id: str, item_key: str, response: str) -> None:
+def update_zotero_analysis(
+    user_id: str,
+    item_key: str,
+    response: str,
+    analysis_figures: list[dict] | None = None,
+) -> None:
     if not DATABASE_URL:
         return
 
     def operation() -> None:
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE zotero_items
-                    SET llm_response = %s, analyzed_at = NOW(), updated_at = NOW()
-                    WHERE user_id = %s AND item_key = %s
-                    """,
-                    (response, user_id, item_key),
-                )
+                if analysis_figures is None:
+                    cur.execute(
+                        """
+                        UPDATE zotero_items
+                        SET llm_response = %s, analyzed_at = NOW(), updated_at = NOW()
+                        WHERE user_id = %s AND item_key = %s
+                        """,
+                        (response, user_id, item_key),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE zotero_items
+                        SET llm_response = %s,
+                            analysis_figures = %s,
+                            analyzed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE user_id = %s AND item_key = %s
+                        """,
+                        (response, Jsonb(analysis_figures), user_id, item_key),
+                    )
             conn.commit()
 
     _run_with_retry(operation, f"update_zotero_analysis:{user_id}:{item_key}")
