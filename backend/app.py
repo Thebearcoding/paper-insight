@@ -169,6 +169,7 @@ from markdown_utils import (
 )
 from prompt import (
     ZOTERO_DEEP_READING_PROMPT_PARTS,
+    ZOTERO_DEEP_READING_SECTION_GROUPS,
     build_open_in_ai_prompt,
 )
 from zotero import (
@@ -1669,25 +1670,54 @@ async def analyze_my_zotero_item(
             yield {"event": "source", "data": source}
             yield {"event": "status", "data": "正在生成深度阅读报告..."}
             chunks: list[str] = []
-            for part_index, (part_label, part_prompt) in enumerate(
-                ZOTERO_DEEP_READING_PROMPT_PARTS,
+            for part_index, ((part_label, part_prompt), expected_sections) in enumerate(
+                zip(
+                    ZOTERO_DEEP_READING_PROMPT_PARTS,
+                    ZOTERO_DEEP_READING_SECTION_GROUPS,
+                    strict=True,
+                ),
                 start=1,
             ):
                 yield {"event": "status", "data": f"正在生成报告{part_label}..."}
+                normalized_part = ""
+                missing_part_sections = list(expected_sections)
+                for attempt in range(1, 3):
+                    part_chunks: list[str] = []
+                    async for stream_chunk in llm.get_response_stream_events(
+                        context,
+                        _analysis_instruction=part_prompt,
+                        _usage_context=f"zotero_analysis_stream_part_{part_index}_attempt_{attempt}",
+                        max_tokens=4096,
+                    ):
+                        if stream_chunk.kind == "reasoning":
+                            yield {"event": "reasoning", "data": stream_chunk.content}
+                            continue
+                        part_chunks.append(stream_chunk.content)
+                    normalized_part = normalize_zotero_report("".join(part_chunks))
+                    missing_part_sections = [
+                        section
+                        for section in expected_sections
+                        if section in missing_zotero_report_sections(normalized_part)
+                    ]
+                    if not missing_part_sections:
+                        break
+                    if attempt == 1:
+                        yield {
+                            "event": "status",
+                            "data": f"报告{part_label}输出不完整，正在重试...",
+                        }
+                if missing_part_sections:
+                    missing_labels = "、".join(str(section) for section in missing_part_sections)
+                    yield {
+                        "event": "error",
+                        "data": f"报告{part_label}生成失败（缺少第 {missing_labels} 节），已保留原报告",
+                    }
+                    return
                 if chunks:
                     chunks.append("\n\n")
                     yield {"data": "\n\n"}
-                async for stream_chunk in llm.get_response_stream_events(
-                    context,
-                    _analysis_instruction=part_prompt,
-                    _usage_context=f"zotero_analysis_stream_part_{part_index}",
-                    max_tokens=4096,
-                ):
-                    if stream_chunk.kind == "reasoning":
-                        yield {"event": "reasoning", "data": stream_chunk.content}
-                        continue
-                    chunks.append(stream_chunk.content)
-                    yield {"data": stream_chunk.content}
+                chunks.append(normalized_part)
+                yield {"data": normalized_part}
             normalized = normalize_zotero_report("".join(chunks))
             missing_sections = missing_zotero_report_sections(normalized)
             if missing_sections:

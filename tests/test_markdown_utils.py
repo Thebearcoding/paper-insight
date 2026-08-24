@@ -8,7 +8,10 @@ from markdown_utils import (
     normalize_llm_markdown,
     normalize_zotero_report,
 )
-from prompt import ZOTERO_DEEP_READING_PROMPT_PARTS
+from prompt import (
+    ZOTERO_DEEP_READING_PROMPT_PARTS,
+    ZOTERO_DEEP_READING_SECTION_GROUPS,
+)
 
 
 def test_normalize_llm_markdown_repairs_markdown_and_math():
@@ -95,5 +98,6 @@ def test_zotero_segmented_prompts_cover_each_required_section_once():
     combined = "\n".join(prompt for _label, prompt in ZOTERO_DEEP_READING_PROMPT_PARTS)
 
     assert len(ZOTERO_DEEP_READING_PROMPT_PARTS) == 3
+    assert ZOTERO_DEEP_READING_SECTION_GROUPS == ((1, 2, 3), (4, 5), (6, 7))
     for section in range(1, 8):
         assert combined.count(f"## {section}.") == 1

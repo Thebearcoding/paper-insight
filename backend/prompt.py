@@ -101,6 +101,7 @@ ZOTERO_DEEP_READING_PROMPT_PARTS = (
 保持内容清晰、紧凑。使用 Markdown。""",
     ),
 )
+ZOTERO_DEEP_READING_SECTION_GROUPS = ((1, 2, 3), (4, 5), (6, 7))
 
 CODE_AVAILABILITY_PROMPT = """你是一个严谨的信息抽取器。请只根据用户提供的论文文本或已有论文分析文本，判断这篇论文的相关代码是否公开可用。
 
