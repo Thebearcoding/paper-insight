@@ -15,9 +15,10 @@ from config import REPO_ROOT, settings
 from paper_resources import (
     build_repository_context,
     discover_code_repositories,
+    extract_pdf_text_bounded,
     resolve_public_document,
 )
-from utils import ReaderError, extract_pdf_text, truncate_content_for_llm
+from utils import ReaderError, truncate_content_for_llm
 
 
 logger = logging.getLogger(__name__)
@@ -497,7 +498,7 @@ def get_item_reading_context(
                     errors.append("Zotero 附件是 linked_url，将尝试公开地址")
                     continue
                 pdf_bytes = client.download_attachment(zotero_user_id, key)
-                content = extract_pdf_text(pdf_bytes, f"zotero:{key}")
+                content = extract_pdf_text_bounded(pdf_bytes, f"zotero:{key}")
                 source = "attachment-pdf"
             content = content.strip()
             if content:

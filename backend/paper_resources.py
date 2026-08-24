@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import ipaddress
 import logging
+import multiprocessing
+import queue
 import re
 import socket
 import time
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urljoin, urlparse
@@ -29,6 +33,8 @@ logger = logging.getLogger(__name__)
 MAX_REDIRECTS = 5
 MAX_REPOSITORIES = 3
 MAX_README_CHARS = 16_000
+MAX_HTML_BYTES = 10 * 1024 * 1024
+PDF_EXTRACTION_TIMEOUT_SECONDS = 90
 REPOSITORY_CACHE_TTL_SECONDS = 24 * 60 * 60
 RESOURCE_USER_AGENT = "Paper-Insight/1.0 scholarly resource resolver"
 
@@ -77,6 +83,77 @@ class ResolvedDocument:
     content: str
     url: str
     source: str
+
+
+class _ArxivHtmlExtractor(HTMLParser):
+    BLOCK_TAGS = {
+        "article",
+        "blockquote",
+        "br",
+        "caption",
+        "div",
+        "figcaption",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
+    }
+    SKIP_TAGS = {"math", "script", "style", "svg"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.in_article = False
+        self.skip_depth = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = str(attributes.get("class") or "").split()
+        if tag == "article" and "ltx_document" in classes:
+            self.in_article = True
+        if not self.in_article:
+            return
+        if tag == "math" and attributes.get("alttext"):
+            self.parts.append(f" {attributes['alttext']} ")
+        if tag in self.SKIP_TAGS:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if tag == "li":
+            self.parts.append("\n- ")
+        elif tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self.in_article:
+            return
+        if tag in self.SKIP_TAGS and self.skip_depth:
+            self.skip_depth -= 1
+        elif not self.skip_depth and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+        if tag == "article":
+            self.in_article = False
+
+    def handle_data(self, data: str) -> None:
+        if self.in_article and not self.skip_depth:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        content = html.unescape("".join(self.parts))
+        content = re.sub(r"[\t\r\f\v ]+", " ", content)
+        content = re.sub(r" *\n *", "\n", content)
+        return re.sub(r"\n{3,}", "\n\n", content).strip()
 
 
 def _raw_data(record: dict[str, Any]) -> dict[str, Any]:
@@ -347,10 +424,84 @@ def _download_pdf_text(url: str) -> str:
             content_type = response.headers.get("Content-Type", "")
             if "pdf" not in content_type.casefold() and not content.startswith(b"%PDF"):
                 raise ReaderError(f"公开地址返回的不是 PDF: {content_type or 'unknown'}")
-            return extract_pdf_text(content, current_url)
+            return extract_pdf_text_bounded(content, current_url)
         finally:
             response.close()
     raise ReaderError("PDF 下载重定向次数过多")
+
+
+def _pdf_extraction_worker(pdf_bytes: bytes, source_url: str, result_queue: Any) -> None:
+    try:
+        result_queue.put(("ok", extract_pdf_text(pdf_bytes, source_url)))
+    except Exception as exc:
+        result_queue.put(("error", str(exc)))
+
+
+def extract_pdf_text_bounded(pdf_bytes: bytes, source_url: str = "") -> str:
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_pdf_extraction_worker,
+        args=(pdf_bytes, source_url, result_queue),
+        daemon=True,
+    )
+    process.start()
+    try:
+        status, payload = result_queue.get(timeout=PDF_EXTRACTION_TIMEOUT_SECONDS)
+    except queue.Empty as exc:
+        process.terminate()
+        process.join(timeout=5)
+        raise ReaderError(
+            f"PDF 文本抽取超过 {PDF_EXTRACTION_TIMEOUT_SECONDS} 秒: {source_url or 'unknown source'}"
+        ) from exc
+    finally:
+        result_queue.close()
+    process.join(timeout=5)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+    if status != "ok":
+        raise ReaderError(payload)
+    return str(payload)
+
+
+def _arxiv_html_url(candidate: DocumentCandidate) -> str | None:
+    arxiv_id = extract_arxiv_id(candidate.url)
+    return f"https://arxiv.org/html/{arxiv_id}" if arxiv_id else None
+
+
+def _download_arxiv_html_text(url: str) -> str:
+    if not _is_public_url(url):
+        raise ReaderError("arXiv HTML 地址不是可公开访问的安全 URL")
+    response = requests.get(
+        url,
+        headers={"Accept": "text/html", "User-Agent": RESOURCE_USER_AGENT},
+        timeout=max(settings.zotero.request_timeout_seconds, 5),
+        stream=True,
+        allow_redirects=False,
+    )
+    try:
+        response.raise_for_status()
+        content_length = int(response.headers.get("Content-Length") or 0)
+        if content_length > MAX_HTML_BYTES:
+            raise ReaderError("arXiv HTML 正文超过读取上限")
+        chunks: list[bytes] = []
+        received = 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > MAX_HTML_BYTES:
+                raise ReaderError("arXiv HTML 正文超过读取上限")
+            chunks.append(chunk)
+        parser = _ArxivHtmlExtractor()
+        parser.feed(b"".join(chunks).decode(response.encoding or "utf-8", errors="replace"))
+        content = parser.text()
+        if len(content) < MIN_EXTRACTED_PDF_TEXT_CHARS:
+            raise ReaderError("arXiv HTML 正文抽取结果过短")
+        return content
+    finally:
+        response.close()
 
 
 def _document_cache_id(url: str) -> str:
@@ -365,7 +516,16 @@ def fetch_document_candidate(candidate: DocumentCandidate) -> ResolvedDocument:
         return ResolvedDocument(cached, candidate.url, candidate.source)
     if not _is_public_url(candidate.url):
         raise ReaderError("论文资源地址不是可公开访问的安全 URL")
-    if candidate.source in {"arxiv", "openreview"}:
+    if candidate.source == "arxiv":
+        html_url = _arxiv_html_url(candidate)
+        try:
+            content = _download_arxiv_html_text(html_url) if html_url else ""
+            extraction_source = "arxiv-html"
+        except (ReaderError, requests.RequestException) as html_error:
+            logger.info("arXiv HTML failed for %s, trying PDF: %s", candidate.url, html_error)
+            content = _download_pdf_text(candidate.url)
+            extraction_source = "pdf-text"
+    elif candidate.source == "openreview":
         content = _download_pdf_text(candidate.url)
         extraction_source = "pdf-text"
     else:

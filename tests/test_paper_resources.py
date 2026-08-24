@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
@@ -105,6 +107,67 @@ def test_open_access_candidate_accepts_download_url_without_pdf_suffix():
         "https://repository.example.edu/download?id=123",
         "openalex",
     )
+
+
+def test_arxiv_html_extractor_keeps_article_text_only():
+    parser = paper_resources._ArxivHtmlExtractor()
+    parser.feed(
+        """
+        <html><body><nav>Navigation</nav>
+        <article class="ltx_document">
+          <h1>Paper Title</h1>
+          <p>Method <math alttext="x + y"><mi>x</mi></math> result.</p>
+          <script>ignore me</script>
+        </article>
+        <footer>Footer</footer></body></html>
+        """
+    )
+
+    content = parser.text()
+    assert "Paper Title" in content
+    assert "x + y" in content
+    assert "Navigation" not in content
+    assert "ignore me" not in content
+    assert "Footer" not in content
+
+
+def test_arxiv_candidate_prefers_html_before_pdf(monkeypatch):
+    monkeypatch.setattr(paper_resources, "get_cached_paper_content", lambda *args: None)
+    monkeypatch.setattr(paper_resources, "_is_public_url", lambda url: True)
+    monkeypatch.setattr(
+        paper_resources,
+        "_download_arxiv_html_text",
+        lambda url: "A complete arXiv HTML paper body.",
+    )
+    monkeypatch.setattr(
+        paper_resources,
+        "_download_pdf_text",
+        lambda url: (_ for _ in ()).throw(AssertionError("PDF fallback should not run")),
+    )
+    cached = []
+    monkeypatch.setattr(
+        paper_resources,
+        "cache_paper_content",
+        lambda paper_id, url, content, source: cached.append((url, content, source)),
+    )
+
+    document = paper_resources.fetch_document_candidate(
+        paper_resources.DocumentCandidate("https://arxiv.org/pdf/2503.06661", "arxiv")
+    )
+
+    assert document.content == "A complete arXiv HTML paper body."
+    assert cached == [
+        (
+            "https://arxiv.org/pdf/2503.06661",
+            "A complete arXiv HTML paper body.",
+            "arxiv-html",
+        )
+    ]
+
+
+def test_bounded_pdf_extraction_propagates_parse_failure():
+    with pytest.raises(paper_resources.ReaderError, match="PDF"):
+        paper_resources.extract_pdf_text_bounded(b"not-a-pdf", "invalid.pdf")
 
 
 def test_crossref_candidate_only_accepts_pdf_links(monkeypatch):
