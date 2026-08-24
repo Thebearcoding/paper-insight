@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ExternalLink, FileText, Loader2, RefreshCw, Sparkles } from 'lucide-react';
 
+import { ActiveModelBadge } from '@/components/active-model-badge';
 import { ChatPanel } from '@/components/chat-panel';
 import { ReasoningStreamPanel } from '@/components/reasoning-stream-panel';
 import { RichContent } from '@/components/rich-content';
@@ -31,7 +32,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState('');
   const [reasoning, setReasoning] = useState('');
-  const [analysisStatus, setAnalysisStatus] = useState('准备读取 Zotero 条目...');
+  const [analysisStatus, setAnalysisStatus] = useState('');
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -94,6 +95,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
             } else if (event === 'done') {
               setAnalyzing(false);
               setReasoning('');
+              setAnalysisStatus('');
             }
           },
         },
@@ -104,13 +106,31 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
       }
       setAnalysisError(nextError instanceof Error ? nextError.message : '深度阅读失败');
       setAnalyzing(false);
+      setAnalysisStatus('');
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
     }
   }, [itemKey]);
 
   useEffect(() => {
-    if (item) {
-      void loadAnalysis(false);
+    if (!item) {
+      return undefined;
     }
+
+    if (item.llm_response?.trim()) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setAnalysis(item.llm_response);
+      setReasoning('');
+      setAnalysisError(null);
+      setAnalyzing(false);
+      setAnalysisStatus('');
+      return undefined;
+    }
+
+    void loadAnalysis(false);
     return () => abortRef.current?.abort();
   }, [item, loadAnalysis]);
 
@@ -147,21 +167,50 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
         </div>
       </section>
 
-      <Card className="border-white/80 bg-white/92 shadow-lg">
-        <CardHeader className="flex-row items-center justify-between gap-4">
-          <div>
-            <CardTitle className="flex items-center"><Sparkles className="mr-2 h-5 w-5 text-amber-500" />深度阅读报告</CardTitle>
-            {analyzing ? <p className="mt-2 text-sm text-slate-500">{analysisStatus}</p> : null}
+      <section className="rounded-[32px] bg-white p-6 shadow-sm ring-1 ring-black/5 sm:p-8">
+        <div className="flex flex-col gap-3 border-b border-[#eef2f7] pb-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex shrink-0 items-center gap-2">
+            <Sparkles className="h-5 w-5 text-[#ff9900]" />
+            <div>
+              <h2 className="whitespace-nowrap text-xl font-semibold text-[#172033]">AI 分析</h2>
+              {analysisStatus ? <p className="text-sm text-[#728095]">{analysisStatus}</p> : null}
+            </div>
           </div>
-          <Button variant="outline" disabled={analyzing} onClick={() => void loadAnalysis(true)}><RefreshCw className={`mr-2 h-4 w-4 ${analyzing ? 'animate-spin' : ''}`} />重新分析</Button>
-        </CardHeader>
-        <CardContent>
-          {reasoning ? <ReasoningStreamPanel reasoning={reasoning} /> : null}
-          {analysis ? <RichContent content={analysis} /> : null}
-          {analyzing && !analysis ? <div className="flex min-h-40 items-center justify-center text-slate-500"><Loader2 className="mr-2 h-5 w-5 animate-spin" />{analysisStatus}</div> : null}
-          {analysisError ? <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700">{analysisError}</p> : null}
-        </CardContent>
-      </Card>
+          <div className="flex max-w-full flex-wrap items-center gap-2">
+            <ActiveModelBadge className="max-w-[18rem]" />
+            <Button
+              variant="outline"
+              className="rounded-full"
+              disabled={analyzing}
+              onClick={() => void loadAnalysis(true)}
+            >
+              <RefreshCw className={`mr-2 h-4 w-4 ${analyzing ? 'animate-spin' : ''}`} />
+              重新分析
+            </Button>
+          </div>
+        </div>
+
+        {analyzing && !analysis && !reasoning ? (
+          <div className="mt-6 flex min-h-40 items-center justify-center gap-2 text-[#728095]">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            {analysisStatus || '正在分析论文...'}
+          </div>
+        ) : analysisError ? (
+          <div className="mt-6 rounded-2xl bg-[#fff1f2] p-4 text-[#b91c1c]">{analysisError}</div>
+        ) : (
+          <div className="mt-6 space-y-4">
+            <ReasoningStreamPanel reasoning={analyzing ? reasoning : ''} />
+            {analysis ? (
+              <RichContent
+                content={analysis}
+                analysisMode
+                isStreaming={analyzing}
+                className="markdown-body analysis-markdown text-base leading-7 text-[#334155]"
+              />
+            ) : null}
+          </div>
+        )}
+      </section>
 
       {(notes.length || annotations.length) ? (
         <div className="grid gap-6 lg:grid-cols-2">
