@@ -1687,7 +1687,7 @@ async def analyze_my_zotero_item(
                         context,
                         _analysis_instruction=part_prompt,
                         _usage_context=f"zotero_analysis_stream_part_{part_index}_attempt_{attempt}",
-                        max_tokens=4096,
+                        max_tokens=8192,
                     ):
                         if stream_chunk.kind == "reasoning":
                             yield {"event": "reasoning", "data": stream_chunk.content}
