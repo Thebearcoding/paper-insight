@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import zotero
+from paper_resources import ResolvedDocument
 
 
 class FakeResponse:
@@ -135,6 +136,101 @@ def test_build_metadata_context_includes_user_notes_and_annotations():
     assert "My reading note" in context
     assert "Highlighted claim" in context
     assert "Verify this" in context
+
+
+def test_linked_file_falls_back_to_public_pdf_and_includes_repository(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(zotero, "_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        zotero,
+        "resolve_public_document",
+        lambda item, children: (
+            ResolvedDocument(
+                content="Full paper body with experiments and implementation details.",
+                url="https://arxiv.org/pdf/2503.06661",
+                source="arxiv",
+            ),
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        zotero,
+        "build_repository_context",
+        lambda urls: "公开源码仓库：\n" + "\n".join(urls),
+    )
+
+    class FakeClient:
+        def fetch_fulltext(self, zotero_user_id: int, attachment_key: str) -> None:
+            return None
+
+        def download_attachment(self, zotero_user_id: int, attachment_key: str) -> bytes:
+            raise AssertionError("linked_file must not be requested from Zotero Storage")
+
+    context, source, warning = zotero.get_item_reading_context(
+        user_id="user-1",
+        zotero_user_id=123,
+        item={
+            "item_key": "PAPER1",
+            "item_version": 5,
+            "item_type": "preprint",
+            "title": "AA-CLIP",
+            "doi": "10.48550/arXiv.2503.06661",
+            "url": "https://arxiv.org/abs/2503.06661",
+            "abstract_note": "Code: https://github.com/Mwxinnn/AA-CLIP",
+            "creators": [],
+            "tags": [],
+            "raw": {"data": {}},
+        },
+        children=[
+            {
+                "item_key": "PDF1",
+                "item_version": 2,
+                "item_type": "attachment",
+                "content_type": "application/pdf",
+                "link_mode": "linked_file",
+                "raw": {"data": {}},
+            }
+        ],
+        client=FakeClient(),
+    )
+
+    assert source == "public-document:arxiv"
+    assert warning is None
+    assert "公开 PDF 地址：https://arxiv.org/pdf/2503.06661" in context
+    assert "https://github.com/Mwxinnn/AA-CLIP" in context
+    assert "Full paper body with experiments" in context
+
+
+def test_item_without_zotero_attachment_can_use_public_document(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(zotero, "_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        zotero,
+        "resolve_public_document",
+        lambda item, children: (
+            ResolvedDocument("Public full text", "https://example.org/paper.pdf", "openalex"),
+            [],
+        ),
+    )
+    monkeypatch.setattr(zotero, "build_repository_context", lambda urls: "")
+
+    context, source, warning = zotero.get_item_reading_context(
+        user_id="user-1",
+        zotero_user_id=123,
+        item={
+            "item_key": "PAPER2",
+            "item_version": 1,
+            "item_type": "journalArticle",
+            "title": "Public Paper",
+            "creators": [],
+            "tags": [],
+            "raw": {"data": {}},
+        },
+        children=[],
+        client=object(),
+    )
+
+    assert source == "public-document:openalex"
+    assert warning is None
+    assert "Public full text" in context
 
 
 def test_fetch_sync_data_normalizes_incremental_library_changes(monkeypatch):

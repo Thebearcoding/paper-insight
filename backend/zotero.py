@@ -12,6 +12,11 @@ from typing import Any
 import requests
 
 from config import REPO_ROOT, settings
+from paper_resources import (
+    build_repository_context,
+    discover_code_repositories,
+    resolve_public_document,
+)
 from utils import ReaderError, extract_pdf_text, truncate_content_for_llm
 
 
@@ -20,6 +25,7 @@ ZOTERO_API_VERSION = "3"
 PAGE_SIZE = 100
 MAX_RETRIES = 4
 DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "zotero_cache"
+ZOTERO_FULLTEXT_TOKEN_LIMIT = 160_000
 
 
 class ZoteroError(Exception):
@@ -415,6 +421,32 @@ def build_metadata_context(item: dict[str, Any], children: list[dict[str, Any]])
     return "\n".join(lines)
 
 
+def build_reading_context(
+    metadata: str,
+    *,
+    item: dict[str, Any],
+    children: list[dict[str, Any]],
+    content: str | None = None,
+    content_source: str | None = None,
+    content_url: str | None = None,
+) -> str:
+    parts = [metadata]
+    if content_source:
+        parts.append(f"论文全文来源：{content_source}")
+    if content_url:
+        parts.append(f"公开 PDF 地址：{content_url}")
+    repositories = discover_code_repositories(item, children, content)
+    repository_context = build_repository_context(repositories)
+    if repository_context:
+        parts.append(repository_context)
+    if content:
+        parts.append(
+            "论文全文：\n"
+            + truncate_content_for_llm(content, max_tokens=ZOTERO_FULLTEXT_TOKEN_LIMIT)
+        )
+    return "\n\n".join(parts)
+
+
 def get_item_reading_context(
     *,
     user_id: str,
@@ -433,31 +465,81 @@ def get_item_reading_context(
             or str(child.get("filename") or "").lower().endswith(".pdf")
         )
     ]
-    if not attachments:
-        return metadata, "metadata", "该条目没有可用的 PDF 附件"
-
     errors: list[str] = []
+    if not attachments:
+        errors.append("该条目没有可用的 Zotero PDF 附件")
     for attachment in attachments:
         key = str(attachment["item_key"])
         version = _as_int(attachment.get("item_version"))
         cached = _read_cached_content(user_id, key, version)
         if cached:
-            return f"{metadata}\n\n论文全文：\n{truncate_content_for_llm(cached)}", "cache", None
+            return (
+                build_reading_context(
+                    metadata,
+                    item=item,
+                    children=children,
+                    content=cached,
+                    content_source="Zotero 正文缓存",
+                ),
+                "cache",
+                None,
+            )
 
         try:
             content = client.fetch_fulltext(zotero_user_id, key)
             source = "zotero-fulltext"
             if not content:
+                link_mode = str(attachment.get("link_mode") or "").casefold()
+                if link_mode == "linked_file":
+                    errors.append("Zotero 附件是本地 linked_file，云端不保存该文件")
+                    continue
+                if link_mode == "linked_url":
+                    errors.append("Zotero 附件是 linked_url，将尝试公开地址")
+                    continue
                 pdf_bytes = client.download_attachment(zotero_user_id, key)
                 content = extract_pdf_text(pdf_bytes, f"zotero:{key}")
                 source = "attachment-pdf"
             content = content.strip()
             if content:
                 _write_cached_content(user_id, key, version, source, content)
-                return f"{metadata}\n\n论文全文：\n{truncate_content_for_llm(content)}", source, None
+                return (
+                    build_reading_context(
+                        metadata,
+                        item=item,
+                        children=children,
+                        content=content,
+                        content_source=(
+                            "Zotero 已索引全文"
+                            if source == "zotero-fulltext"
+                            else "Zotero 云端 PDF"
+                        ),
+                    ),
+                    source,
+                    None,
+                )
         except (ZoteroError, ReaderError) as exc:
             errors.append(str(exc))
             logger.info("Unable to read Zotero attachment %s: %s", key, exc)
 
+    public_document, public_errors = resolve_public_document(item, children)
+    errors.extend(public_errors)
+    if public_document:
+        return (
+            build_reading_context(
+                metadata,
+                item=item,
+                children=children,
+                content=public_document.content,
+                content_source=f"公开全文（{public_document.source}）",
+                content_url=public_document.url,
+            ),
+            f"public-document:{public_document.source}",
+            None,
+        )
+
     reason = "；".join(dict.fromkeys(errors)) or "未能读取 Zotero PDF 正文"
-    return metadata, "metadata", reason
+    return (
+        build_reading_context(metadata, item=item, children=children),
+        "metadata",
+        reason,
+    )
