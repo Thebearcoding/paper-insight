@@ -90,17 +90,33 @@ async def generate_zotero_enrichment(
             report,
         ]
     )
-    raw_response = await llm.chat(
-        [
-            {"role": "system", "content": ZOTERO_NOTE_AND_TAG_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-        max_tokens=2500,
-        _usage_context="zotero_note_and_tags",
-    )
-    parsed = _extract_json_object(raw_response or "")
-    return normalize_zotero_enrichment(parsed, existing_tags=existing_tags)
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        retry_instruction = ""
+        if attempt > 1:
+            retry_instruction = (
+                "\n\n上一次输出未形成完整 JSON。此次务必压缩笔记到 900 个汉字以内，"
+                "保证 JSON 完整闭合后再结束输出。"
+            )
+        raw_response = await llm.chat(
+            [
+                {"role": "system", "content": ZOTERO_NOTE_AND_TAG_PROMPT},
+                {"role": "user", "content": prompt + retry_instruction},
+            ],
+            temperature=0.1,
+            max_tokens=4096,
+            _usage_context=(
+                "zotero_note_and_tags"
+                if attempt == 1
+                else "zotero_note_and_tags_retry"
+            ),
+        )
+        try:
+            parsed = _extract_json_object(raw_response or "")
+            return normalize_zotero_enrichment(parsed, existing_tags=existing_tags)
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+    raise ValueError("Claude 未返回完整的 Zotero 笔记与标签 JSON") from last_error
 
 
 def markdown_to_zotero_note_html(markdown: str, title: str) -> str:
