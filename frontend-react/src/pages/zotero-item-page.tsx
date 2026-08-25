@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles } from 'lucide-react';
+import { ArrowLeft, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles, Tags, UploadCloud } from 'lucide-react';
 
 import { ActiveModelBadge } from '@/components/active-model-badge';
 import { ChatPanel } from '@/components/chat-panel';
@@ -8,10 +8,17 @@ import { RichContent } from '@/components/rich-content';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { fetchZoteroItem, streamSse, zoteroItemApiPath } from '@/lib/api';
+import {
+  fetchZoteroConnection,
+  fetchZoteroItem,
+  generateZoteroEnrichment,
+  streamSse,
+  writebackZoteroEnrichment,
+  zoteroItemApiPath,
+} from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { navigate } from '@/lib/router';
-import type { ZoteroAnalysisFigure, ZoteroItem } from '@/types';
+import type { ZoteroAnalysisEnrichment, ZoteroAnalysisFigure, ZoteroConnection, ZoteroItem } from '@/types';
 
 
 interface ZoteroItemPageProps {
@@ -32,6 +39,10 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState('');
   const [analysisFigures, setAnalysisFigures] = useState<ZoteroAnalysisFigure[]>([]);
+  const [analysisEnrichment, setAnalysisEnrichment] = useState<ZoteroAnalysisEnrichment>({});
+  const [connection, setConnection] = useState<ZoteroConnection | null>(null);
+  const [enrichmentBusy, setEnrichmentBusy] = useState(false);
+  const [enrichmentError, setEnrichmentError] = useState<string | null>(null);
   const [reasoning, setReasoning] = useState('');
   const [analysisStatus, setAnalysisStatus] = useState('');
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -48,11 +59,13 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
     }
     let active = true;
     setLoading(true);
-    void fetchZoteroItem(itemKey)
-      .then((payload) => {
+    void Promise.all([fetchZoteroItem(itemKey), fetchZoteroConnection()])
+      .then(([payload, connectionPayload]) => {
         if (active) {
           setItem(payload);
           setAnalysisFigures(payload.analysis_figures ?? []);
+          setAnalysisEnrichment(payload.analysis_enrichment ?? {});
+          setConnection(connectionPayload);
         }
       })
       .catch((nextError) => {
@@ -99,6 +112,13 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
               } catch {
                 setAnalysisFigures([]);
               }
+            } else if (event === 'enrichment') {
+              try {
+                const enrichment = JSON.parse(data) as ZoteroAnalysisEnrichment;
+                setAnalysisEnrichment(enrichment ?? {});
+              } catch {
+                setAnalysisEnrichment({});
+              }
             } else if (event === 'error') {
               throw new Error(data || '深度阅读失败');
             } else if (event === 'done') {
@@ -142,6 +162,32 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
     void loadAnalysis(false);
     return () => abortRef.current?.abort();
   }, [item, loadAnalysis]);
+
+  const generateEnrichment = useCallback(async () => {
+    setEnrichmentBusy(true);
+    setEnrichmentError(null);
+    try {
+      setAnalysisEnrichment(await generateZoteroEnrichment(itemKey));
+    } catch (nextError) {
+      setEnrichmentError(nextError instanceof Error ? nextError.message : '笔记与标签生成失败');
+    } finally {
+      setEnrichmentBusy(false);
+    }
+  }, [itemKey]);
+
+  const writebackEnrichment = useCallback(async () => {
+    setEnrichmentBusy(true);
+    setEnrichmentError(null);
+    try {
+      const result = await writebackZoteroEnrichment(itemKey);
+      setAnalysisEnrichment(result.analysis_enrichment);
+      setItem((current) => current ? { ...current, tags: result.tags } : current);
+    } catch (nextError) {
+      setEnrichmentError(nextError instanceof Error ? nextError.message : '写回 Zotero 失败');
+    } finally {
+      setEnrichmentBusy(false);
+    }
+  }, [itemKey]);
 
   if (loading || isAuthLoading) {
     return <div className="flex min-h-[40vh] items-center justify-center text-slate-500"><Loader2 className="mr-2 h-5 w-5 animate-spin" />正在加载条目...</div>;
@@ -249,6 +295,60 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
               />
             ) : null}
           </div>
+        )}
+      </section>
+
+      <section className="rounded-[32px] bg-white p-6 shadow-sm ring-1 ring-black/5 sm:p-8">
+        <div className="flex flex-col gap-3 border-b border-[#eef2f7] pb-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2">
+            <Tags className="h-5 w-5 text-[#ff9900]" />
+            <div>
+              <h2 className="text-xl font-semibold text-[#172033]">Zotero 笔记与标签</h2>
+              <p className="text-sm text-[#728095]">Claude 生成建议，写回时保留你的原笔记与原标签</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={enrichmentBusy || !analysis} onClick={() => void generateEnrichment()}>
+              {enrichmentBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
+              {analysisEnrichment.note_markdown ? '重新生成建议' : '生成笔记与标签'}
+            </Button>
+            <Button
+              disabled={enrichmentBusy || !analysisEnrichment.note_markdown || !connection?.can_write}
+              onClick={() => void writebackEnrichment()}
+            >
+              {enrichmentBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
+              {analysisEnrichment.writeback?.status === 'applied' ? '更新到 Zotero' : '写回 Zotero'}
+            </Button>
+          </div>
+        </div>
+        {!connection?.can_write ? (
+          <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+            当前 Zotero API Key 只有读取权限。建议内容可以正常生成；如需写回，请在 Zotero Keys 页面开启文库写入权限后重新连接。
+          </p>
+        ) : null}
+        {enrichmentError ? <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{enrichmentError}</p> : null}
+        {analysisEnrichment.note_markdown ? (
+          <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_18rem]">
+            <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
+              <RichContent
+                content={analysisEnrichment.note_markdown}
+                className="markdown-body text-sm leading-7 text-slate-700"
+              />
+            </div>
+            <div className="rounded-2xl border border-slate-200 p-5">
+              <h3 className="font-semibold text-slate-800">建议新增标签</h3>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {(analysisEnrichment.tags ?? []).map((tag) => (
+                  <Badge key={tag.tag} variant="secondary">{tag.tag}</Badge>
+                ))}
+              </div>
+              {analysisEnrichment.writeback?.status === 'applied' ? (
+                <p className="mt-4 text-sm text-emerald-700">已写入 Zotero；后续写回会更新同一份 AI 笔记。</p>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <p className="mt-5 text-sm text-slate-500">完成 AI 分析后，会自动生成一份精读笔记和分层标签建议。</p>
         )}
       </section>
 

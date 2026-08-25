@@ -205,7 +205,7 @@ export function ZoteroPage() {
           <CardHeader>
             <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-red-50 text-red-600"><KeyRound /></div>
             <CardTitle className="text-2xl">连接你的 Zotero 文库</CardTitle>
-            <CardDescription>使用只读 API Key 同步条目元数据，打开论文时再按需读取全文。</CardDescription>
+            <CardDescription>连接后可同步论文并生成 AI 精读；如需把 AI 笔记和标签写回 Zotero，请为 Key 开启写权限。</CardDescription>
           </CardHeader>
           <CardContent>
             <form className="space-y-4" onSubmit={connect}>
@@ -230,7 +230,7 @@ export function ZoteroPage() {
         <Card className="border-white/80 bg-white/75">
           <CardHeader><CardTitle>如何创建安全的 Key</CardTitle></CardHeader>
           <CardContent className="space-y-4 text-sm leading-6 text-slate-600">
-            <p>在 Zotero 的 Keys 页面创建新 Key，仅勾选“允许读取文库”。Paper Insight 不需要写权限。</p>
+            <p>在 Zotero 的 Keys 页面创建新 Key。只做同步与分析时，读取权限即可；如需将 AI 精读笔记和分层标签写回 Zotero，还要勾选写入权限。</p>
             <a className="inline-flex items-center font-medium text-blue-600 hover:underline" href="https://www.zotero.org/settings/keys/new" target="_blank" rel="noreferrer">
               打开 Zotero Keys 页面 <ExternalLink className="ml-1 h-4 w-4" />
             </a>
@@ -248,7 +248,10 @@ export function ZoteroPage() {
           <div>
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-red-600"><Library className="h-4 w-4" />私人文库</div>
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">{connection.display_name || connection.username || 'Zotero Library'}</h1>
-            <p className="mt-2 text-sm text-slate-500">{total} 个论文条目 · 文库版本 {connection.library_version ?? 0}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-500">
+              <span>{total} 个论文条目 · 文库版本 {connection.library_version ?? 0}</span>
+              <Badge variant={connection.can_write ? 'default' : 'secondary'}>{connection.can_write ? '可写回笔记与标签' : '只读连接'}</Badge>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => void sync()} disabled={syncing}>
@@ -261,6 +264,29 @@ export function ZoteroPage() {
         {connection.last_sync_at ? <p className="mt-4 text-xs text-slate-500">上次同步：{new Date(connection.last_sync_at).toLocaleString()}</p> : null}
         {connection.last_sync_error ? <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm text-red-700">{connection.last_sync_error}</p> : null}
         {error ? <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p> : null}
+        {!connection.can_write ? (
+          <form className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4" onSubmit={connect}>
+            <p className="text-sm font-semibold text-amber-900">当前 Key 是只读的</p>
+            <p className="mt-1 text-sm leading-6 text-amber-800">Claude 可以先生成笔记和标签预览，但不能写回 Zotero。请在 Zotero 创建或编辑一个有写权限的 Key，再在这里替换；不需要断开连接，也不会删除现有分析。</p>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <Input
+                type="password"
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder="粘贴有写权限的 Zotero API Key"
+                autoComplete="off"
+                className="bg-white"
+              />
+              <Button disabled={saving || !apiKey.trim()}>
+                {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <KeyRound className="mr-2 h-4 w-4" />}
+                更新 Key
+              </Button>
+            </div>
+            <a className="mt-3 inline-flex items-center text-sm font-medium text-amber-900 hover:underline" href="https://www.zotero.org/settings/keys/new" target="_blank" rel="noreferrer">
+              打开 Zotero Keys 页面 <ExternalLink className="ml-1 h-4 w-4" />
+            </a>
+          </form>
+        ) : null}
       </section>
 
       <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">

@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import shutil
+import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,10 @@ class ZoteroNotFoundError(ZoteroError):
 
 class ZoteroContentError(ZoteroError):
     """No readable full text could be obtained for an item."""
+
+
+class ZoteroWriteConflictError(ZoteroError):
+    """The Zotero object changed after it was read."""
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -153,6 +158,8 @@ class ZoteroClient:
         *,
         params: dict[str, Any] | None = None,
         stream: bool = False,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
     ) -> requests.Response:
         last_error: Exception | None = None
         for attempt in range(MAX_RETRIES):
@@ -164,6 +171,8 @@ class ZoteroClient:
                     method,
                     f"{self.base_url}{path}",
                     params=params,
+                    json=json_body,
+                    headers=headers,
                     timeout=self.timeout,
                     stream=stream,
                 )
@@ -178,7 +187,7 @@ class ZoteroClient:
             if backoff > 0:
                 self._backoff_until = time.monotonic() + backoff
 
-            if response.status_code in {429, 502, 503, 504}:
+            if response.status_code in {409, 429, 502, 503, 504}:
                 retry_after = max(_as_int(response.headers.get("Retry-After"), 0), backoff, 2**attempt)
                 response.close()
                 if attempt == MAX_RETRIES - 1:
@@ -188,7 +197,10 @@ class ZoteroClient:
                 continue
             if response.status_code in {401, 403}:
                 response.close()
-                raise ZoteroAuthError("Zotero API Key 无效或没有文库读取权限")
+                raise ZoteroAuthError("Zotero API Key 无效或缺少当前操作所需的文库权限")
+            if response.status_code == 412:
+                response.close()
+                raise ZoteroWriteConflictError("Zotero 条目已在其他位置更新，请刷新后重试")
             if response.status_code == 404:
                 response.close()
                 raise ZoteroNotFoundError("Zotero 资源不存在")
@@ -326,6 +338,181 @@ class ZoteroClient:
             return b"".join(chunks)
         finally:
             response.close()
+
+    def fetch_item(self, zotero_user_id: int, item_key: str) -> dict[str, Any]:
+        response = self._request(
+            "GET",
+            self._library_path(zotero_user_id, f"/items/{item_key}"),
+            params={"format": "json"},
+        )
+        try:
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+                raise ZoteroError("Zotero 返回了无效的条目数据")
+            return payload
+        finally:
+            response.close()
+
+    def patch_item(
+        self,
+        zotero_user_id: int,
+        item_key: str,
+        version: int,
+        changes: dict[str, Any],
+    ) -> int:
+        response = self._request(
+            "PATCH",
+            self._library_path(zotero_user_id, f"/items/{item_key}"),
+            json_body=changes,
+            headers={"If-Unmodified-Since-Version": str(version)},
+        )
+        try:
+            return _as_int(response.headers.get("Last-Modified-Version"), version)
+        finally:
+            response.close()
+
+    def create_note(
+        self,
+        zotero_user_id: int,
+        parent_item_key: str,
+        note_html: str,
+    ) -> dict[str, Any]:
+        response = self._request(
+            "POST",
+            self._library_path(zotero_user_id, "/items"),
+            json_body=[
+                {
+                    "itemType": "note",
+                    "parentItem": parent_item_key,
+                    "note": note_html,
+                    "tags": [{"tag": "来源/Paper Insight"}],
+                }
+            ],
+            headers={"Zotero-Write-Token": secrets.token_hex(16)},
+        )
+        try:
+            payload = response.json()
+            successful = None
+            if isinstance(payload, dict):
+                successful = payload.get("successful") or payload.get("success")
+            saved = successful.get("0") if isinstance(successful, dict) else None
+            if isinstance(saved, str):
+                return {"key": saved, "version": _as_int(response.headers.get("Last-Modified-Version"))}
+            if isinstance(saved, dict):
+                return {
+                    "key": str(saved.get("key") or ""),
+                    "version": _as_int(saved.get("version") or response.headers.get("Last-Modified-Version")),
+                }
+            failed = payload.get("failed") if isinstance(payload, dict) else None
+            raise ZoteroError(f"Zotero 笔记创建失败：{failed or 'unknown error'}")
+        finally:
+            response.close()
+
+    def write_analysis_note_and_tags(
+        self,
+        zotero_user_id: int,
+        parent_item_key: str,
+        *,
+        note_html: str,
+        suggested_tags: list[str],
+        note_item_key: str | None = None,
+    ) -> dict[str, Any]:
+        parent = self.fetch_item(zotero_user_id, parent_item_key)
+        parent_data = parent["data"]
+        existing_tags = parent_data.get("tags") if isinstance(parent_data.get("tags"), list) else []
+        merged_tags: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for tag in existing_tags:
+            if not isinstance(tag, dict) or not tag.get("tag"):
+                continue
+            name = str(tag["tag"]).strip()
+            folded = name.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            merged_tags.append(dict(tag))
+        added_tags: list[str] = []
+        for value in suggested_tags:
+            name = str(value).strip()
+            folded = name.casefold()
+            if not name or folded in seen:
+                continue
+            seen.add(folded)
+            merged_tags.append({"tag": name})
+            added_tags.append(name)
+
+        parent_version = _as_int(parent.get("version") or parent_data.get("version"))
+        new_parent_version = parent_version
+        if added_tags:
+            try:
+                new_parent_version = self.patch_item(
+                    zotero_user_id,
+                    parent_item_key,
+                    parent_version,
+                    {"tags": merged_tags},
+                )
+            except ZoteroWriteConflictError:
+                refreshed_parent = self.fetch_item(zotero_user_id, parent_item_key)
+                refreshed_data = refreshed_parent["data"]
+                refreshed_tags = (
+                    refreshed_data.get("tags")
+                    if isinstance(refreshed_data.get("tags"), list)
+                    else []
+                )
+                refreshed_seen = {
+                    str(tag.get("tag") or "").strip().casefold()
+                    for tag in refreshed_tags
+                    if isinstance(tag, dict) and tag.get("tag")
+                }
+                merged_tags = [dict(tag) for tag in refreshed_tags if isinstance(tag, dict)]
+                added_tags = []
+                for value in suggested_tags:
+                    name = str(value).strip()
+                    folded = name.casefold()
+                    if not name or folded in refreshed_seen:
+                        continue
+                    refreshed_seen.add(folded)
+                    merged_tags.append({"tag": name})
+                    added_tags.append(name)
+                if added_tags:
+                    new_parent_version = self.patch_item(
+                        zotero_user_id,
+                        parent_item_key,
+                        _as_int(refreshed_parent.get("version") or refreshed_data.get("version")),
+                        {"tags": merged_tags},
+                    )
+
+        saved_note_key = ""
+        if note_item_key:
+            try:
+                note = self.fetch_item(zotero_user_id, note_item_key)
+                note_data = note["data"]
+                if (
+                    note_data.get("itemType") == "note"
+                    and note_data.get("parentItem") == parent_item_key
+                ):
+                    note_version = _as_int(note.get("version") or note_data.get("version"))
+                    self.patch_item(
+                        zotero_user_id,
+                        note_item_key,
+                        note_version,
+                        {"note": note_html, "tags": [{"tag": "来源/Paper Insight"}]},
+                    )
+                    saved_note_key = note_item_key
+            except ZoteroNotFoundError:
+                saved_note_key = ""
+        if not saved_note_key:
+            saved_note = self.create_note(zotero_user_id, parent_item_key, note_html)
+            saved_note_key = str(saved_note.get("key") or "")
+        if not saved_note_key:
+            raise ZoteroError("Zotero 没有返回新建笔记的条目 Key")
+
+        return {
+            "note_item_key": saved_note_key,
+            "added_tags": added_tags,
+            "all_tags": [str(tag.get("tag")) for tag in merged_tags if tag.get("tag")],
+            "parent_version": new_parent_version,
+        }
 
 
 def _cache_dir() -> Path:

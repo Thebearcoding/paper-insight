@@ -149,6 +149,8 @@ from database import (
     update_feishu_test_result,
     update_llm_response,
     update_zotero_analysis,
+    update_zotero_analysis_enrichment,
+    update_zotero_enrichment_writeback,
     update_llm_provider,
     upsert_arxiv_paper,
     upsert_fetched_llm_models,
@@ -178,6 +180,10 @@ from prompt import (
 from paper_figures import (
     extract_and_save_zotero_framework_figure,
     zotero_figure_path,
+)
+from zotero_enrichment import (
+    generate_zotero_enrichment,
+    markdown_to_zotero_note_html,
 )
 from zotero import (
     ZoteroAuthError,
@@ -1841,12 +1847,24 @@ async def analyze_my_zotero_item(
                     "data": f"深度阅读报告输出不完整（缺少第 {missing_labels} 节），已保留原报告",
                 }
                 return
+            analysis_enrichment = dict(item.get("analysis_enrichment") or {})
+            yield {"event": "status", "data": "正在生成 Zotero 精读笔记和分层标签..."}
+            try:
+                analysis_enrichment = await generate_zotero_enrichment(llm, item, normalized)
+                yield {
+                    "event": "enrichment",
+                    "data": json.dumps(analysis_enrichment, ensure_ascii=False),
+                }
+            except Exception as exc:
+                logger.info("Unable to generate Zotero note and tags %s: %s", item_key, exc)
+                yield {"event": "status", "data": "笔记与标签生成失败，已保留文字报告"}
             await asyncio.to_thread(
                 update_zotero_analysis,
                 user_id,
                 item_key,
                 normalized,
                 analysis_figures,
+                analysis_enrichment,
             )
             yield {"event": "final", "data": normalized}
             yield {"event": "done", "data": ""}
@@ -1857,6 +1875,98 @@ async def analyze_my_zotero_item(
             yield {"event": "error", "data": f"深度阅读失败：{exc}"}
 
     return EventSourceResponse(generate())
+
+
+@app.post("/me/zotero/items/{item_key}/enrichment/generate")
+async def generate_my_zotero_item_enrichment(
+    item_key: str,
+    user: dict = Depends(require_current_user),
+):
+    ensure_llm_configured()
+    try:
+        item = await asyncio.to_thread(get_zotero_item, user["id"], item_key)
+        if not item:
+            raise HTTPException(status_code=404, detail="Zotero 条目不存在")
+        report = str(item.get("llm_response") or "").strip()
+        if not report:
+            raise HTTPException(status_code=409, detail="请先完成论文 AI 分析")
+        enrichment = await generate_zotero_enrichment(llm, item, report)
+        await asyncio.to_thread(
+            update_zotero_analysis_enrichment,
+            user["id"],
+            item_key,
+            enrichment,
+        )
+        return enrichment
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
+@app.post("/me/zotero/items/{item_key}/enrichment/writeback")
+async def writeback_my_zotero_item_enrichment(
+    item_key: str,
+    user: dict = Depends(require_current_user),
+):
+    try:
+        connection = await asyncio.to_thread(get_zotero_connection, user["id"], True)
+        if not connection:
+            raise HTTPException(status_code=404, detail="请先连接 Zotero 文库")
+        if not connection.get("can_write"):
+            raise HTTPException(
+                status_code=409,
+                detail="当前 Zotero API Key 只有读取权限，请重新连接具备写入权限的 Key",
+            )
+        item = await asyncio.to_thread(get_zotero_item, user["id"], item_key)
+        if not item:
+            raise HTTPException(status_code=404, detail="Zotero 条目不存在")
+        enrichment = dict(item.get("analysis_enrichment") or {})
+        note_markdown = str(enrichment.get("note_markdown") or "").strip()
+        suggested_tags = [
+            str(tag.get("tag") or "").strip()
+            for tag in enrichment.get("tags") or []
+            if isinstance(tag, dict) and tag.get("tag")
+        ]
+        if not note_markdown:
+            raise HTTPException(status_code=409, detail="请先生成 Zotero 精读笔记和标签")
+        previous_writeback = enrichment.get("writeback") or {}
+        note_item_key = str(previous_writeback.get("note_item_key") or "").strip() or None
+        client = ZoteroClient(connection["api_key"])
+        result = await asyncio.to_thread(
+            client.write_analysis_note_and_tags,
+            int(connection["zotero_user_id"]),
+            item_key,
+            note_html=markdown_to_zotero_note_html(
+                note_markdown,
+                f"AI 精读：{item.get('title') or item_key}",
+            ),
+            suggested_tags=suggested_tags,
+            note_item_key=note_item_key,
+        )
+        enrichment["writeback"] = {
+            "status": "applied",
+            "note_item_key": result["note_item_key"],
+            "applied_at": datetime.now(timezone.utc).isoformat(),
+            "added_tags": result["added_tags"],
+        }
+        await asyncio.to_thread(
+            update_zotero_enrichment_writeback,
+            user["id"],
+            item_key,
+            enrichment,
+            tags=result["all_tags"],
+            item_version=int(result["parent_version"] or item.get("item_version") or 0),
+        )
+        return {
+            "ok": True,
+            "analysis_enrichment": enrichment,
+            "tags": result["all_tags"],
+        }
+    except HTTPException:
+        raise
+    except ZoteroError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
 
 
 @app.post("/me/zotero/items/{item_key}/chat")

@@ -148,6 +148,23 @@ export interface ZoteroAnalysisFigure {
   url: string;
 }
 
+export interface ZoteroEnrichmentTag {
+  group: string;
+  value: string;
+  tag: string;
+}
+
+export interface ZoteroAnalysisEnrichment {
+  note_markdown?: string;
+  tags?: ZoteroEnrichmentTag[];
+  writeback?: {
+    status?: 'pending' | 'applied' | string;
+    note_item_key?: string | null;
+    applied_at?: string | null;
+    added_tags?: string[];
+  };
+}
+
 export interface ZoteroItem {
   item_key: string;
   item_version: number;
@@ -170,6 +187,7 @@ export interface ZoteroItem {
   annotation_comment?: string | null;
   llm_response?: string | null;
   analysis_figures?: ZoteroAnalysisFigure[];
+  analysis_enrichment?: ZoteroAnalysisEnrichment;
   analyzed?: boolean;
   analyzed_at?: string | null;
   updated_at?: string;

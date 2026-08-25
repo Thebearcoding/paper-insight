@@ -3236,7 +3236,17 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
 
                 changed_parent_keys: set[str] = set()
                 for item in items:
-                    if item.get("parent_item_key"):
+                    raw_data = (
+                        (item.get("raw") or {}).get("data")
+                        if isinstance(item.get("raw"), dict)
+                        else {}
+                    )
+                    note_html = str(raw_data.get("note") or "") if isinstance(raw_data, dict) else ""
+                    is_paper_insight_note = (
+                        item.get("item_type") == "note"
+                        and "data-paper-insight-note=" in note_html
+                    )
+                    if item.get("parent_item_key") and not is_paper_insight_note:
                         changed_parent_keys.add(str(item["parent_item_key"]))
                     cur.execute(
                         """
@@ -3279,6 +3289,11 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                                 WHEN zotero_items.item_version = EXCLUDED.item_version
                                 THEN zotero_items.analysis_figures
                                 ELSE '[]'::jsonb
+                            END,
+                            analysis_enrichment = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analysis_enrichment
+                                ELSE '{}'::jsonb
                             END,
                             analyzed_at = CASE
                                 WHEN zotero_items.item_version = EXCLUDED.item_version
@@ -3329,6 +3344,7 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                         UPDATE zotero_items
                         SET llm_response = NULL,
                             analysis_figures = '[]'::jsonb,
+                            analysis_enrichment = '{}'::jsonb,
                             analyzed_at = NULL
                         WHERE user_id = %s
                           AND item_key IN (SELECT item_key FROM ancestors)
@@ -3351,6 +3367,10 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                         WHERE user_id = %s
                           AND item_key = ANY(%s)
                           AND parent_item_key IS NOT NULL
+                          AND NOT (
+                              item_type = 'note'
+                              AND COALESCE(raw #>> '{data,note}', '') LIKE '%%data-paper-insight-note=%%'
+                          )
                         """,
                         (user_id, list(deleted_item_keys)),
                     )
@@ -3374,6 +3394,7 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                             UPDATE zotero_items
                             SET llm_response = NULL,
                                 analysis_figures = '[]'::jsonb,
+                                analysis_enrichment = '{}'::jsonb,
                                 analyzed_at = NULL
                             WHERE user_id = %s
                               AND item_key IN (SELECT item_key FROM ancestors)
@@ -3528,6 +3549,7 @@ def update_zotero_analysis(
     item_key: str,
     response: str,
     analysis_figures: list[dict] | None = None,
+    analysis_enrichment: dict | None = None,
 ) -> None:
     if not DATABASE_URL:
         return
@@ -3535,7 +3557,7 @@ def update_zotero_analysis(
     def operation() -> None:
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                if analysis_figures is None:
+                if analysis_figures is None and analysis_enrichment is None:
                     cur.execute(
                         """
                         UPDATE zotero_items
@@ -3544,7 +3566,7 @@ def update_zotero_analysis(
                         """,
                         (response, user_id, item_key),
                     )
-                else:
+                elif analysis_enrichment is None:
                     cur.execute(
                         """
                         UPDATE zotero_items
@@ -3556,9 +3578,78 @@ def update_zotero_analysis(
                         """,
                         (response, Jsonb(analysis_figures), user_id, item_key),
                     )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE zotero_items
+                        SET llm_response = %s,
+                            analysis_figures = COALESCE(%s, analysis_figures),
+                            analysis_enrichment = %s,
+                            analyzed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE user_id = %s AND item_key = %s
+                        """,
+                        (
+                            response,
+                            Jsonb(analysis_figures) if analysis_figures is not None else None,
+                            Jsonb(analysis_enrichment),
+                            user_id,
+                            item_key,
+                        ),
+                    )
             conn.commit()
 
     _run_with_retry(operation, f"update_zotero_analysis:{user_id}:{item_key}")
+
+
+def update_zotero_enrichment_writeback(
+    user_id: str,
+    item_key: str,
+    enrichment: dict,
+    *,
+    tags: list[str],
+    item_version: int,
+) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE zotero_items
+                    SET analysis_enrichment = %s,
+                        tags = %s,
+                        item_version = GREATEST(item_version, %s),
+                        updated_at = NOW()
+                    WHERE user_id = %s AND item_key = %s
+                    """,
+                    (Jsonb(enrichment), Jsonb(tags), item_version, user_id, item_key),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"update_zotero_enrichment_writeback:{user_id}:{item_key}")
+
+
+def update_zotero_analysis_enrichment(user_id: str, item_key: str, enrichment: dict) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE zotero_items
+                    SET analysis_enrichment = %s, updated_at = NOW()
+                    WHERE user_id = %s AND item_key = %s
+                    """,
+                    (Jsonb(enrichment), user_id, item_key),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"update_zotero_analysis_enrichment:{user_id}:{item_key}")
 
 
 def get_zotero_chat_sessions(user_id: str, item_key: str) -> list[dict]:

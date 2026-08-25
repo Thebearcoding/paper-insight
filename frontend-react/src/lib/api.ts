@@ -36,6 +36,7 @@ import type {
   SortDirection,
   ZoteroCollection,
   ZoteroConnection,
+  ZoteroAnalysisEnrichment,
   ZoteroItem,
   ZoteroItemListResponse,
 } from '@/types';
@@ -265,6 +266,20 @@ export async function fetchZoteroItems(
 
 export async function fetchZoteroItem(itemKey: string): Promise<ZoteroItem> {
   return apiFetch<ZoteroItem>(zoteroItemApiPath(itemKey));
+}
+
+export async function generateZoteroEnrichment(itemKey: string): Promise<ZoteroAnalysisEnrichment> {
+  return apiFetch<ZoteroAnalysisEnrichment>(zoteroItemApiPath(itemKey, '/enrichment/generate'), {
+    method: 'POST',
+  });
+}
+
+export async function writebackZoteroEnrichment(itemKey: string): Promise<{
+  ok: boolean;
+  analysis_enrichment: ZoteroAnalysisEnrichment;
+  tags: string[];
+}> {
+  return apiFetch(zoteroItemApiPath(itemKey, '/enrichment/writeback'), { method: 'POST' });
 }
 
 export async function fetchZoteroChatSessions(itemKey: string): Promise<ChatSessionSummary[]> {
