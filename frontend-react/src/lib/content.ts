@@ -410,6 +410,9 @@ export function getVenueParts(venue?: string | null): { label: string; conferenc
   const lower = venue.toLowerCase();
   let conference = venue.split(' ')[0];
   if (lower.includes('aaai')) conference = 'AAAI';
+  else if (/\bkdd\b/.test(lower)) conference = 'KDD';
+  else if (lower.includes('sigir')) conference = 'SIGIR';
+  else if (lower.includes('ijcai')) conference = 'IJCAI';
   else if (lower.includes('neurips')) conference = 'NeurIPS';
   else if (lower.includes('iclr')) conference = 'ICLR';
   else if (lower.includes('icml')) conference = 'ICML';

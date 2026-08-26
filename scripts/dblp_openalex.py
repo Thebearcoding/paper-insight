@@ -15,6 +15,7 @@ import requests
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 CROSSREF_WORKS_URL = "https://api.crossref.org/journals/{issn}/works"
+CROSSREF_QUERY_URL = "https://api.crossref.org/works"
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,98 @@ def fetch_crossref_journal_metadata(
     return cache
 
 
+def fetch_crossref_proceedings_metadata(
+    cache: dict[str, dict[str, Any]],
+    cache_path: Path,
+    *,
+    container_title: str,
+    doi_prefixes: tuple[str, ...],
+    from_date: str,
+    until_date: str,
+    user_agent: str,
+    mailto: str | None = None,
+    rows: int = 1000,
+    max_pages: int = 10,
+    expected_count: int | None = None,
+    max_scans: int = 5,
+) -> dict[str, dict[str, Any]]:
+    """Fetch one proceedings volume by exact child DOI prefixes.
+
+    Crossref's container-title query is ranked rather than an exact filter. The
+    DOI prefixes owned by the parent proceedings therefore remain the source of
+    truth, while the query only narrows the result window.
+    """
+    prefixes = tuple(normalize_doi(prefix).rstrip(".") + "." for prefix in doi_prefixes)
+    session = requests.Session()
+    session.headers.update({"User-Agent": user_agent})
+    page_size = max(1, min(rows, 1000))
+
+    for scan in range(1, max_scans + 1):
+        before_scan = sum(doi.startswith(prefixes) and bool(item) for doi, item in cache.items())
+        scan_matches: set[str] = set()
+        for page in range(max_pages):
+            params = {
+                "query.container-title": container_title,
+                "filter": (
+                    f"from-pub-date:{from_date},until-pub-date:{until_date},"
+                    "type:proceedings-article"
+                ),
+                "select": (
+                    "DOI,title,container-title,author,abstract,link,subject,page,"
+                    "published,publisher,event"
+                ),
+                "rows": str(page_size),
+                "offset": str(page * page_size),
+                "sort": "score",
+                "order": "desc",
+            }
+            if mailto:
+                params["mailto"] = mailto
+            payload = _request_json(
+                session,
+                CROSSREF_QUERY_URL,
+                params,
+                provider="Crossref",
+            )
+            items = (payload.get("message") or {}).get("items") or []
+            page_matches = 0
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                doi = normalize_doi(item.get("DOI"))
+                if doi.startswith(prefixes):
+                    scan_matches.add(doi)
+                    cache[doi] = item
+                    page_matches += 1
+
+            save_cache(cache_path, cache)
+            total_matches = sum(
+                doi.startswith(prefixes) and bool(item) for doi, item in cache.items()
+            )
+            print(
+                f"Crossref scan {scan}, page {page + 1}: "
+                f"matched {page_matches} record(s), {total_matches} unique total"
+            )
+            if len(items) < page_size or (scan_matches and page_matches == 0):
+                break
+        else:
+            raise RuntimeError(
+                f"Crossref proceedings scan reached max_pages={max_pages} before an empty match page"
+            )
+
+        after_scan = sum(doi.startswith(prefixes) and bool(item) for doi, item in cache.items())
+        if expected_count is not None and after_scan >= expected_count:
+            break
+        if expected_count is None and after_scan == before_scan:
+            break
+
+    return {
+        doi: item
+        for doi, item in cache.items()
+        if doi.startswith(prefixes) and item
+    }
+
+
 def fetch_openalex_metadata(
     dois: list[str],
     cache: dict[str, dict[str, Any]],
@@ -204,7 +297,10 @@ def fetch_openalex_metadata(
         batch = missing[index : index + max(1, batch_size)]
         params = {
             "filter": "doi:" + "|".join(batch),
-            "select": "doi,title,abstract_inverted_index,keywords,locations,primary_location,open_access,ids",
+            "select": (
+                "doi,title,abstract_inverted_index,keywords,locations,primary_location,"
+                "open_access,ids,authorships"
+            ),
             "per-page": str(len(batch)),
         }
         if mailto:
@@ -285,6 +381,31 @@ def keywords_from_openalex(item: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))[:10]
 
 
+def authors_from_openalex(item: dict[str, Any]) -> list[str]:
+    authors = []
+    for authorship in item.get("authorships") or []:
+        if not isinstance(authorship, dict):
+            continue
+        author = authorship.get("author") or {}
+        name = clean_text(author.get("display_name")) if isinstance(author, dict) else ""
+        if name:
+            authors.append(name)
+    return list(dict.fromkeys(authors))
+
+
+def authors_from_crossref(item: dict[str, Any]) -> list[str]:
+    authors = []
+    for author in item.get("author") or []:
+        if not isinstance(author, dict):
+            continue
+        name = clean_text(author.get("name"))
+        if not name:
+            name = clean_text(" ".join(filter(None, [author.get("given"), author.get("family")])))
+        if name:
+            authors.append(name)
+    return list(dict.fromkeys(authors))
+
+
 def pdf_from_openalex(item: dict[str, Any]) -> str:
     candidates = [item.get("primary_location"), *(item.get("locations") or [])]
     for location in candidates:
@@ -359,6 +480,32 @@ def build_crossref_record(
         abstract=abstract_from_crossref(crossref_item),
         keywords=keywords_from_crossref(crossref_item),
         pdf=pdf_from_crossref(crossref_item),
+        venue=venue,
+        primary_area=primary_area,
+        source_label=source_label,
+    )
+
+
+def build_crossref_openalex_record(
+    paper: DblpPaper,
+    crossref_item: dict[str, Any],
+    openalex_item: dict[str, Any],
+    *,
+    venue: str,
+    primary_area: str,
+    source_label: str = "Crossref + OpenAlex",
+) -> dict[str, Any]:
+    crossref_titles = crossref_item.get("title") or []
+    crossref_title = clean_text(crossref_titles[0]) if crossref_titles else ""
+    crossref_keywords = keywords_from_crossref(crossref_item)
+    openalex_keywords = keywords_from_openalex(openalex_item)
+    keywords = list(dict.fromkeys([*crossref_keywords, *openalex_keywords]))[:10]
+    return _assemble_record(
+        paper,
+        title=crossref_title or clean_text(openalex_item.get("title")) or paper.title,
+        abstract=abstract_from_crossref(crossref_item) or abstract_from_openalex(openalex_item),
+        keywords=keywords,
+        pdf=pdf_from_openalex(openalex_item) or pdf_from_crossref(crossref_item),
         venue=venue,
         primary_area=primary_area,
         source_label=source_label,

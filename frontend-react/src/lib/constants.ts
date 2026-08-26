@@ -9,6 +9,20 @@ export const CONFERENCES: ConferenceDefinition[] = [
     accentClass: 'from-[#2563eb] via-[#7c3aed] to-[#ec4899]',
   },
   {
+    id: 'kdd_2026',
+    name: 'KDD 2026',
+    fullName: 'ACM SIGKDD Conference on Knowledge Discovery and Data Mining',
+    year: 2026,
+    accentClass: 'from-[#dc2626] via-[#f59e0b] to-[#16a34a]',
+  },
+  {
+    id: 'sigir_2026',
+    name: 'SIGIR 2026',
+    fullName: 'ACM SIGIR Conference on Research and Development in Information Retrieval',
+    year: 2026,
+    accentClass: 'from-[#0891b2] via-[#2563eb] to-[#f97316]',
+  },
+  {
     id: 'acl_2026',
     name: 'ACL 2026',
     fullName: 'Annual Meeting of the Association for Computational Linguistics',
@@ -42,6 +56,13 @@ export const CONFERENCES: ConferenceDefinition[] = [
     fullName: 'Neural Information Processing Systems',
     year: 2025,
     accentClass: 'from-[#7c6cff] via-[#9c8cff] to-[#5f8bff]',
+  },
+  {
+    id: 'ijcai_2025',
+    name: 'IJCAI 2025',
+    fullName: 'International Joint Conference on Artificial Intelligence',
+    year: 2025,
+    accentClass: 'from-[#be123c] via-[#7c3aed] to-[#0d9488]',
   },
   {
     id: 'icml_2025',

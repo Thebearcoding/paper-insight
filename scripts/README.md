@@ -17,6 +17,8 @@
 - `scripts/download_icml_2026_openreview.py`：登录 OpenReview 后低速下载 ICML 2026 metadata JSONL，不导入数据库
 - `scripts/build_chi_2026_jsonl.py`：从 DBLP + OpenAlex 生成 CHI 2026 的导入 JSONL
 - `scripts/build_cvpr_2026_jsonl.py`：从 CVF Open Access 生成 CVPR 2026 的导入 JSONL
+- `scripts/build_ijcai_2025_jsonl.py`：从 IJCAI 官方 proceedings 生成 IJCAI 2025 导入 JSONL
+- `scripts/build_acm_2026_jsonl.py`：从 ACM/Crossref + OpenAlex 生成 KDD/SIGIR 2026 导入 JSONL
 - `scripts/export_supabase.sh`：使用 `pg_dump` 导出 Supabase schema 和 data
 - `scripts/restore_supabase_dump.sh`：将导出的 `supabase_data.dump` 恢复到本地 PostgreSQL
 - `scripts/migrate_db.sql`：单文件版完整 migration，方便手动执行
@@ -57,6 +59,12 @@ uv run python scripts/build_cvpr_2026_jsonl.py
 uv run python scripts/import_papers.py --conference cvpr_2026
 uv run python scripts/build_aaai_2026_jsonl.py
 uv run python scripts/import_papers.py --conference aaai_2026
+uv run python scripts/build_ijcai_2025_jsonl.py
+uv run python scripts/import_papers.py --conference ijcai_2025
+uv run python scripts/build_acm_2026_jsonl.py --conference kdd_2026
+uv run python scripts/import_papers.py --conference kdd_2026
+uv run python scripts/build_acm_2026_jsonl.py --conference sigir_2026
+uv run python scripts/import_papers.py --conference sigir_2026
 ```
 
 ICML 2026 的下载脚本只抓取 OpenReview note metadata，默认单线程、每页 25 条、每次请求 sleep 3 到 5 秒，并支持断点续跑。下载完成后先检查
@@ -68,6 +76,10 @@ CVPR 2026 的生成脚本使用 CVF Open Access 的 `day=all` 页面，导入时
 
 AAAI 2026 的生成脚本以 DBLP 正式 proceedings 列表为收录边界，再按 DOI 从 Crossref 批量补充摘要、关键词和官方 PDF。Crossref 响应会缓存在
 `crawled_data/aaai_2026/crossref_cache.json`，中断后可以直接续跑。同一套 `scripts/dblp_openalex.py` 逻辑也保留了 OpenAlex 补全能力，可复用于后续 IJCAI、KDD、SIGIR 等会议。
+
+IJCAI 2026 的 proceedings 尚未正式发布，因此当前接入的是最新完整的 IJCAI 2025。脚本只接受 IJCAI 官方列表中的 1,280 条详情页，并缓存官方摘要、关键词、DOI、页码和 PDF。
+
+KDD 2026 和 SIGIR 2026 以 ACM 正式 proceedings 的父 DOI 前缀为收录边界。Crossref 的标题查询只用于缩小候选范围，不能决定收录；OpenAlex 仅补充摘要、关键词和可访问 PDF。当前完整性断言分别为 KDD 1,472 篇、SIGIR 686 篇，来源更新导致数量变化时脚本会显式失败，要求维护者复核后再修改。
 
 ## Typesense 搜索索引
 

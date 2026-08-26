@@ -29,9 +29,12 @@ CODE_FILTERS = CODE_AVAILABILITY_STATUSES | {"all", "not_open_source"}
 READING_OVERVIEW_COLLECTIONS = (
     ("acl_2026", "ACL 2026"),
     ("aaai_2026", "AAAI 2026"),
+    ("kdd_2026", "KDD 2026"),
+    ("sigir_2026", "SIGIR 2026"),
     ("iclr_2026", "ICLR 2026"),
     ("chi_2026", "CHI 2026"),
     ("cvpr_2026", "CVPR 2026"),
+    ("ijcai_2025", "IJCAI 2025"),
     ("neurips_2025", "NeurIPS 2025"),
     ("icml_2025", "ICML 2025"),
 )

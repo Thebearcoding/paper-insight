@@ -85,6 +85,12 @@ function getConferenceColor(conference: string) {
   switch (conference) {
     case 'AAAI':
       return 'bg-indigo-50 text-indigo-700 border-indigo-200';
+    case 'KDD':
+      return 'bg-red-50 text-red-700 border-red-200';
+    case 'SIGIR':
+      return 'bg-cyan-50 text-cyan-700 border-cyan-200';
+    case 'IJCAI':
+      return 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200';
     case 'ICLR':
       return 'bg-blue-50 text-blue-700 border-blue-200';
     case 'NeurIPS':
