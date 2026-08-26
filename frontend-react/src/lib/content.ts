@@ -408,21 +408,15 @@ export function getVenueParts(venue?: string | null): { label: string; conferenc
   }
 
   const lower = venue.toLowerCase();
-  const conference = lower.includes('neurips')
-    ? 'NeurIPS'
-    : lower.includes('iclr')
-      ? 'ICLR'
-      : lower.includes('icml')
-        ? 'ICML'
-        : lower.includes('cvpr')
-          ? 'CVPR'
-          : /\bchi\b/.test(lower)
-            ? 'CHI'
-            : lower.includes('hugging face')
-              ? 'Hugging Face'
-              : lower.includes('arxiv')
-                ? 'arXiv'
-                : venue.split(' ')[0];
+  let conference = venue.split(' ')[0];
+  if (lower.includes('aaai')) conference = 'AAAI';
+  else if (lower.includes('neurips')) conference = 'NeurIPS';
+  else if (lower.includes('iclr')) conference = 'ICLR';
+  else if (lower.includes('icml')) conference = 'ICML';
+  else if (lower.includes('cvpr')) conference = 'CVPR';
+  else if (/\bchi\b/.test(lower)) conference = 'CHI';
+  else if (lower.includes('hugging face')) conference = 'Hugging Face';
+  else if (lower.includes('arxiv')) conference = 'arXiv';
 
   const type = lower.includes('oral')
     ? 'Oral'

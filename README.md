@@ -38,7 +38,7 @@ Paper Insight 是一个面向 AI 会议论文的快速筛选与分析工具。�
 
 | 入口 | 用来做什么 |
 | --- | --- |
-| [ICLR 2026](https://paper.athebear.me/conference/iclr_2026) / [CHI 2026](https://paper.athebear.me/conference/chi_2026) / [CVPR 2026](https://paper.athebear.me/conference/cvpr_2026) / [NeurIPS 2025](https://paper.athebear.me/conference/neurips_2025) / [ICML 2025](https://paper.athebear.me/conference/icml_2025) | 按会议批量浏览论文，支持分页、关键词搜索和字段过滤 |
+| [AAAI 2026](https://paper.athebear.me/conference/aaai_2026) / [ICLR 2026](https://paper.athebear.me/conference/iclr_2026) / [CHI 2026](https://paper.athebear.me/conference/chi_2026) / [CVPR 2026](https://paper.athebear.me/conference/cvpr_2026) / [NeurIPS 2025](https://paper.athebear.me/conference/neurips_2025) / [ICML 2025](https://paper.athebear.me/conference/icml_2025) | 按会议批量浏览论文，支持分页、关键词搜索和字段过滤 |
 | [Hugging Face Daily Papers](https://paper.athebear.me/hf-daily) | 自动同步热门 Daily Papers，并进入同一套分析流程 |
 | [arXiv 分析](https://paper.athebear.me/arxiv) | 粘贴 arXiv 链接或 ID，把新论文加入分析与收藏流程 |
 

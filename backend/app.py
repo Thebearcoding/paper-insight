@@ -3342,6 +3342,7 @@ async def search_all_papers_endpoint(
 
 
 CONFERENCE_VENUE_MAP = {
+    "aaai_2026": "AAAI 2026",
     "neurips_2025": "NeurIPS 2025",
     "iclr_2026": "ICLR 2026",
     "acl_2026": "ACL 2026",

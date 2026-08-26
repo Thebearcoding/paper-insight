@@ -83,6 +83,8 @@ function formatFeishuTestStatus(settings?: FeishuWebhookSettings | null): string
 
 function getConferenceColor(conference: string) {
   switch (conference) {
+    case 'AAAI':
+      return 'bg-indigo-50 text-indigo-700 border-indigo-200';
     case 'ICLR':
       return 'bg-blue-50 text-blue-700 border-blue-200';
     case 'NeurIPS':

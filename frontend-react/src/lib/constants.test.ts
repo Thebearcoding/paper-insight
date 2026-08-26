@@ -4,6 +4,7 @@ import { buildConferenceKeywordSearchPath, buildPaperKeywordSearchPath, getConfe
 
 describe('getConferenceSlugFromVenue', () => {
   it('maps paper venue labels back to conference collection slugs', () => {
+    expect(getConferenceSlugFromVenue('AAAI 2026')).toBe('aaai_2026');
     expect(getConferenceSlugFromVenue('ICLR 2026 Oral')).toBe('iclr_2026');
     expect(getConferenceSlugFromVenue('ACL 2026 Long')).toBe('acl_2026');
     expect(getConferenceSlugFromVenue('NeurIPS 2025 poster')).toBe('neurips_2025');

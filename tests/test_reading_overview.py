@@ -132,7 +132,7 @@ def test_get_reading_overview_builds_local_activity_latest_hf_and_collection_pro
         "total": 3,
         "percent": 66.7,
     }
-    assert len(overview["collections"]) == 6
+    assert len(overview["collections"]) == 7
 
     activity_sql, activity_params = cursor.calls[0]
     assert "first_viewed_at AT TIME ZONE %s" in activity_sql
@@ -146,7 +146,7 @@ def test_get_reading_overview_builds_local_activity_latest_hf_and_collection_pro
     assert hf_params == (date(2026, 7, 13), "session-user-id")
 
     collection_sql, collection_params = cursor.calls[2]
-    assert collection_sql.count("UNION ALL") == 5
+    assert collection_sql.count("UNION ALL") == 6
     assert "venue >= %s" in collection_sql
     assert "venue < %s" in collection_sql
     assert "venue LIKE %s" in collection_sql

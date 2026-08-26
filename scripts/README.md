@@ -55,6 +55,8 @@ uv run python scripts/build_chi_2026_jsonl.py
 uv run python scripts/import_papers.py --conference chi_2026
 uv run python scripts/build_cvpr_2026_jsonl.py
 uv run python scripts/import_papers.py --conference cvpr_2026
+uv run python scripts/build_aaai_2026_jsonl.py
+uv run python scripts/import_papers.py --conference aaai_2026
 ```
 
 ICML 2026 的下载脚本只抓取 OpenReview note metadata，默认单线程、每页 25 条、每次请求 sleep 3 到 5 秒，并支持断点续跑。下载完成后先检查
@@ -63,6 +65,9 @@ ICML 2026 的下载脚本只抓取 OpenReview note metadata，默认单线程、
 CHI 2026 的生成脚本默认只保留 OpenAlex 提供的非 ACM PDF 论文，避免把服务器无法读取的 ACM DL PDF 链接导入线上库。维护者如需全量元数据，可显式加 `--include-acm-only`。
 
 CVPR 2026 的生成脚本使用 CVF Open Access 的 `day=all` 页面，导入时写入 `sort_order`，会议页默认按 CVF 官方列表顺序展示。
+
+AAAI 2026 的生成脚本以 DBLP 正式 proceedings 列表为收录边界，再按 DOI 从 Crossref 批量补充摘要、关键词和官方 PDF。Crossref 响应会缓存在
+`crawled_data/aaai_2026/crossref_cache.json`，中断后可以直接续跑。同一套 `scripts/dblp_openalex.py` 逻辑也保留了 OpenAlex 补全能力，可复用于后续 IJCAI、KDD、SIGIR 等会议。
 
 ## Typesense 搜索索引
 
