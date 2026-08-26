@@ -14,6 +14,7 @@ from dblp_openalex import (
     parse_dblp_proceedings,
     pdf_from_crossref,
     pdf_from_openalex,
+    plain_text_from_markup,
 )
 
 
@@ -88,8 +89,12 @@ def test_crossref_helpers_clean_jats_abstract_and_choose_pdf():
         ],
     }
 
-    assert abstract_from_crossref(item) == "A & B method ."
+    assert abstract_from_crossref(item) == "A & B method."
     assert pdf_from_crossref(item) == "https://ojs.aaai.org/paper.pdf"
+
+
+def test_crossref_markup_is_converted_to_plain_text():
+    assert plain_text_from_markup("<scp>LiveRAG:</scp> Q&amp;A <i>Dataset</i>") == "LiveRAG: Q&A Dataset"
 
 
 def test_build_crossref_record_uses_formal_metadata():

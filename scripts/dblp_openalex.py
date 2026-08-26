@@ -33,6 +33,10 @@ def clean_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def plain_text_from_markup(value: object) -> str:
+    return clean_text(re.sub(r"<[^>]+>", "", html.unescape(str(value or ""))))
+
+
 def normalize_doi(value: object) -> str:
     doi = clean_text(value)
     doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", doi, flags=re.IGNORECASE)
@@ -421,7 +425,7 @@ def abstract_from_crossref(item: dict[str, Any]) -> str:
     value = clean_text(item.get("abstract"))
     if not value:
         return ""
-    return clean_text(re.sub(r"<[^>]+>", " ", html.unescape(value)))
+    return plain_text_from_markup(value)
 
 
 def keywords_from_crossref(item: dict[str, Any]) -> list[str]:
@@ -473,7 +477,7 @@ def build_crossref_record(
     source_label: str = "DBLP + Crossref",
 ) -> dict[str, Any]:
     crossref_titles = crossref_item.get("title") or []
-    crossref_title = clean_text(crossref_titles[0]) if crossref_titles else ""
+    crossref_title = plain_text_from_markup(crossref_titles[0]) if crossref_titles else ""
     return _assemble_record(
         paper,
         title=crossref_title or paper.title,
@@ -496,7 +500,7 @@ def build_crossref_openalex_record(
     source_label: str = "Crossref + OpenAlex",
 ) -> dict[str, Any]:
     crossref_titles = crossref_item.get("title") or []
-    crossref_title = clean_text(crossref_titles[0]) if crossref_titles else ""
+    crossref_title = plain_text_from_markup(crossref_titles[0]) if crossref_titles else ""
     crossref_keywords = keywords_from_crossref(crossref_item)
     openalex_keywords = keywords_from_openalex(openalex_item)
     keywords = list(dict.fromkeys([*crossref_keywords, *openalex_keywords]))[:10]

@@ -25,6 +25,7 @@ from dblp_openalex import (  # noqa: E402
     load_cache,
     normalize_doi,
     paper_id_from_doi,
+    plain_text_from_markup,
     write_jsonl,
 )
 
@@ -104,7 +105,7 @@ def crossref_item_to_paper(
 ) -> DblpPaper:
     doi = normalize_doi(item.get("DOI"))
     titles = item.get("title") or []
-    title = clean_text(titles[0]) if titles else ""
+    title = plain_text_from_markup(titles[0]) if titles else ""
     authors = authors_from_crossref(item) or authors_from_openalex(openalex_item or {})
     if not doi or not title:
         raise ValueError(f"Incomplete formal proceedings metadata for DOI {doi or '<missing>'}")
@@ -130,7 +131,7 @@ def sorted_crossref_items(
         key=lambda item: (
             _section_for_doi(config, normalize_doi(item.get("DOI")))[0],
             _first_page(item.get("page")),
-            clean_text((item.get("title") or [""])[0]).casefold(),
+            plain_text_from_markup((item.get("title") or [""])[0]).casefold(),
         ),
     )
 

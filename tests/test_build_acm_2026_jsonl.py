@@ -64,3 +64,13 @@ def test_formal_record_without_publisher_authors_is_preserved():
 
     assert paper.authors == []
     assert paper.title
+
+
+def test_crossref_title_markup_is_removed():
+    config = acm.CONFERENCES["sigir_2026"]
+    item = crossref_item("10.1145/3805712.3808585", page="1-10")
+    item["title"] = ["<i>LiveRAG:</i> A Q&amp;A Dataset"]
+
+    paper = acm.crossref_item_to_paper(config, item)
+
+    assert paper.title == "LiveRAG: A Q&A Dataset"
