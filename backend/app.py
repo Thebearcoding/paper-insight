@@ -1258,6 +1258,37 @@ def require_zotero_connection(user_id: str, *, include_api_key: bool = False) ->
     return connection
 
 
+async def refresh_zotero_connection_metadata(
+    user_id: str,
+    *,
+    force: bool = False,
+) -> dict | None:
+    connection = await asyncio.to_thread(get_zotero_connection, user_id, True)
+    if not connection:
+        return None
+    if connection.get("can_write") and not force:
+        return connection
+    key_metadata = await asyncio.to_thread(
+        ZoteroClient(connection["api_key"]).verify_key,
+    )
+    metadata_fields = (
+        "zotero_user_id",
+        "username",
+        "display_name",
+        "can_read",
+        "can_write",
+    )
+    if any(connection.get(field) != key_metadata.get(field) for field in metadata_fields):
+        refreshed = await asyncio.to_thread(
+            save_zotero_connection,
+            user_id,
+            connection["api_key"],
+            key_metadata,
+        )
+        return {**refreshed, "api_key": connection["api_key"]}
+    return connection
+
+
 def assert_zotero_chat_owner(session_id: str, user_id: str, item_key: str | None = None) -> dict | None:
     session_row = get_zotero_chat_session(session_id)
     if session_row and session_row.get("user_id") != user_id:
@@ -1566,7 +1597,12 @@ async def healthcheck():
 @app.get("/me/zotero/connection")
 async def get_my_zotero_connection(user: dict = Depends(require_current_user)):
     try:
-        return public_zotero_connection(get_zotero_connection(user["id"]))
+        connection = await refresh_zotero_connection_metadata(user["id"])
+        return public_zotero_connection(connection)
+    except ZoteroAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ZoteroError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
 
@@ -1908,7 +1944,7 @@ async def writeback_my_zotero_item_enrichment(
     user: dict = Depends(require_current_user),
 ):
     try:
-        connection = await asyncio.to_thread(get_zotero_connection, user["id"], True)
+        connection = await refresh_zotero_connection_metadata(user["id"], force=True)
         if not connection:
             raise HTTPException(status_code=404, detail="请先连接 Zotero 文库")
         if not connection.get("can_write"):
