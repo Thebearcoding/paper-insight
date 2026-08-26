@@ -109,6 +109,7 @@ def test_search_paper_ids_builds_multilingual_hybrid_query(monkeypatch):
     assert total == 2
     assert captured["path"] == "/collections/papers/documents/search"
     assert captured["params"]["query_by"] == "title,keywords,abstract,embedding"
+    assert captured["params"]["rerank_hybrid_matches"] == "false"
     assert "alpha:0.4" in captured["params"]["vector_query"]
     assert "distance_threshold:0.45" in captured["params"]["vector_query"]
     assert captured["params"]["filter_by"] == (

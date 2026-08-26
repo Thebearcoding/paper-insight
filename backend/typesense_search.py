@@ -412,7 +412,13 @@ def search_paper_ids(
         params["filter_by"] = filter_by
     if semantic_search:
         config = settings.typesense
-        params["rerank_hybrid_matches"] = "true"
+        # Keep Typesense's default hybrid behavior. Enabling
+        # `rerank_hybrid_matches` also assigns keyword ranks to vector-only
+        # candidates. For cross-language queries whose lexical score is zero
+        # (for example, Chinese queries over English paper metadata), those
+        # zero-score ranks follow the collection's default order and can push
+        # less relevant papers ahead of closer semantic matches.
+        params["rerank_hybrid_matches"] = "false"
         params["vector_query"] = (
             "embedding:([], "
             f"alpha:{config.vector_alpha}, "
