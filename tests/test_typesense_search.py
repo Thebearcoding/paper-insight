@@ -64,6 +64,18 @@ def test_paper_to_document_builds_search_and_sort_fields():
     assert document["created_at"] == 1787184000
 
 
+def test_collection_schema_keeps_full_text_search_but_limits_embedding_cost(monkeypatch):
+    monkeypatch.setattr(typesense_search, "settings", _settings())
+
+    schema = typesense_search._collection_schema("papers_test")
+    embedding = next(field for field in schema["fields"] if field["name"] == "embedding")
+
+    assert embedding["embed"]["from"] == ["title", "keywords"]
+    assert {field["name"] for field in schema["fields"]}.issuperset(
+        {"title", "abstract", "keywords"}
+    )
+
+
 def test_search_paper_ids_builds_multilingual_hybrid_query(monkeypatch):
     monkeypatch.setattr(typesense_search, "settings", _settings())
     captured = {}

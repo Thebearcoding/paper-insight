@@ -116,7 +116,7 @@ def _collection_schema(collection_name: str) -> dict[str, Any]:
                 "name": "embedding",
                 "type": "float[]",
                 "embed": {
-                    "from": ["title", "abstract", "keywords"],
+                    "from": ["title", "keywords"],
                     "model_config": {
                         "model_name": settings.typesense.embedding_model,
                         "indexing_prefix": "passage: ",
