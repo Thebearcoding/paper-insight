@@ -63,6 +63,7 @@ def _request(
     data: str | None = None,
     content_type: str = "application/json",
     allow_not_found: bool = False,
+    timeout_seconds: int | None = None,
 ) -> requests.Response | None:
     if not is_enabled():
         raise TypesenseSearchError("Typesense is not enabled or api_key is missing")
@@ -79,7 +80,7 @@ def _request(
             json=payload,
             data=data,
             headers=headers,
-            timeout=settings.typesense.timeout_seconds,
+            timeout=timeout_seconds or settings.typesense.timeout_seconds,
         )
     except requests.RequestException as exc:
         raise TypesenseSearchError(f"Typesense request failed: {exc}") from exc
@@ -258,6 +259,7 @@ def _import_documents(collection_name: str, documents: list[dict[str, Any]]) -> 
         params={"action": "upsert"},
         data=body,
         content_type="text/plain",
+        timeout_seconds=max(settings.typesense.timeout_seconds, 300),
     )
     assert response is not None
 
@@ -299,7 +301,12 @@ def rebuild_index(batch_size: int = 100, prune_old: bool = True) -> int:
         str(previous_alias.json().get("collection_name")) if previous_alias is not None else None
     )
 
-    _request("POST", "/collections", payload=_collection_schema(physical_name))
+    _request(
+        "POST",
+        "/collections",
+        payload=_collection_schema(physical_name),
+        timeout_seconds=max(settings.typesense.timeout_seconds, 300),
+    )
     total = 0
     try:
         for documents in iter_postgres_documents(batch_size=batch_size):
@@ -309,6 +316,7 @@ def rebuild_index(batch_size: int = 100, prune_old: bool = True) -> int:
             "PUT",
             f"/aliases/{alias}",
             payload={"collection_name": physical_name},
+            timeout_seconds=max(settings.typesense.timeout_seconds, 60),
         )
     except Exception:
         _request("DELETE", f"/collections/{physical_name}", allow_not_found=True)

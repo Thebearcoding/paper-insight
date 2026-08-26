@@ -91,6 +91,10 @@ uv run python scripts/reindex_typesense.py --keep-old
 普通论文写入、arXiv/HF Daily 同步、关键词补全和代码状态更新会自动尝试增量更新
 Typesense。同步失败不会回滚 PostgreSQL 写入，之后可用全量重建恢复一致性。
 
+生产服务器无法直接访问模型源时，可把模型文件预置到 Typesense 数据卷的
+`models/<自定义模型名>/`，并通过 `.env` 设置 `TYPESENSE_EMBEDDING_MODEL=<自定义模型名>`。
+全量建索引会自动为模型初始化和批量向量化使用更长的管理请求超时，不影响正常搜索请求的超时配置。
+
 ## 维护者：从 Supabase 导出现有数据
 
 需要先安装 PostgreSQL 客户端工具（`pg_dump` 主版本应尽量与 Supabase 数据库一致，例如服务端是 PostgreSQL 17 时使用 `pg_dump` 17），并配置 **Session pooler** 连接串：
