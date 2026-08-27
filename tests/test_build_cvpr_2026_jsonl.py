@@ -67,3 +67,25 @@ def test_parse_cvf_detail_and_jsonl_record_shape():
     assert record["content"]["venue"]["value"] == "CVPR 2026"
     assert record["content"]["primary_area"]["value"] == "Computer Vision and Pattern Recognition"
     assert record["content"]["sort_order"]["value"] == 7
+
+
+def test_cvf_parser_supports_cvpr_and_iccv_2025_configs():
+    cvpr_2025 = cvpr.CONFERENCES["cvpr_2025"]
+    iccv_2025 = cvpr.CONFERENCES["iccv_2025"]
+    cvpr_links = cvpr.parse_cvf_list(
+        '<a href="/content/CVPR2025/html/Ma_AA-CLIP_CVPR_2025_paper.html">AA-CLIP</a>',
+        cvpr_2025,
+    )
+    iccv_links = cvpr.parse_cvf_list(
+        '<a href="/content/ICCV2025/html/Example_ICCV_2025_paper.html">Example</a>',
+        iccv_2025,
+    )
+
+    assert len(cvpr_links) == 1
+    assert len(iccv_links) == 1
+    assert cvpr.paper_id_from_html_url(cvpr_links[0].html_url, "AA-CLIP", cvpr_2025).startswith(
+        "cvpr2025-ma-aa-clip-"
+    )
+    assert cvpr.paper_id_from_html_url(iccv_links[0].html_url, "Example", iccv_2025).startswith(
+        "iccv2025-example-"
+    )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build import-ready KDD/SIGIR 2026 JSONL from formal ACM proceedings."""
+"""Build import-ready ACM conference JSONL from formal proceedings."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from dblp_openalex import (  # noqa: E402
 )
 
 
-USER_AGENT = "paper-online/0.1 (ACM 2026 proceedings importer)"
+USER_AGENT = "paper-online/0.1 (ACM proceedings importer)"
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class ConferenceConfig:
     container_title: str
     doi_sections: tuple[tuple[str, str], ...]
     expected_count: int
+    year: int
 
 
 CONFERENCES = {
@@ -57,6 +58,7 @@ CONFERENCES = {
             ("10.1145/3770855", "Volume 2"),
         ),
         expected_count=1472,
+        year=2026,
     ),
     "sigir_2026": ConferenceConfig(
         id="sigir_2026",
@@ -68,6 +70,43 @@ CONFERENCES = {
         ),
         doi_sections=(("10.1145/3805712", "Main Proceedings"),),
         expected_count=686,
+        year=2026,
+    ),
+    "kdd_2025": ConferenceConfig(
+        id="kdd_2025",
+        venue="KDD 2025",
+        primary_area="Knowledge Discovery and Data Mining",
+        container_title=(
+            "Proceedings of the 31st ACM SIGKDD Conference on Knowledge "
+            "Discovery and Data Mining"
+        ),
+        doi_sections=(
+            ("10.1145/3690624", "Volume 1"),
+            ("10.1145/3711896", "Volume 2"),
+        ),
+        expected_count=844,
+        year=2025,
+    ),
+    "sigir_2025": ConferenceConfig(
+        id="sigir_2025",
+        venue="SIGIR 2025",
+        primary_area="Information Retrieval",
+        container_title=(
+            "Proceedings of the 48th International ACM SIGIR Conference on "
+            "Research and Development in Information Retrieval"
+        ),
+        doi_sections=(("10.1145/3726302", "Main Proceedings"),),
+        expected_count=540,
+        year=2025,
+    ),
+    "chi_2025": ConferenceConfig(
+        id="chi_2025",
+        venue="CHI 2025",
+        primary_area="Human-Computer Interaction",
+        container_title="Proceedings of the 2025 CHI Conference on Human Factors in Computing Systems",
+        doi_sections=(("10.1145/3706598", "Main Proceedings"),),
+        expected_count=1249,
+        year=2025,
     ),
 }
 
@@ -153,8 +192,8 @@ def main(argv: list[str] | None = None) -> int:
             crossref_cache_path,
             container_title=config.container_title,
             doi_prefixes=prefixes,
-            from_date="2026-01-01",
-            until_date="2026-12-31",
+            from_date=f"{config.year}-01-01",
+            until_date=f"{config.year}-12-31",
             user_agent=USER_AGENT,
             mailto=args.mailto,
             expected_count=expected_count,

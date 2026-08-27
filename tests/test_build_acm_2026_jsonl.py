@@ -74,3 +74,10 @@ def test_crossref_title_markup_is_removed():
     paper = acm.crossref_item_to_paper(config, item)
 
     assert paper.title == "LiveRAG: A Q&A Dataset"
+
+
+def test_2025_acm_conferences_use_formal_proceedings_counts():
+    assert acm.CONFERENCES["kdd_2025"].expected_count == 844
+    assert acm.CONFERENCES["sigir_2025"].expected_count == 540
+    assert acm.CONFERENCES["chi_2025"].expected_count == 1249
+    assert acm.CONFERENCES["kdd_2025"].doi_sections[0][0] == "10.1145/3690624"

@@ -53,6 +53,18 @@ def test_openalex_helpers_reconstruct_abstract_and_official_pdf():
     assert pdf_from_openalex(item) == "https://ojs.aaai.org/paper.pdf"
 
 
+def test_openalex_pdf_prefers_public_repository_over_acm_host():
+    item = {
+        "primary_location": {"pdf_url": "https://dl.acm.org/doi/pdf/10.1145/example"},
+        "locations": [
+            {"pdf_url": "https://arxiv.org/pdf/2501.01234"},
+            {"pdf_url": "https://dl.acm.org/doi/pdf/10.1145/example"},
+        ],
+    }
+
+    assert pdf_from_openalex(item) == "https://arxiv.org/pdf/2501.01234"
+
+
 def test_build_record_uses_dblp_acceptance_and_openalex_content():
     paper = parse_dblp_proceedings(
         DBLP_SAMPLE,
@@ -118,3 +130,28 @@ def test_build_crossref_record_uses_formal_metadata():
     assert record["content"]["abstract"]["value"] == "Accepted work"
     assert record["content"]["keywords"]["value"] == ["Artificial Intelligence"]
     assert record["content"]["source"]["value"] == "DBLP + Crossref"
+
+
+def test_build_crossref_record_fills_missing_dblp_authors():
+    paper = parse_dblp_proceedings(
+        DBLP_SAMPLE.replace(
+            "<author>Ada Lovelace</author><author>Alan Turing</author>",
+            "",
+        ),
+        conference_id="aaai_2026",
+        doi_prefix="10.1609/aaai.v40",
+    )[0]
+    record = build_crossref_record(
+        paper,
+        {
+            "title": ["A Formal AAAI Paper"],
+            "author": [
+                {"given": "Ada", "family": "Lovelace"},
+                {"name": "Alan Turing"},
+            ],
+        },
+        venue="AAAI 2026",
+        primary_area="Artificial Intelligence",
+    )
+
+    assert record["content"]["authors"]["value"] == ["Ada Lovelace", "Alan Turing"]

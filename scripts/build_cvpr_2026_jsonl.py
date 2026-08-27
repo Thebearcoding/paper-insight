@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build import-ready CVPR 2026 JSONL from the CVF Open Access site."""
+"""Build import-ready CVPR/ICCV JSONL from the CVF Open Access site."""
 
 from __future__ import annotations
 
@@ -21,13 +21,50 @@ import requests
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CVF_BASE_URL = "https://openaccess.thecvf.com"
-DEFAULT_LIST_URL = f"{CVF_BASE_URL}/CVPR2026?day=all"
-CONFERENCE_ID = "cvpr_2026"
-CONFERENCE_VENUE = "CVPR 2026"
-PRIMARY_AREA = "Computer Vision and Pattern Recognition"
-DEFAULT_OUTPUT_PATH = REPO_ROOT / "crawled_data" / CONFERENCE_ID / "main_papers.jsonl"
-DEFAULT_CACHE_PATH = REPO_ROOT / "crawled_data" / CONFERENCE_ID / "cvf_cache.json"
-USER_AGENT = "paper-online/0.1 (CVPR 2026 metadata importer)"
+USER_AGENT = "paper-online/0.1 (CVF proceedings importer)"
+
+
+@dataclass(frozen=True)
+class CvfConferenceConfig:
+    id: str
+    venue: str
+    content_code: str
+    acronym: str
+    year: int
+    primary_area: str
+    expected_count: int
+
+
+CONFERENCES = {
+    "cvpr_2026": CvfConferenceConfig(
+        id="cvpr_2026",
+        venue="CVPR 2026",
+        content_code="CVPR2026",
+        acronym="CVPR",
+        year=2026,
+        primary_area="Computer Vision and Pattern Recognition",
+        expected_count=4068,
+    ),
+    "cvpr_2025": CvfConferenceConfig(
+        id="cvpr_2025",
+        venue="CVPR 2025",
+        content_code="CVPR2025",
+        acronym="CVPR",
+        year=2025,
+        primary_area="Computer Vision and Pattern Recognition",
+        expected_count=2871,
+    ),
+    "iccv_2025": CvfConferenceConfig(
+        id="iccv_2025",
+        venue="ICCV 2025",
+        content_code="ICCV2025",
+        acronym="ICCV",
+        year=2025,
+        primary_area="Computer Vision",
+        expected_count=2701,
+    ),
+}
+DEFAULT_CONFERENCE = CONFERENCES["cvpr_2026"]
 
 
 @dataclass(frozen=True)
@@ -37,8 +74,9 @@ class CvfPaperLink:
 
 
 class CvfListParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, content_code: str) -> None:
         super().__init__(convert_charrefs=True)
+        self.content_code = content_code
         self.links: list[str] = []
         self._seen: set[str] = set()
 
@@ -46,7 +84,7 @@ class CvfListParser(HTMLParser):
         if tag != "a":
             return
         href = dict(attrs).get("href") or ""
-        if not href.startswith("/content/CVPR2026/html/"):
+        if not href.startswith(f"/content/{self.content_code}/html/"):
             return
         url = urljoin(CVF_BASE_URL, href)
         if url in self._seen:
@@ -56,8 +94,9 @@ class CvfListParser(HTMLParser):
 
 
 class CvfDetailParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, content_code: str) -> None:
         super().__init__(convert_charrefs=True)
+        self.content_code = content_code
         self.meta: dict[str, list[str]] = {}
         self.links: list[str] = []
         self.sections: dict[str, list[str]] = {
@@ -80,7 +119,7 @@ class CvfDetailParser(HTMLParser):
 
         if tag == "a":
             href = attrs_dict.get("href") or ""
-            if href.startswith("/content/CVPR2026/"):
+            if href.startswith(f"/content/{self.content_code}/"):
                 self.links.append(urljoin(CVF_BASE_URL, href))
             return
 
@@ -107,8 +146,11 @@ class CvfDetailParser(HTMLParser):
             self.sections[self._capture].append(data)
 
 
-def parse_cvf_list(html_text: str) -> list[CvfPaperLink]:
-    parser = CvfListParser()
+def parse_cvf_list(
+    html_text: str,
+    config: CvfConferenceConfig = DEFAULT_CONFERENCE,
+) -> list[CvfPaperLink]:
+    parser = CvfListParser(config.content_code)
     parser.feed(html_text)
     return [
         CvfPaperLink(order=index, html_url=url)
@@ -159,6 +201,7 @@ def fetch_detail_records(
     cache: dict[str, dict[str, Any]],
     cache_path: Path,
     *,
+    config: CvfConferenceConfig = DEFAULT_CONFERENCE,
     workers: int = 8,
     batch_size: int = 100,
     sleep_seconds: float = 0.0,
@@ -173,7 +216,7 @@ def fetch_detail_records(
         html_text = fetch_text(session, link.html_url)
         if sleep_seconds:
             time.sleep(sleep_seconds)
-        return link.html_url, parse_cvf_detail(link, html_text)
+        return link.html_url, parse_cvf_detail(link, html_text, config)
 
     completed = 0
     errors: list[str] = []
@@ -212,8 +255,12 @@ def fetch_detail_records(
     return cache
 
 
-def parse_cvf_detail(link: CvfPaperLink, html_text: str) -> dict[str, Any]:
-    parser = CvfDetailParser()
+def parse_cvf_detail(
+    link: CvfPaperLink,
+    html_text: str,
+    config: CvfConferenceConfig = DEFAULT_CONFERENCE,
+) -> dict[str, Any]:
+    parser = CvfDetailParser(config.content_code)
     parser.feed(html_text)
 
     title = _first_meta(parser, "citation_title") or _section_text(parser, "papertitle")
@@ -229,7 +276,7 @@ def parse_cvf_detail(link: CvfPaperLink, html_text: str) -> dict[str, Any]:
     return {
         "order": link.order,
         "html_url": link.html_url,
-        "id": paper_id_from_html_url(link.html_url, title),
+        "id": paper_id_from_html_url(link.html_url, title, config),
         "title": title,
         "authors": authors,
         "abstract": _section_text(parser, "abstract"),
@@ -240,29 +287,36 @@ def parse_cvf_detail(link: CvfPaperLink, html_text: str) -> dict[str, Any]:
     }
 
 
-def paper_id_from_html_url(html_url: str, title: str) -> str:
+def paper_id_from_html_url(
+    html_url: str,
+    title: str,
+    config: CvfConferenceConfig = DEFAULT_CONFERENCE,
+) -> str:
     parsed = urlparse(html_url)
     stem = Path(parsed.path).stem
-    stem = re.sub(r"_CVPR_2026_paper$", "", stem)
+    stem = re.sub(rf"_{config.acronym}_{config.year}_paper$", "", stem)
     slug_source = stem or title
     slug = re.sub(r"[^a-z0-9]+", "-", slug_source.casefold()).strip("-")[:90]
     digest = hashlib.sha1(html_url.encode("utf-8")).hexdigest()[:8]
-    return f"cvpr2026-{slug}-{digest}"
+    return f"{config.id.replace('_', '')}-{slug}-{digest}"
 
 
-def build_jsonl_record(detail: dict[str, Any]) -> dict[str, Any]:
+def build_jsonl_record(
+    detail: dict[str, Any],
+    config: CvfConferenceConfig = DEFAULT_CONFERENCE,
+) -> dict[str, Any]:
     return {
         "id": detail["id"],
         "forum": detail["html_url"],
         "license": "CVF Open Access",
-        "domain": CONFERENCE_VENUE,
+        "domain": config.venue,
         "content": {
             "title": {"value": detail["title"]},
             "authors": {"value": detail["authors"]},
             "keywords": {"value": []},
             "abstract": {"value": detail["abstract"]},
-            "primary_area": {"value": PRIMARY_AREA},
-            "venue": {"value": CONFERENCE_VENUE},
+            "primary_area": {"value": config.primary_area},
+            "venue": {"value": config.venue},
             "pdf": {"value": detail["pdf"]},
             "html_url": {"value": detail["html_url"]},
             "supplemental": {"value": detail.get("supplemental") or ""},
@@ -315,11 +369,13 @@ def _clean_text(value: str | None) -> str:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build crawled_data/cvpr_2026 JSONL from CVF Open Access")
-    parser.add_argument("--list-url", default=DEFAULT_LIST_URL, help="CVF CVPR 2026 all-papers URL")
+    parser = argparse.ArgumentParser(description="Build CVPR/ICCV JSONL from CVF Open Access")
+    parser.add_argument("--conference", choices=sorted(CONFERENCES), default=DEFAULT_CONFERENCE.id)
+    parser.add_argument("--list-url", help="Override the CVF all-papers URL")
     parser.add_argument("--list-html", type=Path, help="Use a local CVF all-papers HTML file")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="Output JSONL path")
-    parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE_PATH, help="Parsed CVF detail cache JSON path")
+    parser.add_argument("--output", type=Path, help="Output JSONL path")
+    parser.add_argument("--cache", type=Path, help="Parsed CVF detail cache JSON path")
+    parser.add_argument("--expected-count", type=int, help="Override the expected paper count")
     parser.add_argument("--workers", type=int, default=8, help="Concurrent detail page fetches")
     parser.add_argument("--batch-size", type=int, default=100, help="Detail pages to process per batch")
     parser.add_argument("--sleep-seconds", type=float, default=0.0, help="Optional sleep after each detail fetch")
@@ -328,33 +384,45 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    config = CONFERENCES[args.conference]
+    list_url = args.list_url or f"{CVF_BASE_URL}/{config.content_code}?day=all"
+    output = args.output or REPO_ROOT / "crawled_data" / config.id / "main_papers.jsonl"
+    cache_path = args.cache or REPO_ROOT / "crawled_data" / config.id / "cvf_cache.json"
+    expected_count = args.expected_count if args.expected_count is not None else config.expected_count
     if args.list_html:
         list_html = args.list_html.read_text(encoding="utf-8")
     else:
         session = requests.Session()
         session.headers.update({"User-Agent": USER_AGENT})
-        list_html = fetch_text(session, args.list_url)
+        list_html = fetch_text(session, list_url)
 
-    links = parse_cvf_list(list_html)
+    links = parse_cvf_list(list_html, config)
     if not links:
-        print("No CVPR 2026 paper links found in CVF source", file=sys.stderr)
+        print(f"No {config.venue} paper links found in CVF source", file=sys.stderr)
+        return 1
+    if expected_count is not None and len(links) != expected_count:
+        print(
+            f"Error: expected {expected_count} {config.venue} papers, got {len(links)}",
+            file=sys.stderr,
+        )
         return 1
 
-    cache = load_cache(args.cache)
+    cache = load_cache(cache_path)
     cache = fetch_detail_records(
         links,
         cache,
-        args.cache,
+        cache_path,
+        config=config,
         workers=max(1, args.workers),
         batch_size=max(1, args.batch_size),
         sleep_seconds=max(0.0, args.sleep_seconds),
     )
-    records = [build_jsonl_record(cache[link.html_url]) for link in links]
-    write_jsonl(args.output, records)
+    records = [build_jsonl_record(cache[link.html_url], config) for link in links]
+    write_jsonl(output, records)
 
     with_abstract = sum(1 for record in records if record["content"]["abstract"]["value"])
     with_pdf = sum(1 for record in records if record["content"]["pdf"]["value"])
-    print(f"Wrote {len(records)} CVPR 2026 papers to {args.output}")
+    print(f"Wrote {len(records)} {config.venue} papers to {output}")
     print(f"Abstracts: {with_abstract}/{len(records)}")
     print(f"PDF URLs: {with_pdf}/{len(records)}")
     return 0

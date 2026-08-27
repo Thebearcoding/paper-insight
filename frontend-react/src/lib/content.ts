@@ -417,6 +417,7 @@ export function getVenueParts(venue?: string | null): { label: string; conferenc
   else if (lower.includes('iclr')) conference = 'ICLR';
   else if (lower.includes('icml')) conference = 'ICML';
   else if (lower.includes('cvpr')) conference = 'CVPR';
+  else if (lower.includes('iccv')) conference = 'ICCV';
   else if (/\bchi\b/.test(lower)) conference = 'CHI';
   else if (lower.includes('hugging face')) conference = 'Hugging Face';
   else if (lower.includes('arxiv')) conference = 'arXiv';

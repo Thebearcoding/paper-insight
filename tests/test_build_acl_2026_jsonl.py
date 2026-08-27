@@ -60,3 +60,31 @@ def test_build_acl_long_rows_from_anthology_fragments():
     assert rows[0]["content"]["venue"]["value"] == "ACL 2026 Long"
     assert rows[0]["acl"]["doi"] == "10.18653/v1/2026.acl-long.1"
     assert rows[1]["content"]["abstract"]["value"] == ""
+
+
+def test_build_acl_2025_short_rows_with_generic_prefix():
+    event_html = """
+    <div id=2025acl-short>
+      <a href=https://aclanthology.org/2025.acl-short.1.pdf>pdf</a>
+      <span class=d-block><strong><a href=/2025.acl-short.1/>Short Paper</a></strong><br>Ada Lovelace</span>
+      <div id=abstract-2025--acl-short--1><div class="card-body p-3 small">Short abstract.</div></div>
+    </div>
+    <div id=2025findings-acl></div>
+    """
+    bib_text = """
+@inproceedings{lovelace-2025-short,
+  url = "https://aclanthology.org/2025.acl-short.1/",
+  doi = "10.18653/v1/2025.acl-short.1"
+}
+    """
+
+    rows = build_acl_long_rows(
+        event_html,
+        bib_text,
+        venue="ACL 2025 Short",
+        anthology_prefix="2025.acl-short",
+    )
+
+    assert rows[0]["id"] == "2025.acl-short.1"
+    assert rows[0]["content"]["venue"]["value"] == "ACL 2025 Short"
+    assert rows[0]["content"]["abstract"]["value"] == "Short abstract."

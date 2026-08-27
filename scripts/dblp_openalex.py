@@ -4,7 +4,7 @@ import html
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -81,7 +81,7 @@ def parse_dblp_proceedings(
             title = clean_text("".join(title_node.itertext())) if title_node is not None else ""
             authors = [clean_text(author.text) for author in node.findall("author")]
             authors = [author for author in authors if author]
-            if not title or not authors:
+            if not title:
                 continue
             papers.append(
                 DblpPaper(
@@ -152,7 +152,7 @@ def fetch_crossref_journal_metadata(
     while missing:
         params = {
             "filter": f"from-pub-date:{from_date},until-pub-date:{until_date}",
-            "select": "DOI,title,abstract,link,subject,volume,issue,published",
+            "select": "DOI,title,author,abstract,link,subject,volume,issue,published",
             "rows": str(max(1, min(rows, 1000))),
             "cursor": cursor,
         }
@@ -412,13 +412,19 @@ def authors_from_crossref(item: dict[str, Any]) -> list[str]:
 
 def pdf_from_openalex(item: dict[str, Any]) -> str:
     candidates = [item.get("primary_location"), *(item.get("locations") or [])]
+    pdf_urls: list[str] = []
     for location in candidates:
         if not isinstance(location, dict):
             continue
         pdf_url = clean_text(location.get("pdf_url"))
-        if pdf_url.startswith(("https://", "http://")):
-            return pdf_url
-    return ""
+        if pdf_url.startswith(("https://", "http://")) and pdf_url not in pdf_urls:
+            pdf_urls.append(pdf_url)
+
+    # Prefer a public repository copy over the ACM landing/download host when
+    # OpenAlex exposes both. This keeps downstream paper analysis usable on
+    # servers that do not have an ACM institutional session.
+    pdf_urls.sort(key=lambda url: urlparse(url).netloc.casefold().endswith("dl.acm.org"))
+    return pdf_urls[0] if pdf_urls else ""
 
 
 def abstract_from_crossref(item: dict[str, Any]) -> str:
@@ -456,6 +462,8 @@ def build_record(
     primary_area: str,
     source_label: str = "DBLP + OpenAlex",
 ) -> dict[str, Any]:
+    if not paper.authors:
+        paper = replace(paper, authors=authors_from_openalex(openalex_item))
     return _assemble_record(
         paper,
         title=clean_text(openalex_item.get("title")) or paper.title,
@@ -476,6 +484,8 @@ def build_crossref_record(
     primary_area: str,
     source_label: str = "DBLP + Crossref",
 ) -> dict[str, Any]:
+    if not paper.authors:
+        paper = replace(paper, authors=authors_from_crossref(crossref_item))
     crossref_titles = crossref_item.get("title") or []
     crossref_title = plain_text_from_markup(crossref_titles[0]) if crossref_titles else ""
     return _assemble_record(

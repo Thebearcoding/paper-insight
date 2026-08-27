@@ -14,6 +14,14 @@ describe('getConferenceSlugFromVenue', () => {
     expect(getConferenceSlugFromVenue('ICML 2025')).toBe('icml_2025');
     expect(getConferenceSlugFromVenue('CHI 2026')).toBe('chi_2026');
     expect(getConferenceSlugFromVenue('CVPR 2026')).toBe('cvpr_2026');
+    expect(getConferenceSlugFromVenue('AAAI 2025')).toBe('aaai_2025');
+    expect(getConferenceSlugFromVenue('KDD 2025 Research Track')).toBe('kdd_2025');
+    expect(getConferenceSlugFromVenue('SIGIR 2025')).toBe('sigir_2025');
+    expect(getConferenceSlugFromVenue('ACL 2025 Long')).toBe('acl_2025');
+    expect(getConferenceSlugFromVenue('ICLR 2025 Oral')).toBe('iclr_2025');
+    expect(getConferenceSlugFromVenue('CHI 2025')).toBe('chi_2025');
+    expect(getConferenceSlugFromVenue('CVPR 2025')).toBe('cvpr_2025');
+    expect(getConferenceSlugFromVenue('ICCV 2025')).toBe('iccv_2025');
   });
 
   it('returns null for non-conference paper sources', () => {

@@ -16,13 +16,15 @@ import requests
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ACL_EVENT_URL = "https://aclanthology.org/events/acl-2026/"
-ACL_LONG_BIB_URL = "https://aclanthology.org/volumes/2026.acl-long.bib"
-CONFERENCE_ID = "acl_2026"
 CONFERENCE_VENUE = "ACL 2026 Long"
 PRIMARY_AREA = "Natural Language Processing"
-DEFAULT_OUTPUT_PATH = REPO_ROOT / "crawled_data" / CONFERENCE_ID / "long_papers.jsonl"
 USER_AGENT = "paper-online/0.1 (ACL 2026 metadata importer)"
+DEFAULT_ANTHOLOGY_PREFIX = "2026.acl-long"
+EXPECTED_COUNTS = {
+    (2026, "long"): 2222,
+    (2025, "long"): 1602,
+    (2025, "short"): 97,
+}
 
 
 class TextExtractor(HTMLParser):
@@ -53,13 +55,20 @@ def fetch_text(url: str) -> str:
     return response.text
 
 
-def extract_acl_long_section(html_text: str) -> str:
-    start = html_text.find("<div id=2026acl-long>")
+def extract_acl_long_section(
+    html_text: str,
+    anthology_prefix: str = DEFAULT_ANTHOLOGY_PREFIX,
+) -> str:
+    section_id = anthology_prefix.replace(".", "")
+    start = html_text.find(f"<div id={section_id}>")
     if start < 0:
-        raise ValueError("ACL 2026 long section not found")
-    end = html_text.find("<div id=2026acl-short>", start)
-    if end < 0:
-        raise ValueError("ACL 2026 short section boundary not found")
+        raise ValueError(f"ACL section {anthology_prefix} not found")
+    end = len(html_text)
+    for match in re.finditer(r"<div id=[\"']?([^\"' >]+)", html_text[start + 1 :]):
+        candidate_id = match.group(1)
+        if candidate_id != section_id and re.match(r"^\d{4}", candidate_id):
+            end = start + 1 + match.start()
+            break
     return html_text[start:end]
 
 
@@ -106,14 +115,17 @@ def extract_bibtex_field(entry: str, field: str) -> str:
     return "".join(chars)
 
 
-def parse_acl_long_bibtex(bib_text: str) -> dict[int, dict[str, str]]:
+def parse_acl_long_bibtex(
+    bib_text: str,
+    anthology_prefix: str = DEFAULT_ANTHOLOGY_PREFIX,
+) -> dict[int, dict[str, str]]:
     papers: dict[int, dict[str, str]] = {}
     for entry in split_bibtex_entries(bib_text):
         if not entry.startswith("@inproceedings"):
             continue
 
         url = extract_bibtex_field(entry, "url")
-        number_match = re.search(r"/2026\.acl-long\.(\d+)/", url)
+        number_match = re.search(rf"/{re.escape(anthology_prefix)}\.(\d+)/", url)
         if not number_match:
             continue
 
@@ -128,8 +140,13 @@ def parse_acl_long_bibtex(bib_text: str) -> dict[int, dict[str, str]]:
     return papers
 
 
-def _record_fragment(section: str, number: int, next_number: int | None) -> str:
-    marker = f"https://aclanthology.org/2026.acl-long.{number}.pdf"
+def _record_fragment(
+    section: str,
+    number: int,
+    next_number: int | None,
+    anthology_prefix: str = DEFAULT_ANTHOLOGY_PREFIX,
+) -> str:
+    marker = f"https://aclanthology.org/{anthology_prefix}.{number}.pdf"
     start = section.find(marker)
     if start < 0:
         raise ValueError(f"ACL paper {number} PDF marker not found")
@@ -137,21 +154,25 @@ def _record_fragment(section: str, number: int, next_number: int | None) -> str:
     if next_number is None:
         end = len(section)
     else:
-        next_marker = f"https://aclanthology.org/2026.acl-long.{next_number}.pdf"
+        next_marker = f"https://aclanthology.org/{anthology_prefix}.{next_number}.pdf"
         end = section.find(next_marker, start + len(marker))
         if end < 0:
             end = len(section)
     return section[start:end]
 
 
-def parse_acl_long_html(section: str, numbers: list[int]) -> dict[int, dict[str, Any]]:
+def parse_acl_long_html(
+    section: str,
+    numbers: list[int],
+    anthology_prefix: str = DEFAULT_ANTHOLOGY_PREFIX,
+) -> dict[int, dict[str, Any]]:
     parsed: dict[int, dict[str, Any]] = {}
     for index, number in enumerate(numbers):
         next_number = numbers[index + 1] if index + 1 < len(numbers) else None
-        fragment = _record_fragment(section, number, next_number)
+        fragment = _record_fragment(section, number, next_number, anthology_prefix)
 
         title_match = re.search(
-            rf"<strong><a[^>]+href=/2026\.acl-long\.{number}/>(.*?)</a></strong>",
+            rf"<strong><a[^>]+href=/{re.escape(anthology_prefix)}\.{number}/>(.*?)</a></strong>",
             fragment,
             flags=re.DOTALL,
         )
@@ -167,8 +188,10 @@ def parse_acl_long_html(section: str, numbers: list[int]) -> dict[int, dict[str,
         authors = [clean_text(author) for author in author_text.split("|") if clean_text(author)]
 
         abstract = ""
+        abstract_id = f"abstract-{anthology_prefix.replace('.', '--')}--{number}"
         abstract_match = re.search(
-            rf"id=[\"']?abstract-2026--acl-long--{number}[\"']?[^>]*>.*?<div class=\"card-body p-3 small\">(.*?)</div>\s*</div>",
+            rf"id=[\"']?{re.escape(abstract_id)}[\"']?[^>]*>.*?"
+            r"<div class=\"card-body p-3 small\">(.*?)</div>\s*</div>",
             fragment,
             flags=re.DOTALL,
         )
@@ -179,7 +202,7 @@ def parse_acl_long_html(section: str, numbers: list[int]) -> dict[int, dict[str,
             "title": strip_html(title_match.group(1)),
             "authors": authors,
             "abstract": abstract,
-            "pdf": f"https://aclanthology.org/2026.acl-long.{number}.pdf",
+            "pdf": f"https://aclanthology.org/{anthology_prefix}.{number}.pdf",
         }
     return parsed
 
@@ -190,15 +213,16 @@ def build_acl_long_rows(
     *,
     venue: str = CONFERENCE_VENUE,
     primary_area: str = PRIMARY_AREA,
+    anthology_prefix: str = DEFAULT_ANTHOLOGY_PREFIX,
 ) -> list[dict[str, Any]]:
-    bib_papers = parse_acl_long_bibtex(bib_text)
+    bib_papers = parse_acl_long_bibtex(bib_text, anthology_prefix)
     numbers = sorted(bib_papers)
-    section = extract_acl_long_section(event_html)
-    html_papers = parse_acl_long_html(section, numbers)
+    section = extract_acl_long_section(event_html, anthology_prefix)
+    html_papers = parse_acl_long_html(section, numbers, anthology_prefix)
 
     rows: list[dict[str, Any]] = []
     for sort_order, number in enumerate(numbers, start=1):
-        paper_id = f"2026.acl-long.{number}"
+        paper_id = f"{anthology_prefix}.{number}"
         html_paper = html_papers[number]
         bib_paper = bib_papers[number]
         rows.append(
@@ -234,37 +258,48 @@ def write_jsonl(rows: list[dict[str, Any]], output_path: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build import-ready ACL 2026 Long Papers JSONL")
-    parser.add_argument("--event-url", default=ACL_EVENT_URL)
-    parser.add_argument("--bib-url", default=ACL_LONG_BIB_URL)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
-    parser.add_argument("--venue", default=CONFERENCE_VENUE)
+    parser = argparse.ArgumentParser(description="Build import-ready ACL main-conference JSONL")
+    parser.add_argument("--year", type=int, default=2026)
+    parser.add_argument("--track", choices=("long", "short"), default="long")
+    parser.add_argument("--event-url")
+    parser.add_argument("--bib-url")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--venue")
     parser.add_argument("--primary-area", default=PRIMARY_AREA)
-    parser.add_argument("--expected-count", type=int, default=2222)
+    parser.add_argument("--expected-count", type=int)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    event_html = fetch_text(args.event_url)
-    bib_text = fetch_text(args.bib_url)
+    anthology_prefix = f"{args.year}.acl-{args.track}"
+    event_url = args.event_url or f"https://aclanthology.org/events/acl-{args.year}/"
+    bib_url = args.bib_url or f"https://aclanthology.org/volumes/{anthology_prefix}.bib"
+    output = args.output or REPO_ROOT / "crawled_data" / f"acl_{args.year}" / f"{args.track}_papers.jsonl"
+    venue = args.venue or f"ACL {args.year} {args.track.title()}"
+    expected_count = args.expected_count
+    if expected_count is None:
+        expected_count = EXPECTED_COUNTS.get((args.year, args.track))
+    event_html = fetch_text(event_url)
+    bib_text = fetch_text(bib_url)
     rows = build_acl_long_rows(
         event_html,
         bib_text,
-        venue=args.venue,
+        venue=venue,
         primary_area=args.primary_area,
+        anthology_prefix=anthology_prefix,
     )
 
-    if args.expected_count is not None and len(rows) != args.expected_count:
+    if expected_count is not None and len(rows) != expected_count:
         print(
-            f"Error: expected {args.expected_count} ACL long papers, got {len(rows)}",
+            f"Error: expected {expected_count} {venue} papers, got {len(rows)}",
             file=sys.stderr,
         )
         return 1
 
     missing_abstracts = [row["id"] for row in rows if not row["content"]["abstract"]["value"]]
-    write_jsonl(rows, args.output)
-    print(f"Wrote {len(rows)} ACL 2026 Long papers to {args.output}")
+    write_jsonl(rows, output)
+    print(f"Wrote {len(rows)} {venue} papers to {output}")
     if missing_abstracts:
         print(f"Papers without ACL Anthology abstract: {', '.join(missing_abstracts[:20])}")
     return 0

@@ -44,6 +44,8 @@ function getConferenceColor(conference: string) {
       return 'bg-rose-50 text-rose-700 border-rose-200';
     case 'CVPR':
       return 'bg-teal-50 text-teal-700 border-teal-200';
+    case 'ICCV':
+      return 'bg-amber-50 text-amber-700 border-amber-200';
     case 'Hugging Face':
       return 'bg-amber-50 text-amber-700 border-amber-200';
     case 'arXiv':

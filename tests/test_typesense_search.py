@@ -64,6 +64,13 @@ def test_paper_to_document_builds_search_and_sort_fields():
     assert document["created_at"] == 1787184000
 
 
+def test_venue_base_groups_conference_tracks_under_one_collection():
+    assert typesense_search._venue_base("ACL 2025 Long") == "ACL 2025"
+    assert typesense_search._venue_base("ACL 2025 Short") == "ACL 2025"
+    assert typesense_search._venue_base("NeurIPS 2025 Datasets and Benchmarks") == "NeurIPS 2025"
+    assert typesense_search._venue_base("ICLR 2025 Oral") == "ICLR 2025"
+
+
 def test_collection_schema_keeps_full_text_search_but_limits_embedding_cost(monkeypatch):
     monkeypatch.setattr(typesense_search, "settings", _settings())
 

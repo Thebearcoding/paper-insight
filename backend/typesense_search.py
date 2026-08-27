@@ -136,7 +136,15 @@ def _collection_schema(collection_name: str) -> dict[str, Any]:
 def _venue_base(venue: object) -> str:
     value = str(venue or "").strip()
     lowered = value.casefold()
-    for suffix in (" oral", " spotlight", " poster"):
+    for suffix in (
+        " datasets and benchmarks",
+        " position paper",
+        " spotlight",
+        " poster",
+        " oral",
+        " long",
+        " short",
+    ):
         if lowered.endswith(suffix):
             return value[: -len(suffix)].rstrip()
     return value

@@ -16,7 +16,7 @@
 - `scripts/reindex_typesense.py`：从 PostgreSQL 全量重建 Typesense 论文搜索索引
 - `scripts/download_icml_2026_openreview.py`：登录 OpenReview 后低速下载 ICML 2026 metadata JSONL，不导入数据库
 - `scripts/build_chi_2026_jsonl.py`：从 DBLP + OpenAlex 生成 CHI 2026 的导入 JSONL
-- `scripts/build_cvpr_2026_jsonl.py`：从 CVF Open Access 生成 CVPR 2026 的导入 JSONL
+- `scripts/build_cvpr_2026_jsonl.py`：从 CVF Open Access 生成 CVPR 2025/2026 与 ICCV 2025 的导入 JSONL
 - `scripts/build_ijcai_2025_jsonl.py`：从 IJCAI 官方 proceedings 生成 IJCAI 2025 导入 JSONL
 - `scripts/build_acm_2026_jsonl.py`：从 ACM/Crossref + OpenAlex 生成 KDD/SIGIR 2026 导入 JSONL
 - `scripts/export_supabase.sh`：使用 `pg_dump` 导出 Supabase schema 和 data
@@ -65,6 +65,17 @@ uv run python scripts/build_acm_2026_jsonl.py --conference kdd_2026
 uv run python scripts/import_papers.py --conference kdd_2026
 uv run python scripts/build_acm_2026_jsonl.py --conference sigir_2026
 uv run python scripts/import_papers.py --conference sigir_2026
+
+# 补齐 2025 顶会
+uv run python scripts/build_aaai_2026_jsonl.py --conference aaai_2025
+uv run python scripts/build_iclr_2026_jsonl.py --year 2025
+uv run python scripts/build_acl_2026_jsonl.py --year 2025 --track long
+uv run python scripts/build_acl_2026_jsonl.py --year 2025 --track short
+uv run python scripts/build_cvpr_2026_jsonl.py --conference cvpr_2025
+uv run python scripts/build_cvpr_2026_jsonl.py --conference iccv_2025
+uv run python scripts/build_acm_2026_jsonl.py --conference kdd_2025
+uv run python scripts/build_acm_2026_jsonl.py --conference sigir_2025
+uv run python scripts/build_acm_2026_jsonl.py --conference chi_2025
 ```
 
 ICML 2026 的下载脚本只抓取 OpenReview note metadata，默认单线程、每页 25 条、每次请求 sleep 3 到 5 秒，并支持断点续跑。下载完成后先检查

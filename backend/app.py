@@ -3352,6 +3352,14 @@ CONFERENCE_VENUE_MAP = {
     "icml_2025": "ICML 2025",
     "chi_2026": "CHI 2026",
     "cvpr_2026": "CVPR 2026",
+    "aaai_2025": "AAAI 2025",
+    "kdd_2025": "KDD 2025",
+    "sigir_2025": "SIGIR 2025",
+    "acl_2025": "ACL 2025",
+    "iclr_2025": "ICLR 2025",
+    "chi_2025": "CHI 2025",
+    "cvpr_2025": "CVPR 2025",
+    "iccv_2025": "ICCV 2025",
 }
 
 
