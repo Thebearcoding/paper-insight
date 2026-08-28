@@ -22,8 +22,6 @@ services:
       args:
         DOCKERHUB_PREFIX: ${DOCKERHUB_PREFIX:-}
         PYPI_FILES_MIRROR: ${PYPI_FILES_MIRROR:-}
-    extra_hosts:
-      - "sub2api.athebear.space:${SUB2API_ORIGIN_IP:-154.58.233.169}"
     mem_limit: 1152m
     cpus: 1.25
     pids_limit: 256
