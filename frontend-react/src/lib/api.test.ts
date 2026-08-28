@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { streamSse } from './api';
+import { fetchOnlineSearchPapers, streamSse } from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -33,5 +33,36 @@ describe('streamSse', () => {
     expect(chunks).toEqual(['partial']);
     expect(events).toContainEqual(['final', '# Heading\n  indented']);
     expect(events).toContainEqual(['done', '']);
+  });
+});
+
+describe('fetchOnlineSearchPapers', () => {
+  it('sends the query, year range, and sort without a persistence request', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      papers: [],
+      total: 0,
+      page: 2,
+      pages: 1,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchOnlineSearchPapers(2, ' defect detection ', 2022, 2026, 'cited');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [request, init] = fetchMock.mock.calls[0];
+    const url = new URL(String(request));
+    expect(url.pathname).toBe('/online-search/papers');
+    expect(url.searchParams.get('page')).toBe('2');
+    expect(url.searchParams.get('limit')).toBe('8');
+    expect(url.searchParams.get('search')).toBe('defect detection');
+    expect(url.searchParams.get('from_year')).toBe('2022');
+    expect(url.searchParams.get('to_year')).toBe('2026');
+    expect(url.searchParams.get('sort')).toBe('cited');
+    expect(init).toMatchObject({ credentials: 'include' });
+    expect(init?.method).toBeUndefined();
+    expect(init?.body).toBeUndefined();
   });
 });

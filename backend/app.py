@@ -55,6 +55,13 @@ from arxiv import (
     fetch_arxiv_paper,
 )
 from hf_daily import sync_hf_daily_papers
+from openalex_search import (
+    OPENALEX_RESULT_WINDOW,
+    OpenAlexRateLimitError,
+    OpenAlexSearchError,
+    SORT_VALUES as OPENALEX_SORT_VALUES,
+    search_recent_papers,
+)
 from feishu import (
     FeishuWebhookError,
     build_feishu_paper_card,
@@ -3339,6 +3346,59 @@ async def search_all_papers_endpoint(
         "page": page,
         "pages": math.ceil(total / limit) if total > 0 else 1
     }
+
+
+@app.get("/online-search/papers")
+async def search_online_recent_papers_endpoint(
+    page: int = 1,
+    limit: int = 8,
+    search: str = "",
+    from_year: int | None = None,
+    to_year: int | None = None,
+    sort: str = "relevance",
+):
+    query = " ".join(search.split())
+    if not query:
+        raise HTTPException(status_code=400, detail="搜索关键词不能为空")
+    if len(query) > 300:
+        raise HTTPException(status_code=400, detail="搜索关键词最长 300 个字符")
+    if page < 1:
+        raise HTTPException(status_code=400, detail="page 必须大于等于 1")
+    if not 1 <= limit <= 24:
+        raise HTTPException(status_code=400, detail="limit 必须在 1 到 24 之间")
+    if (page - 1) * limit >= OPENALEX_RESULT_WINDOW:
+        raise HTTPException(status_code=400, detail="在线搜索最多浏览前 10000 条结果")
+    if sort not in OPENALEX_SORT_VALUES:
+        raise HTTPException(status_code=400, detail="sort 仅支持 relevance、newest 或 cited")
+
+    current_year = datetime.now(ZoneInfo("Asia/Shanghai")).year
+    selected_from_year = from_year if from_year is not None else current_year - 4
+    selected_to_year = to_year if to_year is not None else current_year
+    if not 1900 <= selected_from_year <= current_year:
+        raise HTTPException(status_code=400, detail=f"from_year 必须在 1900 到 {current_year} 之间")
+    if not 1900 <= selected_to_year <= current_year:
+        raise HTTPException(status_code=400, detail=f"to_year 必须在 1900 到 {current_year} 之间")
+    if selected_from_year > selected_to_year:
+        raise HTTPException(status_code=400, detail="起始年份不能晚于截止年份")
+
+    try:
+        return await asyncio.to_thread(
+            search_recent_papers,
+            query,
+            from_year=selected_from_year,
+            to_year=selected_to_year,
+            page=page,
+            per_page=limit,
+            sort=sort,
+        )
+    except OpenAlexRateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="在线论文搜索额度暂时用完，请稍后再试",
+        ) from exc
+    except OpenAlexSearchError as exc:
+        logger.warning("OpenAlex online search failed for query=%r: %s", query, exc)
+        raise HTTPException(status_code=502, detail="在线论文索引暂时不可用") from exc
 
 
 CONFERENCE_VENUE_MAP = {

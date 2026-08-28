@@ -18,11 +18,26 @@ export interface Paper {
   code_checked_at?: string | null;
   hf_daily?: HfDailyPaperMeta | null;
   arxiv?: ArxivPaperMeta | null;
+  online?: OnlinePaperMeta | null;
   openReviewUrl?: string;
   pdfUrl?: string;
   hasSeen?: boolean;
   isLiked?: boolean;
   isFavorited?: boolean;
+}
+
+export interface OnlinePaperMeta {
+  provider: 'OpenAlex' | string;
+  work_id: string;
+  url: string;
+  openalex_url: string;
+  pdf_url?: string | null;
+  doi?: string | null;
+  publication_year?: number | null;
+  publication_date?: string | null;
+  cited_by_count: number;
+  is_oa: boolean;
+  work_type?: string | null;
 }
 
 export type PaperCodeStatus = 'open_source' | 'unavailable' | 'not_found' | 'unknown';
@@ -100,6 +115,8 @@ export type PaperReadFilter = 'all' | 'unread' | 'read';
 
 export type PaperCodeFilter = 'all' | 'open_source' | 'not_open_source';
 
+export type OnlineSearchSort = 'relevance' | 'newest' | 'cited';
+
 export interface PaperReadCounts {
   all: number;
   unread: number;
@@ -112,6 +129,9 @@ export interface PaperListResponse {
   page: number;
   pages: number;
   read_counts?: PaperReadCounts | null;
+  provider?: string;
+  cached?: boolean;
+  year_range?: { from: number; to: number };
 }
 
 export interface ChatSessionSummary {

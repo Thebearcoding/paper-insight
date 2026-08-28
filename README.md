@@ -39,6 +39,7 @@ Paper Insight 是一个面向 AI 会议论文的快速筛选与分析工具。�
 | 入口 | 用来做什么 |
 | --- | --- |
 | AAAI / ICLR / ACL / CVPR / ICCV / NeurIPS / ICML / IJCAI / KDD / SIGIR / CHI（覆盖 2025，部分会议已更新至 2026） | 按会议批量浏览论文，支持分页、关键词搜索和字段过滤 |
+| 在线近年搜索 | 实时检索 OpenAlex 中最近五年的论文，可按相关度、发表时间或引用数排序，不写入本地数据库 |
 | [Hugging Face Daily Papers](https://paper.athebear.me/hf-daily) | 自动同步热门 Daily Papers，并进入同一套分析流程 |
 | [arXiv 分析](https://paper.athebear.me/arxiv) | 粘贴 arXiv 链接或 ID，把新论文加入分析与收藏流程 |
 
@@ -46,6 +47,7 @@ Paper Insight 是一个面向 AI 会议论文的快速筛选与分析工具。�
 
 - 快速分析：围绕代码、任务、指标、baseline 给出更适合初筛的摘要。
 - 会议浏览：把会议论文、Daily Papers 和 arXiv 入口收束到统一的研究工作台。
+- 在线检索：按年份实时搜索 OpenAlex，结果仅作浏览，不抓取到 PostgreSQL 或 Typesense。
 - 全文对话：基于论文正文进行多轮问答，并保存历史会话。
 - 个人论文库：记录看过、点赞过的论文，便于后续回看和筛选。
 - 账号与后台：支持 GitHub 登录、用户管理、在线指标和手动触发同步任务。
@@ -77,6 +79,8 @@ Paper Insight 不试图替你读完论文，而是帮你把每天的论文筛选
 如果只是想体验，建议直接使用线上版本。
 
 如果需要本地开发或自行部署，请查看 [develop.md](./develop.md)，里面包含 PostgreSQL、`config.yaml`、GitHub OAuth、数据导入和 Docker/VPS 部署说明。
+
+在线近年搜索无需配置即可使用；部署时可通过 `OPENALEX_API_KEY` 提供可选的 OpenAlex API key 以获得更高的免费请求额度。搜索响应默认只在应用进程内缓存 30 分钟，不会导入论文数据。
 
 ## License
 

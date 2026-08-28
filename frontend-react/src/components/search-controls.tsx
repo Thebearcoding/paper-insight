@@ -16,6 +16,7 @@ interface SearchControlsProps {
   submitLabel?: string;
   compact?: boolean;
   hero?: boolean;
+  showFilters?: boolean;
 }
 
 export function SearchControls({
@@ -28,6 +29,7 @@ export function SearchControls({
   submitLabel = '搜索',
   compact = false,
   hero = false,
+  showFilters = true,
 }: SearchControlsProps) {
   const [isComposing, setIsComposing] = useState(false);
 
@@ -60,20 +62,22 @@ export function SearchControls({
 
   return (
     <div className={panelClassName}>
-      <div className={filtersClassName}>
-        {(['title', 'abstract', 'keywords'] as Array<keyof SearchFilters>).map((field) => (
-          <label key={field} className={`flex cursor-pointer items-center gap-2 text-[#3f4a5a] ${hero ? 'text-base' : 'text-sm'}`}>
-            <Checkbox
-              checked={filters[field]}
-              onCheckedChange={() => toggleFilter(field)}
-              className={`${hero ? 'h-5 w-5 rounded-md' : ''} border-[#c6d0dc] data-[state=checked]:border-[#ff9900] data-[state=checked]:bg-[#ff9900]`}
-            />
-            <span className={filters[field] ? 'font-semibold text-[#172033]' : ''}>
-              {field === 'title' ? 'Title' : field === 'abstract' ? 'Abstract' : 'Keywords'}
-            </span>
-          </label>
-        ))}
-      </div>
+      {showFilters ? (
+        <div className={filtersClassName}>
+          {(['title', 'abstract', 'keywords'] as Array<keyof SearchFilters>).map((field) => (
+            <label key={field} className={`flex cursor-pointer items-center gap-2 text-[#3f4a5a] ${hero ? 'text-base' : 'text-sm'}`}>
+              <Checkbox
+                checked={filters[field]}
+                onCheckedChange={() => toggleFilter(field)}
+                className={`${hero ? 'h-5 w-5 rounded-md' : ''} border-[#c6d0dc] data-[state=checked]:border-[#ff9900] data-[state=checked]:bg-[#ff9900]`}
+              />
+              <span className={filters[field] ? 'font-semibold text-[#172033]' : ''}>
+                {field === 'title' ? 'Title' : field === 'abstract' ? 'Abstract' : 'Keywords'}
+              </span>
+            </label>
+          ))}
+        </div>
+      ) : null}
 
       <div className={rowClassName}>
         <div className="relative flex-1">

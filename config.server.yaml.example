@@ -5,6 +5,13 @@ server:
 database:
   url: postgresql://paper:replace-with-the-same-postgres-password@postgres:5432/paper_online
 
+openalex:
+  # Optional free key for a larger daily online-search allowance.
+  api_key:
+  base_url: https://api.openalex.org
+  timeout_seconds: 15
+  cache_ttl_seconds: 1800
+
 admin:
   email: replace-with-your-admin-email
   initial_password: replace-with-a-long-random-password

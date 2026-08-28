@@ -4,6 +4,7 @@ import {
   CalendarDays,
   Database,
   FileText,
+  Globe2,
   Loader2,
   Network,
   Search,
@@ -14,11 +15,17 @@ import { useState } from 'react';
 
 import { PaperCirclesCanvas } from '@/components/paper-circles-canvas';
 import { SearchControls } from '@/components/search-controls';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { CONFERENCES } from '@/lib/constants';
 import { createArxivPaper } from '@/lib/api';
 import { extractArxivId } from '@/lib/arxiv';
 import { applyFilters, buildQueryString, navigate } from '@/lib/router';
 import type { SearchFilters } from '@/types';
+
+type SearchScope = 'local' | 'online';
+
+const CURRENT_YEAR = new Date().getFullYear();
+const DEFAULT_FROM_YEAR = CURRENT_YEAR - 4;
 
 const paperSignals = [
   {
@@ -37,6 +44,7 @@ const paperSignals = [
 
 export function HomePage() {
   const [query, setQuery] = useState('');
+  const [searchScope, setSearchScope] = useState<SearchScope>('local');
   const [filters, setFilters] = useState<SearchFilters>({
     title: true,
     abstract: true,
@@ -44,7 +52,7 @@ export function HomePage() {
   });
   const [isAddingArxiv, setIsAddingArxiv] = useState(false);
   const [arxivSubmitError, setArxivSubmitError] = useState<string | null>(null);
-  const detectedArxivId = extractArxivId(query);
+  const detectedArxivId = searchScope === 'local' ? extractArxivId(query) : null;
 
   const submitSearch = async () => {
     const trimmedQuery = query.trim();
@@ -52,7 +60,7 @@ export function HomePage() {
       return;
     }
 
-    const arxivId = extractArxivId(trimmedQuery);
+    const arxivId = searchScope === 'local' ? extractArxivId(trimmedQuery) : null;
     if (arxivId) {
       setIsAddingArxiv(true);
       setArxivSubmitError(null);
@@ -68,7 +76,15 @@ export function HomePage() {
     }
 
     setArxivSubmitError(null);
-    const params = applyFilters(new URLSearchParams(), filters);
+    const params = new URLSearchParams();
+    if (searchScope === 'online') {
+      params.set('scope', 'online');
+      params.set('from_year', String(DEFAULT_FROM_YEAR));
+      params.set('to_year', String(CURRENT_YEAR));
+      params.set('sort', 'relevance');
+    } else {
+      applyFilters(params, filters);
+    }
     params.set('q', trimmedQuery);
     navigate(`/search${buildQueryString(params)}`);
   };
@@ -127,15 +143,35 @@ export function HomePage() {
               </div>
 
               <div className="paper-search-shell">
+                <Tabs
+                  value={searchScope}
+                  onValueChange={(value) => {
+                    setSearchScope(value as SearchScope);
+                    setArxivSubmitError(null);
+                  }}
+                  className="mb-3"
+                >
+                  <TabsList className="h-10 bg-white/80 shadow-sm ring-1 ring-black/5 backdrop-blur-xl">
+                    <TabsTrigger value="local" className="px-4">
+                      <Database className="h-4 w-4" />
+                      本地论文库
+                    </TabsTrigger>
+                    <TabsTrigger value="online" className="px-4">
+                      <Globe2 className="h-4 w-4" />
+                      在线近年
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
                 <SearchControls
                   query={query}
                   filters={filters}
                   onQueryChange={setQuery}
                   onFiltersChange={setFilters}
                   onSubmit={submitSearch}
-                  placeholder="搜索会议论文，或粘贴 arXiv 链接 / ID..."
+                  placeholder={searchScope === 'online' ? '搜索近五年论文...' : '搜索会议论文，或粘贴 arXiv 链接 / ID...'}
                   submitLabel={detectedArxivId ? (isAddingArxiv ? '准备分析' : '分析 arXiv') : '搜索'}
                   hero
+                  showFilters={searchScope === 'local'}
                 />
                 {arxivSubmitError ? (
                   <div className="mt-3 rounded-2xl border border-[#fecdd3] bg-[#fff1f2]/90 px-4 py-3 text-sm text-[#b91c1c]">

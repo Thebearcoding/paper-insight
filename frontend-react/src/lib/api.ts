@@ -27,6 +27,7 @@ import type {
   OnlineCount,
   Paper,
   PaperCodeFilter,
+  OnlineSearchSort,
   PaperReadFilter,
   PaperMark,
   PaperListResponse,
@@ -164,6 +165,24 @@ export async function fetchSearchPapers(
 ): Promise<PaperListResponse> {
   const params = buildSearchRequestParams(page, query, filters, readFilter, codeFilter);
   return apiFetch<PaperListResponse>(`/search/papers?${params.toString()}`);
+}
+
+export async function fetchOnlineSearchPapers(
+  page: number,
+  query: string,
+  fromYear: number,
+  toYear: number,
+  sort: OnlineSearchSort = 'relevance',
+): Promise<PaperListResponse> {
+  const params = new URLSearchParams({
+    page: String(page),
+    limit: '8',
+    search: query.trim(),
+    from_year: String(fromYear),
+    to_year: String(toYear),
+    sort,
+  });
+  return apiFetch<PaperListResponse>(`/online-search/papers?${params.toString()}`);
 }
 
 export async function fetchHfDailyPapers(

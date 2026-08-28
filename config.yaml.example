@@ -27,6 +27,13 @@ typesense:
   vector_distance_threshold: 0.45
   timeout_seconds: 10
 
+openalex:
+  # Optional. Keyless online search works with a smaller daily allowance.
+  api_key:
+  base_url: https://api.openalex.org
+  timeout_seconds: 15
+  cache_ttl_seconds: 1800
+
 docker:
   postgres_port: 5432
   typesense_port: 8108

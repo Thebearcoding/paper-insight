@@ -86,6 +86,14 @@ class TypesenseConfig:
 
 
 @dataclass(frozen=True)
+class OpenAlexConfig:
+    api_key: str | None = None
+    base_url: str = "https://api.openalex.org"
+    timeout_seconds: int = 15
+    cache_ttl_seconds: int = 1800
+
+
+@dataclass(frozen=True)
 class LlmConfig:
     credential_encryption_key: str | None = None
     openai_api_key: str | None = None
@@ -127,6 +135,7 @@ class AdminConfig:
 class AppConfig:
     database: DatabaseConfig
     typesense: TypesenseConfig
+    openalex: OpenAlexConfig
     llm: LlmConfig
     paths: PathsConfig
     zotero: ZoteroConfig
@@ -201,6 +210,7 @@ def load_app_config() -> AppConfig:
     raw_cors = raw.get("cors") if isinstance(raw.get("cors"), dict) else {}
     raw_database = raw.get("database") if isinstance(raw.get("database"), dict) else {}
     raw_typesense = raw.get("typesense") if isinstance(raw.get("typesense"), dict) else {}
+    raw_openalex = raw.get("openalex") if isinstance(raw.get("openalex"), dict) else {}
     raw_llm = raw.get("llm") if isinstance(raw.get("llm"), dict) else {}
     raw_paths = raw.get("paths") if isinstance(raw.get("paths"), dict) else {}
     raw_zotero = raw.get("zotero") if isinstance(raw.get("zotero"), dict) else {}
@@ -400,9 +410,36 @@ def load_app_config() -> AppConfig:
         ),
     )
 
+    default_openalex = OpenAlexConfig()
+    openalex = OpenAlexConfig(
+        api_key=os.getenv("OPENALEX_API_KEY") or raw_openalex.get("api_key"),
+        base_url=_as_str(
+            os.getenv("OPENALEX_BASE_URL", raw_openalex.get("base_url")),
+            default_openalex.base_url,
+        ).rstrip("/"),
+        timeout_seconds=max(
+            _as_int(
+                os.getenv("OPENALEX_TIMEOUT_SECONDS", raw_openalex.get("timeout_seconds")),
+                default_openalex.timeout_seconds,
+            ),
+            1,
+        ),
+        cache_ttl_seconds=max(
+            _as_int(
+                os.getenv(
+                    "OPENALEX_CACHE_TTL_SECONDS",
+                    raw_openalex.get("cache_ttl_seconds"),
+                ),
+                default_openalex.cache_ttl_seconds,
+            ),
+            0,
+        ),
+    )
+
     return AppConfig(
         database=DatabaseConfig(url=raw_database.get("url")),
         typesense=typesense,
+        openalex=openalex,
         llm=LlmConfig(
             credential_encryption_key=os.getenv(
                 "LLM_CREDENTIAL_ENCRYPTION_KEY",
