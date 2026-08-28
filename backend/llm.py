@@ -43,14 +43,7 @@ def _provider_api_protocol(config: dict) -> str:
     params = config.get("default_parameters") or {}
     if not isinstance(params, dict):
         return "openai"
-    protocol = str(params.get("_api_protocol") or "openai").strip().lower()
-    model_name = str(config.get("model_name") or "").strip().casefold()
-    if (
-        protocol == ANTHROPIC_CLAUDE_CODE_PROTOCOL
-        and any(family in model_name for family in ("glm", "deepseek"))
-    ):
-        return "openai"
-    return protocol
+    return str(params.get("_api_protocol") or "openai").strip().lower()
 
 
 def _claude_code_headers(api_key: str) -> dict[str, str]:

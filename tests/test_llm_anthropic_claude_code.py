@@ -47,7 +47,7 @@ def test_private_provider_parameters_are_not_forwarded():
     assert managed._default_parameters(config) == {"max_tokens": 2048}
 
 
-def test_glm_and_deepseek_use_openai_transport_on_a_mixed_sub2api_provider():
+def test_selected_models_honor_the_configured_provider_transport():
     base_config = {
         "default_parameters": {
             "_api_protocol": llm_module.ANTHROPIC_CLAUDE_CODE_PROTOCOL,
@@ -57,10 +57,12 @@ def test_glm_and_deepseek_use_openai_transport_on_a_mixed_sub2api_provider():
     assert llm_module._provider_api_protocol({**base_config, "model_name": "claude-opus-5"}) == (
         llm_module.ANTHROPIC_CLAUDE_CODE_PROTOCOL
     )
-    assert llm_module._provider_api_protocol({**base_config, "model_name": "glm-4.6"}) == "openai"
+    assert llm_module._provider_api_protocol({**base_config, "model_name": "glm-5.3"}) == (
+        llm_module.ANTHROPIC_CLAUDE_CODE_PROTOCOL
+    )
     assert llm_module._provider_api_protocol(
         {**base_config, "model_name": "deepseek-ai/DeepSeek-V3"}
-    ) == "openai"
+    ) == llm_module.ANTHROPIC_CLAUDE_CODE_PROTOCOL
 
 
 @pytest.mark.asyncio
