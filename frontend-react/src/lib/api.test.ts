@@ -38,15 +38,18 @@ describe('streamSse', () => {
 
 describe('fetchOnlineSearchPapers', () => {
   it('sends the query, year range, and sort without a persistence request', async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
-      papers: [],
-      total: 0,
-      page: 2,
-      pages: 1,
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }));
+    const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {
+      void args;
+      return new Response(JSON.stringify({
+        papers: [],
+        total: 0,
+        page: 2,
+        pages: 1,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
     vi.stubGlobal('fetch', fetchMock);
 
     await fetchOnlineSearchPapers(2, ' defect detection ', 2022, 2026, 'cited');
