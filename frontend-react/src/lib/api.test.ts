@@ -64,8 +64,31 @@ describe('fetchOnlineSearchPapers', () => {
     expect(url.searchParams.get('from_year')).toBe('2022');
     expect(url.searchParams.get('to_year')).toBe('2026');
     expect(url.searchParams.get('sort')).toBe('cited');
+    expect(url.searchParams.get('venue_scope')).toBe('top');
     expect(init).toMatchObject({ credentials: 'include' });
     expect(init?.method).toBeUndefined();
     expect(init?.body).toBeUndefined();
+  });
+
+  it('allows searching all online sources explicitly', async () => {
+    const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {
+      void args;
+      return new Response(JSON.stringify({
+        papers: [],
+        total: 0,
+        page: 1,
+        pages: 1,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchOnlineSearchPapers(1, 'retrieval', 2024, 2026, 'relevance', 'all');
+
+    const [request] = fetchMock.mock.calls[0];
+    const url = new URL(String(request));
+    expect(url.searchParams.get('venue_scope')).toBe('all');
   });
 });

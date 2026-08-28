@@ -286,7 +286,8 @@ def search_recent_papers(
         filters = (
             f"from_publication_date:{from_year}-01-01,"
             f"to_publication_date:{to_date.isoformat()},"
-            "type:article|preprint,is_retracted:false,is_paratext:false,has_abstract:true"
+            "type:article|preprint|conference-paper,"
+            "is_retracted:false,is_paratext:false,has_abstract:true"
         )
         params = {
             "search": normalized_query,
@@ -341,6 +342,8 @@ def search_recent_papers(
             "provider": "OpenAlex",
             "cached": False,
             "year_range": {"from": from_year, "to": to_year},
+            "venue_scope": "all",
+            "effective_query": normalized_query,
         }
         _set_cached(cache_key, result)
         return result

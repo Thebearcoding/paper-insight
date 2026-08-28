@@ -25,6 +25,7 @@ import {
 } from '@/lib/router';
 import type {
   OnlineSearchSort,
+  OnlineVenueScope,
   PaperCodeFilter,
   PaperListResponse,
   PaperReadFilter,
@@ -55,10 +56,25 @@ function parseOnlineSort(value: string | null): OnlineSearchSort {
   return value === 'newest' || value === 'cited' ? value : 'relevance';
 }
 
+function parseVenueScope(value: string | null): OnlineVenueScope {
+  return value === 'all' ? 'all' : 'top';
+}
+
 export function SearchPage() {
   const location = useAppLocation();
   const { user, isLoading: isAuthLoading } = useAuth();
-  const { query, page, filters, readFilter, codeFilter, scope, fromYear, toYear, onlineSort } = useMemo(() => {
+  const {
+    query,
+    page,
+    filters,
+    readFilter,
+    codeFilter,
+    scope,
+    fromYear,
+    toYear,
+    onlineSort,
+    venueScope,
+  } = useMemo(() => {
     const params = new URLSearchParams(location.search);
     const parsedFromYear = parseYear(params.get('from_year'), DEFAULT_FROM_YEAR);
     const parsedToYear = parseYear(params.get('to_year'), CURRENT_YEAR);
@@ -72,6 +88,7 @@ export function SearchPage() {
       fromYear: Math.min(parsedFromYear, parsedToYear),
       toYear: Math.max(parsedFromYear, parsedToYear),
       onlineSort: parseOnlineSort(params.get('sort')),
+      venueScope: parseVenueScope(params.get('venue_scope')),
     };
   }, [location.search]);
   const [draftQuery, setDraftQuery] = useState(query);
@@ -102,7 +119,7 @@ export function SearchPage() {
     setError(null);
     const effectiveReadFilter = user ? readFilter : 'all';
     const request = scope === 'online'
-      ? fetchOnlineSearchPapers(page, query, fromYear, toYear, onlineSort)
+      ? fetchOnlineSearchPapers(page, query, fromYear, toYear, onlineSort, venueScope)
       : fetchSearchPapers(page, query, filters, effectiveReadFilter, codeFilter);
 
     void request
@@ -126,7 +143,7 @@ export function SearchPage() {
     return () => {
       active = false;
     };
-  }, [codeFilter, filters, fromYear, isAuthLoading, onlineSort, page, query, readFilter, refreshVersion, scope, toYear, user]);
+  }, [codeFilter, filters, fromYear, isAuthLoading, onlineSort, page, query, readFilter, refreshVersion, scope, toYear, user, venueScope]);
 
   const submitSearch = () => {
     const next = new URLSearchParams();
@@ -136,6 +153,7 @@ export function SearchPage() {
       next.set('from_year', String(fromYear));
       next.set('to_year', String(toYear));
       next.set('sort', onlineSort);
+      next.set('venue_scope', venueScope);
     } else {
       applyFilters(next, draftFilters);
       applyReadFilter(next, user ? readFilter : 'all');
@@ -158,6 +176,7 @@ export function SearchPage() {
       next.set('from_year', String(fromYear));
       next.set('to_year', String(toYear));
       next.set('sort', onlineSort);
+      next.set('venue_scope', venueScope);
     } else {
       applyFilters(next, draftFilters);
       applyReadFilter(next, user ? readFilter : 'all');
@@ -170,6 +189,7 @@ export function SearchPage() {
     nextFromYear: number,
     nextToYear: number,
     nextSort: OnlineSearchSort,
+    nextVenueScope: OnlineVenueScope = venueScope,
   ) => {
     const next = new URLSearchParams();
     if (query.trim()) {
@@ -179,6 +199,7 @@ export function SearchPage() {
     next.set('from_year', String(Math.min(nextFromYear, nextToYear)));
     next.set('to_year', String(Math.max(nextFromYear, nextToYear)));
     next.set('sort', nextSort);
+    next.set('venue_scope', nextVenueScope);
     navigate(`/search${buildQueryString(next)}`);
   };
 
@@ -222,7 +243,9 @@ export function SearchPage() {
           <div>
             <h1 className="text-3xl font-semibold text-[#172033]">全局搜索</h1>
             <p className="mt-1 text-sm text-[#728095]">
-              {scope === 'online' ? `${fromYear}–${toYear} · OpenAlex` : query ? `关键词: "${query}"` : '本地论文库'}
+              {scope === 'online'
+                ? `${fromYear}–${toYear} · ${venueScope === 'top' ? '仅顶会' : '全部来源'}`
+                : query ? `关键词: "${query}"` : '本地论文库'}
             </p>
           </div>
           <Tabs value={scope} onValueChange={(value) => onScopeChange(value as SearchScope)}>
@@ -253,6 +276,18 @@ export function SearchPage() {
 
       {scope === 'online' ? (
         <div className="mt-4 flex flex-wrap items-end gap-4 border-y border-[#dfe6ee] py-3">
+          <label className="space-y-1 text-xs font-medium text-[#64748b]">
+            <span className="block">论文来源</span>
+            <Select value={venueScope} onValueChange={(value) => updateOnlineOptions(fromYear, toYear, onlineSort, value as OnlineVenueScope)}>
+              <SelectTrigger className="w-36 bg-white">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="top">仅顶会</SelectItem>
+                <SelectItem value="all">全部来源</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
           <label className="space-y-1 text-xs font-medium text-[#64748b]">
             <span className="block">起始年份</span>
             <Select value={String(fromYear)} onValueChange={(value) => updateOnlineOptions(Number(value), toYear, onlineSort)}>
@@ -318,7 +353,9 @@ export function SearchPage() {
       ) : isLoading ? (
         <div className="mt-8 flex items-center justify-center gap-2 rounded-lg bg-white/90 p-8 text-[#728095] shadow-sm ring-1 ring-black/5">
           <Loader2 className="h-5 w-5 animate-spin" />
-          {scope === 'online' ? '正在检索 OpenAlex...' : '加载论文中...'}
+          {scope === 'online'
+            ? venueScope === 'top' ? '正在检索顶会论文...' : '正在检索全部来源...'
+            : '加载论文中...'}
         </div>
       ) : error ? (
         <div className="mt-8 rounded-lg bg-white/90 p-8 text-center text-[#b91c1c] shadow-sm ring-1 ring-black/5">
@@ -331,7 +368,12 @@ export function SearchPage() {
       ) : (
         <div className="mt-8 space-y-4">
           {results.papers.map((paper, index) => scope === 'online' ? (
-            <OnlinePaperCard key={paper.id} paper={paper} index={index} searchQuery={query} />
+            <OnlinePaperCard
+              key={paper.id}
+              paper={paper}
+              index={index}
+              searchQuery={results.effective_query || query}
+            />
           ) : (
             <PaperCard
               key={paper.id}

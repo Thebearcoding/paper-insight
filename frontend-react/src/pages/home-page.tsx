@@ -82,6 +82,7 @@ export function HomePage() {
       params.set('from_year', String(DEFAULT_FROM_YEAR));
       params.set('to_year', String(CURRENT_YEAR));
       params.set('sort', 'relevance');
+      params.set('venue_scope', 'top');
     } else {
       applyFilters(params, filters);
     }

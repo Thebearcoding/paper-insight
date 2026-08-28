@@ -115,6 +115,7 @@ def test_search_recent_papers_uses_year_filter_sort_key_and_memory_cache(monkeyp
     assert kwargs["params"]["sort"] == "publication_date:desc,relevance_score:desc"
     assert "from_publication_date:2022-01-01" in kwargs["params"]["filter"]
     assert "to_publication_date:2026-08-28" in kwargs["params"]["filter"]
+    assert "type:article|preprint|conference-paper" in kwargs["params"]["filter"]
     assert "is_retracted:false" in kwargs["params"]["filter"]
     assert first["cached"] is False
     assert first["total"] == 12

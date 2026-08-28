@@ -28,6 +28,7 @@ import type {
   Paper,
   PaperCodeFilter,
   OnlineSearchSort,
+  OnlineVenueScope,
   PaperReadFilter,
   PaperMark,
   PaperListResponse,
@@ -173,6 +174,7 @@ export async function fetchOnlineSearchPapers(
   fromYear: number,
   toYear: number,
   sort: OnlineSearchSort = 'relevance',
+  venueScope: OnlineVenueScope = 'top',
 ): Promise<PaperListResponse> {
   const params = new URLSearchParams({
     page: String(page),
@@ -181,6 +183,7 @@ export async function fetchOnlineSearchPapers(
     from_year: String(fromYear),
     to_year: String(toYear),
     sort,
+    venue_scope: venueScope,
   });
   return apiFetch<PaperListResponse>(`/online-search/papers?${params.toString()}`);
 }

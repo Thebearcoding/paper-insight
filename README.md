@@ -80,7 +80,7 @@ Paper Insight 不试图替你读完论文，而是帮你把每天的论文筛选
 
 如果需要本地开发或自行部署，请查看 [develop.md](./develop.md)，里面包含 PostgreSQL、`config.yaml`、GitHub OAuth、数据导入和 Docker/VPS 部署说明。
 
-在线近年搜索无需配置即可使用；部署时可通过 `OPENALEX_API_KEY` 提供可选的 OpenAlex API key 以获得更高的免费请求额度。搜索响应默认只在应用进程内缓存 30 分钟，不会导入论文数据。
+在线近年搜索默认只检索 AAAI、IJCAI、KDD、SIGIR、ACL、CVPR、ICCV、NeurIPS、ICML、ICLR、CHI，也可切换为全部来源。顶会模式用 DBLP 严格识别会议并由 OpenAlex 补充摘要、PDF 与被引信息，全部来源直接使用 OpenAlex；部署时可通过 `OPENALEX_API_KEY` 提高 OpenAlex 请求额度。搜索响应默认只在应用进程内缓存 30 分钟，不会导入论文数据。
 
 ## License
 

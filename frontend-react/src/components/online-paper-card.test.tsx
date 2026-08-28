@@ -39,4 +39,27 @@ describe('OnlinePaperCard', () => {
     expect(html).not.toContain('收藏');
     expect(html).not.toContain('已读');
   });
+
+  it('shows the canonical top-conference badge for top-venue results', () => {
+    const html = renderToStaticMarkup(
+      <OnlinePaperCard
+        paper={{
+          ...ONLINE_PAPER,
+          id: 's2:abc123',
+          online: {
+            ...ONLINE_PAPER.online!,
+            provider: 'DBLP + OpenAlex',
+            work_id: 'abc123',
+            provider_url: 'https://www.semanticscholar.org/paper/abc123',
+            openalex_url: null,
+            top_venue: 'CVPR',
+          },
+        }}
+        index={0}
+      />,
+    );
+
+    expect(html).toContain('CVPR · 顶会');
+    expect(html).not.toContain('OpenAlex 在线');
+  });
 });

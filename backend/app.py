@@ -62,6 +62,12 @@ from openalex_search import (
     SORT_VALUES as OPENALEX_SORT_VALUES,
     search_recent_papers,
 )
+from top_venue_search import (
+    TOP_VENUE_RESULT_WINDOW,
+    TopVenueRateLimitError,
+    TopVenueSearchError,
+    search_top_venue_papers,
+)
 from feishu import (
     FeishuWebhookError,
     build_feishu_paper_card,
@@ -3356,6 +3362,7 @@ async def search_online_recent_papers_endpoint(
     from_year: int | None = None,
     to_year: int | None = None,
     sort: str = "relevance",
+    venue_scope: str = "top",
 ):
     query = " ".join(search.split())
     if not query:
@@ -3366,10 +3373,22 @@ async def search_online_recent_papers_endpoint(
         raise HTTPException(status_code=400, detail="page 必须大于等于 1")
     if not 1 <= limit <= 24:
         raise HTTPException(status_code=400, detail="limit 必须在 1 到 24 之间")
-    if (page - 1) * limit >= OPENALEX_RESULT_WINDOW:
-        raise HTTPException(status_code=400, detail="在线搜索最多浏览前 10000 条结果")
     if sort not in OPENALEX_SORT_VALUES:
         raise HTTPException(status_code=400, detail="sort 仅支持 relevance、newest 或 cited")
+    if venue_scope not in {"top", "all"}:
+        raise HTTPException(status_code=400, detail="venue_scope 仅支持 top 或 all")
+
+    result_window = (
+        TOP_VENUE_RESULT_WINDOW
+        if venue_scope == "top"
+        else OPENALEX_RESULT_WINDOW
+    )
+    if (page - 1) * limit >= result_window:
+        readable_window = f"{result_window:,}".replace(",", "")
+        raise HTTPException(
+            status_code=400,
+            detail=f"在线搜索最多浏览前 {readable_window} 条结果",
+        )
 
     current_year = datetime.now(ZoneInfo("Asia/Shanghai")).year
     selected_from_year = from_year if from_year is not None else current_year - 4
@@ -3382,6 +3401,16 @@ async def search_online_recent_papers_endpoint(
         raise HTTPException(status_code=400, detail="起始年份不能晚于截止年份")
 
     try:
+        if venue_scope == "top":
+            return await asyncio.to_thread(
+                search_top_venue_papers,
+                query,
+                from_year=selected_from_year,
+                to_year=selected_to_year,
+                page=page,
+                per_page=limit,
+                sort=sort,
+            )
         return await asyncio.to_thread(
             search_recent_papers,
             query,
@@ -3391,6 +3420,18 @@ async def search_online_recent_papers_endpoint(
             per_page=limit,
             sort=sort,
         )
+    except TopVenueRateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="顶会论文索引请求过于频繁，请稍后再试",
+        ) from exc
+    except TopVenueSearchError as exc:
+        logger.warning(
+            "Top-venue search failed for query=%r: %s",
+            query,
+            exc,
+        )
+        raise HTTPException(status_code=502, detail="顶会论文索引暂时不可用") from exc
     except OpenAlexRateLimitError as exc:
         raise HTTPException(
             status_code=429,

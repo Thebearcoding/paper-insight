@@ -36,7 +36,10 @@ export function OnlinePaperCard({ paper, index, searchQuery = '' }: OnlinePaperC
   const online = paper.online;
   const highlightTerms = useMemo(() => buildSearchHighlightTerms(searchQuery), [searchQuery]);
   const keywords = (paper.keywords ?? []).slice(0, 6);
-  const sourceUrl = online?.url || online?.openalex_url;
+  const sourceUrl = online?.url || online?.provider_url || online?.openalex_url;
+  const providerLabel = online?.top_venue
+    ? `${online.top_venue} · 顶会`
+    : `${online?.provider ?? '在线索引'} 在线`;
 
   return (
     <article
@@ -54,7 +57,7 @@ export function OnlinePaperCard({ paper, index, searchQuery = '' }: OnlinePaperC
     >
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Badge variant="outline" className="border-[#bae6fd] bg-[#ecfeff] text-[#0e7490]">
-          OpenAlex 在线
+          {providerLabel}
         </Badge>
         {online?.publication_year ? (
           <Badge variant="outline" className="border-[#e6ebf2] bg-[#f8fafc] text-[#516072]">

@@ -30,7 +30,8 @@ export interface OnlinePaperMeta {
   provider: 'OpenAlex' | string;
   work_id: string;
   url: string;
-  openalex_url: string;
+  openalex_url?: string | null;
+  provider_url?: string | null;
   pdf_url?: string | null;
   doi?: string | null;
   publication_year?: number | null;
@@ -38,6 +39,7 @@ export interface OnlinePaperMeta {
   cited_by_count: number;
   is_oa: boolean;
   work_type?: string | null;
+  top_venue?: string | null;
 }
 
 export type PaperCodeStatus = 'open_source' | 'unavailable' | 'not_found' | 'unknown';
@@ -117,6 +119,8 @@ export type PaperCodeFilter = 'all' | 'open_source' | 'not_open_source';
 
 export type OnlineSearchSort = 'relevance' | 'newest' | 'cited';
 
+export type OnlineVenueScope = 'top' | 'all';
+
 export interface PaperReadCounts {
   all: number;
   unread: number;
@@ -132,6 +136,9 @@ export interface PaperListResponse {
   provider?: string;
   cached?: boolean;
   year_range?: { from: number; to: number };
+  venue_scope?: OnlineVenueScope;
+  venues?: string[];
+  effective_query?: string;
 }
 
 export interface ChatSessionSummary {
