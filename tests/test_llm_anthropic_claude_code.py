@@ -47,6 +47,22 @@ def test_private_provider_parameters_are_not_forwarded():
     assert managed._default_parameters(config) == {"max_tokens": 2048}
 
 
+def test_glm_and_deepseek_use_openai_transport_on_a_mixed_sub2api_provider():
+    base_config = {
+        "default_parameters": {
+            "_api_protocol": llm_module.ANTHROPIC_CLAUDE_CODE_PROTOCOL,
+        }
+    }
+
+    assert llm_module._provider_api_protocol({**base_config, "model_name": "claude-opus-5"}) == (
+        llm_module.ANTHROPIC_CLAUDE_CODE_PROTOCOL
+    )
+    assert llm_module._provider_api_protocol({**base_config, "model_name": "glm-4.6"}) == "openai"
+    assert llm_module._provider_api_protocol(
+        {**base_config, "model_name": "deepseek-ai/DeepSeek-V3"}
+    ) == "openai"
+
+
 @pytest.mark.asyncio
 async def test_managed_llm_claude_code_transport_reads_anthropic_sse(monkeypatch):
     captured = {}

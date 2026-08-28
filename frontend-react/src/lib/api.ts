@@ -35,6 +35,7 @@ import type {
   ReadingOverviewResponse,
   HfDailySyncResponse,
   SearchFilters,
+  SelectableLlmCatalog,
   SortDirection,
   ZoteroCollection,
   ZoteroConnection,
@@ -290,9 +291,18 @@ export async function fetchZoteroItem(itemKey: string): Promise<ZoteroItem> {
   return apiFetch<ZoteroItem>(zoteroItemApiPath(itemKey));
 }
 
-export async function generateZoteroEnrichment(itemKey: string): Promise<ZoteroAnalysisEnrichment> {
+export async function fetchSelectableLlmModels(refresh = true): Promise<SelectableLlmCatalog> {
+  const params = new URLSearchParams({ refresh: String(refresh) });
+  return apiFetch<SelectableLlmCatalog>(`/me/llm/models?${params.toString()}`);
+}
+
+export async function generateZoteroEnrichment(
+  itemKey: string,
+  selection?: { provider_id?: string | null; model_name?: string | null },
+): Promise<ZoteroAnalysisEnrichment> {
   return apiFetch<ZoteroAnalysisEnrichment>(zoteroItemApiPath(itemKey, '/enrichment/generate'), {
     method: 'POST',
+    body: JSON.stringify(selection ?? {}),
   });
 }
 

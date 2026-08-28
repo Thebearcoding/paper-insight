@@ -43,7 +43,14 @@ def _provider_api_protocol(config: dict) -> str:
     params = config.get("default_parameters") or {}
     if not isinstance(params, dict):
         return "openai"
-    return str(params.get("_api_protocol") or "openai").strip().lower()
+    protocol = str(params.get("_api_protocol") or "openai").strip().lower()
+    model_name = str(config.get("model_name") or "").strip().casefold()
+    if (
+        protocol == ANTHROPIC_CLAUDE_CODE_PROTOCOL
+        and any(family in model_name for family in ("glm", "deepseek"))
+    ):
+        return "openai"
+    return protocol
 
 
 def _claude_code_headers(api_key: str) -> dict[str, str]:
@@ -533,14 +540,69 @@ class BaseLLM:
 
 
 class ManagedLLM:
+    def __init__(self, config_override: dict | None = None):
+        self._config_override = dict(config_override) if config_override else None
+
     def _get_active_config(self) -> dict | None:
         from database import get_active_llm_config
 
         return get_active_llm_config()
 
+    def _get_config(self) -> dict | None:
+        if self._config_override is not None:
+            return dict(self._config_override)
+        return self._get_active_config()
+
+    def select(self, provider_id: str | None = None, model_name: str | None = None) -> "ManagedLLM":
+        normalized_provider_id = str(provider_id or "").strip()
+        normalized_model_name = str(model_name or "").strip()
+
+        if normalized_provider_id:
+            from database import get_llm_provider
+
+            config = get_llm_provider(normalized_provider_id)
+            if not config or not config.get("is_enabled"):
+                raise RuntimeError("所选 LLM 供应商不存在或已停用")
+        else:
+            config = self._get_active_config()
+
+        if not config:
+            raise RuntimeError("当前 LLM 供应商未配置")
+
+        enabled_models = {
+            str(model.get("model_name") or "").strip()
+            for model in config.get("models") or []
+            if model.get("is_enabled", True) and model.get("model_name")
+        }
+        selected_model = (
+            normalized_model_name
+            or str(config.get("model_name") or config.get("active_model") or "").strip()
+        )
+        if (
+            normalized_model_name
+            and normalized_provider_id
+            and normalized_model_name not in enabled_models
+        ):
+            raise RuntimeError("所选 LLM 模型不存在或已停用")
+        if not selected_model:
+            raise RuntimeError("所选 LLM 供应商尚未配置模型")
+
+        selected_config = dict(config)
+        selected_config["model_name"] = selected_model
+        return ManagedLLM(selected_config)
+
+    def public_config(self) -> dict:
+        config = self._require_config()
+        return {
+            "provider_id": str(config.get("id") or "") or None,
+            "provider_key": config.get("provider_key"),
+            "provider_name": config.get("name"),
+            "model_name": config.get("model_name"),
+        }
+
     def is_configured(self) -> bool:
         try:
-            config = self._get_active_config()
+            config = self._get_config()
         except Exception as exc:
             logger.warning("LLM 配置读取失败: %s", exc)
             return False
@@ -643,7 +705,7 @@ class ManagedLLM:
         )
 
     def _require_config(self) -> dict:
-        config = self._get_active_config()
+        config = self._get_config()
         if not config or not config.get("api_key"):
             raise RuntimeError("LLM API key is not configured")
         if not config.get("model_name"):
@@ -900,6 +962,8 @@ async def fetch_openai_compatible_model_names(base_url: str, api_key: str | None
     client = AsyncOpenAI(
         api_key=(api_key or MISSING_API_KEY_PLACEHOLDER),
         base_url=base_url.strip().rstrip("/"),
+        timeout=20.0,
+        max_retries=1,
     )
     response = await client.models.list()
     names: list[str] = []

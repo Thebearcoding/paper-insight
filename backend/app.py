@@ -927,6 +927,11 @@ class LlmActiveRequest(BaseModel):
     model_name: str | None = None
 
 
+class LlmSelectionRequest(BaseModel):
+    provider_id: str | None = None
+    model_name: str | None = None
+
+
 class AdminApiSearchSettingsRequest(BaseModel):
     default_rpm_limit: int
     default_daily_limit: int
@@ -1051,6 +1056,69 @@ def public_active_llm_config(config: dict | None) -> dict:
         "provider_name": config.get("name"),
         "model_name": model_name,
     }
+
+
+def public_selectable_llm_provider(provider: dict) -> dict:
+    return {
+        "id": provider["id"],
+        "provider_key": provider.get("provider_key"),
+        "name": provider["name"],
+        "is_active": bool(provider.get("is_active")),
+        "active_model": provider.get("active_model"),
+        "models": [
+            {
+                "id": model["id"],
+                "provider_id": model["provider_id"],
+                "model_name": model["model_name"],
+                "display_name": model.get("display_name"),
+            }
+            for model in provider.get("models") or []
+            if model.get("is_enabled", True) and model.get("model_name")
+        ],
+    }
+
+
+def llm_models_refresh_due(provider: dict, *, max_age_seconds: int = 3600) -> bool:
+    fetched_at = provider.get("models_fetched_at")
+    if not fetched_at:
+        return True
+    if isinstance(fetched_at, str):
+        try:
+            fetched_at = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+    if not isinstance(fetched_at, datetime):
+        return True
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - fetched_at > timedelta(seconds=max_age_seconds)
+
+
+async def refresh_active_llm_models_if_due(providers: list[dict]) -> bool:
+    provider = next(
+        (
+            value
+            for value in providers
+            if value.get("is_active") and value.get("is_enabled") and value.get("api_key")
+        ),
+        None,
+    )
+    if not provider or not llm_models_refresh_due(provider):
+        return False
+    try:
+        model_names = await fetch_openai_compatible_model_names(
+            provider["base_url"],
+            provider.get("api_key"),
+        )
+        await asyncio.to_thread(
+            upsert_fetched_llm_models,
+            str(provider["id"]),
+            model_names,
+        )
+        return True
+    except Exception as exc:
+        logger.info("Unable to refresh selectable LLM models for %s: %s", provider.get("name"), exc)
+        return False
 
 
 def validate_email_and_password(email: str, password: str) -> str:
@@ -1578,6 +1646,42 @@ async def get_active_llm():
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
 
 
+@app.get("/me/llm/models")
+async def get_my_selectable_llm_models(
+    refresh: bool = True,
+    user: dict = Depends(require_current_user),
+):
+    del user
+    try:
+        providers = await asyncio.to_thread(list_llm_providers)
+        if refresh and await refresh_active_llm_models_if_due(providers):
+            providers = await asyncio.to_thread(list_llm_providers)
+        selectable = [
+            provider
+            for provider in providers
+            if provider.get("is_enabled")
+            and provider.get("api_key")
+            and provider.get("base_url")
+            and any(model.get("is_enabled", True) for model in provider.get("models") or [])
+        ]
+        active = next((provider for provider in selectable if provider.get("is_active")), None)
+        active_model = (
+            str(active.get("active_model") or "").strip()
+            if active
+            else ""
+        )
+        if active and not active_model:
+            active_model = str((active.get("models") or [{}])[0].get("model_name") or "").strip()
+        return {
+            "configured": bool(active and active_model),
+            "active_provider_id": str(active["id"]) if active else None,
+            "active_model_name": active_model or None,
+            "providers": [public_selectable_llm_provider(provider) for provider in selectable],
+        }
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
 @app.get("/me/paper-marks")
 async def list_my_paper_marks(request: Request, paper_ids: str = ""):
     ids = [paper_id for paper_id in paper_ids.split(",") if paper_id]
@@ -1773,14 +1877,13 @@ async def get_my_zotero_item_figure(
 async def analyze_my_zotero_item(
     item_key: str,
     reanalyze: bool = False,
+    provider_id: str | None = None,
+    model_name: str | None = None,
     user: dict = Depends(require_current_user),
 ):
     user_id = user["id"]
 
     async def generate():
-        if not llm.is_configured():
-            yield {"event": "error", "data": "当前 LLM 供应商、模型或 API Key 未配置"}
-            return
         try:
             item = await asyncio.to_thread(get_zotero_item, user_id, item_key)
             if not item:
@@ -1794,11 +1897,32 @@ async def analyze_my_zotero_item(
                 yield {"event": "done", "data": ""}
                 return
 
+            try:
+                selected_llm = llm.select(provider_id, model_name)
+                selected_config = selected_llm.public_config()
+            except RuntimeError as exc:
+                yield {"event": "error", "data": str(exc)}
+                return
+            if not selected_llm.is_configured():
+                yield {"event": "error", "data": "当前 LLM 供应商、模型或 API Key 未配置"}
+                return
+
             yield {"event": "status", "data": "正在读取 Zotero 全文、笔记和批注..."}
             context, source, warning = await load_zotero_reading_context(user_id, item)
             if warning:
                 yield {"event": "status", "data": f"{warning}，将基于现有材料继续分析"}
             yield {"event": "source", "data": source}
+            analysis_metadata = {
+                "source": source,
+                "warning": warning,
+                "provider_id": selected_config.get("provider_id"),
+                "provider_name": selected_config.get("provider_name"),
+                "model_name": selected_config.get("model_name"),
+            }
+            yield {
+                "event": "analysis-meta",
+                "data": json.dumps(analysis_metadata, ensure_ascii=False),
+            }
             analysis_figures = list(item.get("analysis_figures") or [])
             yield {"event": "status", "data": "正在识别并提取论文框架图..."}
             try:
@@ -1844,7 +1968,7 @@ async def analyze_my_zotero_item(
                 )
                 for attempt in range(1, 3):
                     part_chunks: list[str] = []
-                    async for stream_chunk in llm.get_response_stream_events(
+                    async for stream_chunk in selected_llm.get_response_stream_events(
                         context,
                         _analysis_instruction=completion_instruction,
                         _usage_context=f"zotero_analysis_stream_part_{part_index}_attempt_{attempt}",
@@ -1899,7 +2023,11 @@ async def analyze_my_zotero_item(
             analysis_enrichment = dict(item.get("analysis_enrichment") or {})
             yield {"event": "status", "data": "正在生成 Zotero 精读笔记和分层标签..."}
             try:
-                analysis_enrichment = await generate_zotero_enrichment(llm, item, normalized)
+                analysis_enrichment = await generate_zotero_enrichment(
+                    selected_llm,
+                    item,
+                    normalized,
+                )
                 yield {
                     "event": "enrichment",
                     "data": json.dumps(analysis_enrichment, ensure_ascii=False),
@@ -1914,6 +2042,7 @@ async def analyze_my_zotero_item(
                 normalized,
                 analysis_figures,
                 analysis_enrichment,
+                analysis_metadata,
             )
             yield {"event": "final", "data": normalized}
             yield {"event": "done", "data": ""}
@@ -1929,17 +2058,24 @@ async def analyze_my_zotero_item(
 @app.post("/me/zotero/items/{item_key}/enrichment/generate")
 async def generate_my_zotero_item_enrichment(
     item_key: str,
+    req: LlmSelectionRequest | None = None,
     user: dict = Depends(require_current_user),
 ):
-    ensure_llm_configured()
     try:
+        try:
+            selected_llm = llm.select(
+                req.provider_id if req else None,
+                req.model_name if req else None,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         item = await asyncio.to_thread(get_zotero_item, user["id"], item_key)
         if not item:
             raise HTTPException(status_code=404, detail="Zotero 条目不存在")
         report = str(item.get("llm_response") or "").strip()
         if not report:
             raise HTTPException(status_code=409, detail="请先完成论文 AI 分析")
-        enrichment = await generate_zotero_enrichment(llm, item, report)
+        enrichment = await generate_zotero_enrichment(selected_llm, item, report)
         await asyncio.to_thread(
             update_zotero_analysis_enrichment,
             user["id"],

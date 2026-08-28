@@ -233,6 +233,11 @@ export interface ZoteroItem {
   llm_response?: string | null;
   analysis_figures?: ZoteroAnalysisFigure[];
   analysis_enrichment?: ZoteroAnalysisEnrichment;
+  analysis_source?: string | null;
+  analysis_warning?: string | null;
+  analysis_provider_id?: string | null;
+  analysis_provider_name?: string | null;
+  analysis_model_name?: string | null;
   analyzed?: boolean;
   analyzed_at?: string | null;
   updated_at?: string;
@@ -257,6 +262,29 @@ export interface ActiveLlmModel {
   provider_key?: string | null;
   provider_name?: string | null;
   model_name?: string | null;
+}
+
+export interface SelectableLlmModel {
+  id: string;
+  provider_id: string;
+  model_name: string;
+  display_name?: string | null;
+}
+
+export interface SelectableLlmProvider {
+  id: string;
+  provider_key?: string | null;
+  name: string;
+  is_active: boolean;
+  active_model?: string | null;
+  models: SelectableLlmModel[];
+}
+
+export interface SelectableLlmCatalog {
+  configured: boolean;
+  active_provider_id?: string | null;
+  active_model_name?: string | null;
+  providers: SelectableLlmProvider[];
 }
 
 export interface PaperMark {

@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import llm as llm_module
 from llm import ManagedLLM
-from app import public_active_llm_config
+from app import public_active_llm_config, public_selectable_llm_provider
 
 
 class FakeCompletions:
@@ -69,6 +69,99 @@ def test_public_active_llm_config_exposes_display_fields_only():
     }
     assert "api_key" not in payload
     assert "base_url" not in payload
+
+
+def test_public_selectable_llm_provider_exposes_models_without_credentials():
+    payload = public_selectable_llm_provider(
+        {
+            "id": "provider-1",
+            "provider_key": "sub2api",
+            "name": "Sub2API",
+            "base_url": "https://sub2api.example/v1",
+            "api_key": "secret-key",
+            "is_active": True,
+            "active_model": "claude-opus-5",
+            "models": [
+                {
+                    "id": "model-1",
+                    "provider_id": "provider-1",
+                    "model_name": "deepseek-v3",
+                    "display_name": "DeepSeek V3",
+                    "is_enabled": True,
+                },
+                {
+                    "id": "model-2",
+                    "provider_id": "provider-1",
+                    "model_name": "disabled-model",
+                    "is_enabled": False,
+                },
+            ],
+        }
+    )
+
+    assert payload["models"] == [
+        {
+            "id": "model-1",
+            "provider_id": "provider-1",
+            "model_name": "deepseek-v3",
+            "display_name": "DeepSeek V3",
+        }
+    ]
+    assert "api_key" not in payload
+    assert "base_url" not in payload
+
+
+def test_managed_llm_selects_an_enabled_model_without_changing_global_default(monkeypatch):
+    provider = {
+        "id": "provider-1",
+        "provider_key": "sub2api",
+        "name": "Sub2API",
+        "base_url": "https://sub2api.example/v1",
+        "api_key": "secret-key",
+        "is_enabled": True,
+        "active_model": "claude-opus-5",
+        "default_parameters": {"_api_protocol": "anthropic_claude_code"},
+        "models": [
+            {
+                "model_name": "claude-opus-5",
+                "is_enabled": True,
+            },
+            {
+                "model_name": "deepseek-v3",
+                "is_enabled": True,
+            },
+        ],
+    }
+    monkeypatch.setattr("database.get_llm_provider", lambda provider_id: provider)
+
+    managed = ManagedLLM()
+    selected = managed.select("provider-1", "deepseek-v3")
+
+    assert selected.public_config() == {
+        "provider_id": "provider-1",
+        "provider_key": "sub2api",
+        "provider_name": "Sub2API",
+        "model_name": "deepseek-v3",
+    }
+    assert managed._config_override is None
+
+
+def test_managed_llm_rejects_disabled_or_unknown_selected_model(monkeypatch):
+    monkeypatch.setattr(
+        "database.get_llm_provider",
+        lambda provider_id: {
+            "id": provider_id,
+            "name": "Sub2API",
+            "base_url": "https://sub2api.example/v1",
+            "api_key": "secret-key",
+            "is_enabled": True,
+            "active_model": "claude-opus-5",
+            "models": [{"model_name": "claude-opus-5", "is_enabled": True}],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="不存在或已停用"):
+        ManagedLLM().select("provider-1", "glm-unknown")
 
 
 def test_extract_llm_usage_tokens_reads_cache_fields():

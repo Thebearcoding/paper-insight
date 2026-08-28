@@ -3307,6 +3307,31 @@ def apply_zotero_sync(user_id: str, payload: dict) -> dict:
                                 THEN zotero_items.analysis_enrichment
                                 ELSE '{}'::jsonb
                             END,
+                            analysis_source = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analysis_source
+                                ELSE NULL
+                            END,
+                            analysis_warning = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analysis_warning
+                                ELSE NULL
+                            END,
+                            analysis_provider_id = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analysis_provider_id
+                                ELSE NULL
+                            END,
+                            analysis_provider_name = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analysis_provider_name
+                                ELSE NULL
+                            END,
+                            analysis_model_name = CASE
+                                WHEN zotero_items.item_version = EXCLUDED.item_version
+                                THEN zotero_items.analysis_model_name
+                                ELSE NULL
+                            END,
                             analyzed_at = CASE
                                 WHEN zotero_items.item_version = EXCLUDED.item_version
                                 THEN zotero_items.analyzed_at
@@ -3562,6 +3587,7 @@ def update_zotero_analysis(
     response: str,
     analysis_figures: list[dict] | None = None,
     analysis_enrichment: dict | None = None,
+    analysis_metadata: dict | None = None,
 ) -> None:
     if not DATABASE_URL:
         return
@@ -3569,7 +3595,36 @@ def update_zotero_analysis(
     def operation() -> None:
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                if analysis_figures is None and analysis_enrichment is None:
+                if analysis_metadata is not None:
+                    cur.execute(
+                        """
+                        UPDATE zotero_items
+                        SET llm_response = %s,
+                            analysis_figures = COALESCE(%s, analysis_figures),
+                            analysis_enrichment = COALESCE(%s, analysis_enrichment),
+                            analysis_source = %s,
+                            analysis_warning = %s,
+                            analysis_provider_id = %s,
+                            analysis_provider_name = %s,
+                            analysis_model_name = %s,
+                            analyzed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE user_id = %s AND item_key = %s
+                        """,
+                        (
+                            response,
+                            Jsonb(analysis_figures) if analysis_figures is not None else None,
+                            Jsonb(analysis_enrichment) if analysis_enrichment is not None else None,
+                            analysis_metadata.get("source"),
+                            analysis_metadata.get("warning"),
+                            analysis_metadata.get("provider_id"),
+                            analysis_metadata.get("provider_name"),
+                            analysis_metadata.get("model_name"),
+                            user_id,
+                            item_key,
+                        ),
+                    )
+                elif analysis_figures is None and analysis_enrichment is None:
                     cur.execute(
                         """
                         UPDATE zotero_items

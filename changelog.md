@@ -1,5 +1,10 @@
 本分支由 [Athebear](https://github.com/Thebearcoding) 维护。功能建议和问题请提交到 [Thebearcoding/paper-insight Issues](https://github.com/Thebearcoding/paper-insight/issues)。
 
+## 2026-08-28
+
+- Zotero 论文分析新增模型下拉选择，可从已配置的 Sub2API 模型中按次选择 Claude、GLM、DeepSeek 等模型，不会修改全站默认模型。
+- Zotero 分析报告会记录并展示实际材料来源（Zotero 全文、云端 PDF、公开全文或仅摘要）以及报告所用模型；旧报告会明确提示重新分析升级。
+
 ## 2026-07-17
 
 - 修复论文详情页 AI 分析的 Markdown 渲染问题，完善标题、列表和公式样式，并提升流式输出与最终内容的一致性。

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles, Tags, UploadCloud } from 'lucide-react';
+import { ArrowLeft, Cpu, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles, Tags, UploadCloud } from 'lucide-react';
 
-import { ActiveModelBadge } from '@/components/active-model-badge';
 import { ChatPanel } from '@/components/chat-panel';
 import { ReasoningStreamPanel } from '@/components/reasoning-stream-panel';
 import { RichContent } from '@/components/rich-content';
@@ -9,6 +8,16 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  fetchSelectableLlmModels,
   fetchZoteroConnection,
   fetchZoteroItem,
   generateZoteroEnrichment,
@@ -18,7 +27,14 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { navigate } from '@/lib/router';
-import type { ZoteroAnalysisEnrichment, ZoteroAnalysisFigure, ZoteroConnection, ZoteroItem } from '@/types';
+import type {
+  SelectableLlmCatalog,
+  SelectableLlmProvider,
+  ZoteroAnalysisEnrichment,
+  ZoteroAnalysisFigure,
+  ZoteroConnection,
+  ZoteroItem,
+} from '@/types';
 
 
 interface ZoteroItemPageProps {
@@ -30,6 +46,62 @@ function creators(item: ZoteroItem): string {
     .map((creator) => creator.name || [creator.firstName, creator.lastName].filter(Boolean).join(' '))
     .filter(Boolean)
     .join('、') || '作者未知';
+}
+
+const MODEL_SELECTION_SEPARATOR = '::';
+
+function modelSelectionValue(providerId: string, modelName: string): string {
+  return `${providerId}${MODEL_SELECTION_SEPARATOR}${encodeURIComponent(modelName)}`;
+}
+
+function parseModelSelection(value: string): { provider_id: string; model_name: string } | null {
+  const separatorIndex = value.indexOf(MODEL_SELECTION_SEPARATOR);
+  if (separatorIndex <= 0) {
+    return null;
+  }
+  const providerId = value.slice(0, separatorIndex);
+  const encodedModelName = value.slice(separatorIndex + MODEL_SELECTION_SEPARATOR.length);
+  try {
+    const modelName = decodeURIComponent(encodedModelName);
+    return providerId && modelName ? { provider_id: providerId, model_name: modelName } : null;
+  } catch {
+    return null;
+  }
+}
+
+function catalogHasSelection(catalog: SelectableLlmCatalog, value: string): boolean {
+  const selection = parseModelSelection(value);
+  return Boolean(selection && catalog.providers.some(
+    (provider) => provider.id === selection.provider_id
+      && provider.models.some((model) => model.model_name === selection.model_name),
+  ));
+}
+
+function sourceLabel(source?: string | null): string {
+  if (!source) {
+    return '旧报告未记录材料来源';
+  }
+  if (source === 'metadata') {
+    return '仅条目元数据与摘要';
+  }
+  if (source === 'zotero-fulltext') {
+    return 'Zotero 已索引全文';
+  }
+  if (source === 'attachment-pdf') {
+    return 'Zotero 云端 PDF 全文';
+  }
+  if (source === 'cache') {
+    return '已缓存的论文全文';
+  }
+  if (source.startsWith('public-document:')) {
+    return `公开全文 · ${source.slice('public-document:'.length)}`;
+  }
+  return source;
+}
+
+function providerModelLabel(provider: SelectableLlmProvider, modelName: string): string {
+  const model = provider.models.find((entry) => entry.model_name === modelName);
+  return model?.display_name || modelName;
 }
 
 export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
@@ -47,7 +119,16 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   const [analysisStatus, setAnalysisStatus] = useState('');
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analysisSource, setAnalysisSource] = useState<string | null>(null);
+  const [analysisWarning, setAnalysisWarning] = useState<string | null>(null);
+  const [analysisProviderName, setAnalysisProviderName] = useState<string | null>(null);
+  const [analysisModelName, setAnalysisModelName] = useState<string | null>(null);
+  const [modelCatalog, setModelCatalog] = useState<SelectableLlmCatalog | null>(null);
+  const [modelCatalogReady, setModelCatalogReady] = useState(false);
+  const [modelCatalogError, setModelCatalogError] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState('');
   const abortRef = useRef<AbortController | null>(null);
+  const selectedModelRef = useRef('');
 
   useEffect(() => {
     if (isAuthLoading) {
@@ -65,6 +146,10 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
           setItem(payload);
           setAnalysisFigures(payload.analysis_figures ?? []);
           setAnalysisEnrichment(payload.analysis_enrichment ?? {});
+          setAnalysisSource(payload.analysis_source ?? null);
+          setAnalysisWarning(payload.analysis_warning ?? null);
+          setAnalysisProviderName(payload.analysis_provider_name ?? null);
+          setAnalysisModelName(payload.analysis_model_name ?? null);
           setConnection(connectionPayload);
         }
       })
@@ -83,6 +168,66 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
     };
   }, [isAuthLoading, itemKey, user]);
 
+  useEffect(() => {
+    if (isAuthLoading || !user) {
+      return;
+    }
+    let active = true;
+    setModelCatalogReady(false);
+    setModelCatalogError(null);
+    void fetchSelectableLlmModels(true)
+      .then((payload) => {
+        if (active) {
+          setModelCatalog(payload);
+        }
+      })
+      .catch((nextError) => {
+        if (active) {
+          setModelCatalogError(nextError instanceof Error ? nextError.message : '模型列表加载失败');
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setModelCatalogReady(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [isAuthLoading, user]);
+
+  useEffect(() => {
+    if (!item || !modelCatalog) {
+      return;
+    }
+    setSelectedModel((current) => {
+      if (current && catalogHasSelection(modelCatalog, current)) {
+        return current;
+      }
+      const reportSelection = item.analysis_provider_id && item.analysis_model_name
+        ? modelSelectionValue(item.analysis_provider_id, item.analysis_model_name)
+        : '';
+      if (reportSelection && catalogHasSelection(modelCatalog, reportSelection)) {
+        return reportSelection;
+      }
+      const activeSelection = modelCatalog.active_provider_id && modelCatalog.active_model_name
+        ? modelSelectionValue(modelCatalog.active_provider_id, modelCatalog.active_model_name)
+        : '';
+      if (activeSelection && catalogHasSelection(modelCatalog, activeSelection)) {
+        return activeSelection;
+      }
+      const firstProvider = modelCatalog.providers.find((provider) => provider.models.length > 0);
+      const firstModel = firstProvider?.models[0];
+      return firstProvider && firstModel
+        ? modelSelectionValue(firstProvider.id, firstModel.model_name)
+        : '';
+    });
+  }, [item, modelCatalog]);
+
+  useEffect(() => {
+    selectedModelRef.current = selectedModel;
+  }, [selectedModel]);
+
   const loadAnalysis = useCallback(async (reanalyze = false) => {
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -91,10 +236,26 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
     setReasoning('');
     setAnalysisError(null);
     setAnalyzing(true);
+    if (reanalyze) {
+      setAnalysisSource(null);
+      setAnalysisWarning(null);
+      setAnalysisProviderName(null);
+      setAnalysisModelName(null);
+    }
     setAnalysisStatus(reanalyze ? '正在重新生成深度阅读报告...' : '正在读取 Zotero 全文、笔记和批注...');
     try {
+      const params = new URLSearchParams();
+      if (reanalyze) {
+        params.set('reanalyze', 'true');
+      }
+      const selection = parseModelSelection(selectedModelRef.current);
+      if (selection) {
+        params.set('provider_id', selection.provider_id);
+        params.set('model_name', selection.model_name);
+      }
+      const query = params.toString();
       await streamSse(
-        zoteroItemApiPath(itemKey, `/analysis${reanalyze ? '?reanalyze=true' : ''}`),
+        zoteroItemApiPath(itemKey, `/analysis${query ? `?${query}` : ''}`),
         { method: 'GET', signal: controller.signal },
         {
           onChunk: (chunk) => setAnalysis((current) => current + chunk),
@@ -105,6 +266,23 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
               setReasoning((current) => current + data);
             } else if (event === 'final') {
               setAnalysis(data);
+            } else if (event === 'source') {
+              setAnalysisSource(data || null);
+            } else if (event === 'analysis-meta') {
+              try {
+                const metadata = JSON.parse(data) as {
+                  source?: string | null;
+                  warning?: string | null;
+                  provider_name?: string | null;
+                  model_name?: string | null;
+                };
+                setAnalysisSource(metadata.source ?? null);
+                setAnalysisWarning(metadata.warning ?? null);
+                setAnalysisProviderName(metadata.provider_name ?? null);
+                setAnalysisModelName(metadata.model_name ?? null);
+              } catch {
+                // Keep the source event as a best-effort fallback.
+              }
             } else if (event === 'figures') {
               try {
                 const figures = JSON.parse(data) as ZoteroAnalysisFigure[];
@@ -159,15 +337,21 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
       return undefined;
     }
 
+    if (!modelCatalogReady) {
+      return undefined;
+    }
     void loadAnalysis(false);
     return () => abortRef.current?.abort();
-  }, [item, loadAnalysis]);
+  }, [item, loadAnalysis, modelCatalogReady]);
 
   const generateEnrichment = useCallback(async () => {
     setEnrichmentBusy(true);
     setEnrichmentError(null);
     try {
-      setAnalysisEnrichment(await generateZoteroEnrichment(itemKey));
+      setAnalysisEnrichment(await generateZoteroEnrichment(
+        itemKey,
+        parseModelSelection(selectedModelRef.current) ?? undefined,
+      ));
     } catch (nextError) {
       setEnrichmentError(nextError instanceof Error ? nextError.message : '笔记与标签生成失败');
     } finally {
@@ -199,6 +383,10 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   const notes = (item.children ?? []).filter((child) => child.note);
   const annotations = (item.children ?? []).filter((child) => child.annotation_text || child.annotation_comment);
   const attachments = (item.children ?? []).filter((child) => child.item_type === 'attachment');
+  const reportSourceLabel = analyzing && !analysisSource
+    ? '正在确认全文来源...'
+    : sourceLabel(analysisSource);
+  const sourceNeedsAttention = analysisSource === 'metadata' || (!analysisSource && Boolean(analysis) && !analyzing);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -232,7 +420,33 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
             </div>
           </div>
           <div className="flex max-w-full flex-wrap items-center gap-2">
-            <ActiveModelBadge className="max-w-[18rem]" />
+            <Select
+              value={selectedModel}
+              onValueChange={setSelectedModel}
+              disabled={analyzing || !modelCatalog?.providers.some((provider) => provider.models.length > 0)}
+            >
+              <SelectTrigger className="h-10 w-full max-w-[22rem] rounded-full border-[#fed7aa] bg-gradient-to-r from-[#fff7ed] via-white to-[#eef6ff] text-[#243047] sm:w-[22rem]">
+                <Cpu className="h-4 w-4 shrink-0 text-[#f08300]" />
+                <SelectValue placeholder={modelCatalogReady ? '没有可用模型' : '正在读取模型...'} />
+              </SelectTrigger>
+              <SelectContent position="popper" align="end" className="max-h-[24rem] min-w-[22rem]">
+                {modelCatalog?.providers.map((provider) => (
+                  <SelectGroup key={provider.id}>
+                    <SelectLabel>
+                      {provider.name}{provider.is_active ? ' · 默认供应商' : ''}
+                    </SelectLabel>
+                    {provider.models.map((model) => (
+                      <SelectItem
+                        key={model.id}
+                        value={modelSelectionValue(provider.id, model.model_name)}
+                      >
+                        {providerModelLabel(provider, model.model_name)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
+              </SelectContent>
+            </Select>
             <Button
               variant="outline"
               className="rounded-full"
@@ -244,6 +458,38 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
             </Button>
           </div>
         </div>
+
+        {modelCatalogError ? (
+          <p className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            模型列表刷新失败：{modelCatalogError}。仍可使用服务器当前默认模型进行分析。
+          </p>
+        ) : null}
+
+        {(analysis || analyzing) ? (
+          <div
+            className={`mt-5 rounded-2xl border px-4 py-3 text-sm leading-6 ${
+              sourceNeedsAttention
+                ? 'border-amber-200 bg-amber-50 text-amber-900'
+                : 'border-emerald-100 bg-emerald-50/70 text-emerald-900'
+            }`}
+          >
+            <div className="flex flex-wrap gap-x-5 gap-y-1">
+              <span><strong>分析材料：</strong>{reportSourceLabel}</span>
+              {analysisModelName ? (
+                <span>
+                  <strong>报告模型：</strong>
+                  {analysisProviderName ? `${analysisProviderName} / ` : ''}{analysisModelName}
+                </span>
+              ) : analysis && !analyzing ? (
+                <span><strong>报告模型：</strong>旧报告未记录</span>
+              ) : null}
+            </div>
+            {analysisWarning ? <p className="mt-1">{analysisWarning}</p> : null}
+            {!analysisSource && analysis && !analyzing ? (
+              <p className="mt-1">这通常是全文读取与来源记录功能上线前保存的旧结果；请选择模型后点“重新分析”即可升级。</p>
+            ) : null}
+          </div>
+        ) : null}
 
         {analyzing && !analysis && !reasoning ? (
           <div className="mt-6 flex min-h-40 items-center justify-center gap-2 text-[#728095]">
@@ -304,7 +550,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
             <Tags className="h-5 w-5 text-[#ff9900]" />
             <div>
               <h2 className="text-xl font-semibold text-[#172033]">Zotero 笔记与标签</h2>
-              <p className="text-sm text-[#728095]">Claude 生成建议，写回时保留你的原笔记与原标签</p>
+              <p className="text-sm text-[#728095]">使用上方所选模型生成建议，写回时保留你的原笔记与原标签</p>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
