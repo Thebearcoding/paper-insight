@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  Cpu,
   History,
   Keyboard,
   Loader2,
@@ -27,10 +28,12 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import {
+  buildChatRequestPayload,
   chatWidgetReducer,
   formatChatSessionDate,
   groupChatSessionsByAge,
   INITIAL_CHAT_WIDGET_STATE,
+  type ChatModelSelection,
 } from '@/lib/chat-widget';
 import { navigate } from '@/lib/router';
 import { ReasoningStreamPanel } from '@/components/reasoning-stream-panel';
@@ -40,6 +43,8 @@ import type { ChatMessage, ChatSessionSummary } from '@/types';
 interface ChatPanelProps {
   paperId?: string;
   zoteroItemKey?: string;
+  llmSelection?: ChatModelSelection;
+  llmLabel?: string;
 }
 
 interface LocalChatMessage {
@@ -57,7 +62,7 @@ function toLocalMessages(messages: ChatMessage[]): LocalChatMessage[] {
   }));
 }
 
-export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
+export function ChatPanel({ paperId, zoteroItemKey, llmSelection, llmLabel }: ChatPanelProps) {
   const resourceId = zoteroItemKey ?? paperId ?? '';
   const isZotero = Boolean(zoteroItemKey);
   const { user, isLoading: isAuthLoading } = useAuth();
@@ -72,12 +77,14 @@ export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [lastUserMessage, setLastUserMessage] = useState<string | null>(null);
+  const [responseModelLabel, setResponseModelLabel] = useState<string | null>(null);
   const messagesViewportRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const historyBackButtonRef = useRef<HTMLButtonElement | null>(null);
   const sessionRequestIdRef = useRef(0);
   const hasRegenerateTarget = Boolean(currentSessionId && lastUserMessage);
   const groupedSessions = useMemo(() => groupChatSessionsByAge(sessions), [sessions]);
+  const activeModelLabel = responseModelLabel ?? llmLabel;
   const focusComposer = () => {
     window.requestAnimationFrame(() => textareaRef.current?.focus());
   };
@@ -149,6 +156,10 @@ export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
       active = false;
     };
   }, [isAuthLoading, loadSessionsForResource, resourceId, user]);
+
+  useEffect(() => {
+    setResponseModelLabel(null);
+  }, [llmSelection?.model_name, llmSelection?.provider_id]);
 
   const refreshSessions = async () => {
     if (isAuthLoading || !user) {
@@ -263,6 +274,18 @@ export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
               ),
             );
           }
+          if (event === 'chat-meta') {
+            try {
+              const metadata = JSON.parse(data) as {
+                provider_name?: string | null;
+                model_name?: string | null;
+              };
+              const label = [metadata.provider_name, metadata.model_name].filter(Boolean).join(' / ');
+              setResponseModelLabel(label || null);
+            } catch {
+              setResponseModelLabel(null);
+            }
+          }
           if (event === 'final') {
             setMessages((currentMessages) =>
               currentMessages.map((message) =>
@@ -321,10 +344,11 @@ export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
     setStreamingAssistantId(assistantId);
 
     try {
-      await sendStream(chatPath(), {
-        message: trimmed,
-        session_id: sessionId,
-      }, assistantId);
+      await sendStream(
+        chatPath(),
+        buildChatRequestPayload(trimmed, sessionId, llmSelection),
+        assistantId,
+      );
       setLastUserMessage(trimmed);
       await refreshSessions();
     } catch (error) {
@@ -369,10 +393,11 @@ export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
     setStreamingAssistantId(assistantId);
 
     try {
-      await sendStream(chatPath('/regenerate'), {
-        message: lastUserMessage,
-        session_id: currentSessionId,
-      }, assistantId);
+      await sendStream(
+        chatPath('/regenerate'),
+        buildChatRequestPayload(lastUserMessage, currentSessionId, llmSelection),
+        assistantId,
+      );
       await refreshSessions();
     } catch (error) {
       const message = error instanceof Error ? error.message : '重新生成失败';
@@ -419,7 +444,14 @@ export function ChatPanel({ paperId, zoteroItemKey }: ChatPanelProps) {
           </span>
           <div className="min-w-0">
             <h2 id="paper-chat-title" className="truncate text-base font-semibold text-[#172033]">论文对话</h2>
-            <p className="truncate text-[11px] text-[#8a7b68]">围绕当前论文继续追问</p>
+            {isZotero && activeModelLabel ? (
+              <p className="flex min-w-0 items-center gap-1 text-[11px] text-[#8a7b68]" title={activeModelLabel}>
+                <Cpu className="h-3 w-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">{activeModelLabel}</span>
+              </p>
+            ) : (
+              <p className="truncate text-[11px] text-[#8a7b68]">围绕当前论文继续追问</p>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">

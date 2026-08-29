@@ -387,6 +387,13 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
     ? '正在确认全文来源...'
     : sourceLabel(analysisSource);
   const sourceNeedsAttention = analysisSource === 'metadata' || (!analysisSource && Boolean(analysis) && !analyzing);
+  const chatModelSelection = parseModelSelection(selectedModel);
+  const chatModelProvider = chatModelSelection
+    ? modelCatalog?.providers.find((provider) => provider.id === chatModelSelection.provider_id)
+    : undefined;
+  const chatModelLabel = chatModelSelection && chatModelProvider
+    ? `${chatModelProvider.name} / ${providerModelLabel(chatModelProvider, chatModelSelection.model_name)}`
+    : undefined;
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -611,7 +618,12 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
         </div>
       ) : null}
 
-      <ChatPanel key={itemKey} zoteroItemKey={itemKey} />
+      <ChatPanel
+        key={itemKey}
+        zoteroItemKey={itemKey}
+        llmSelection={chatModelSelection ?? undefined}
+        llmLabel={chatModelLabel}
+      />
     </div>
   );
 }

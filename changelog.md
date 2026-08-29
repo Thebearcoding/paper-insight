@@ -1,5 +1,10 @@
 本分支由 [Athebear](https://github.com/Thebearcoding) 维护。功能建议和问题请提交到 [Thebearcoding/paper-insight Issues](https://github.com/Thebearcoding/paper-insight/issues)。
 
+## 2026-08-29
+
+- Zotero 论文分析改为直接复用原项目的三问提示词，通过一次模型调用回答任务、评估指标和方法提升原因，保留 PDF、源码、框架图及笔记标签能力。
+- Zotero 论文对话会跟随详情页当前选择的 Sub2API 模型，并在对话框中显示实际供应商和模型。
+
 ## 2026-08-28
 
 - Zotero 论文分析新增模型下拉选择，可从已配置的 Sub2API 模型中按次选择 Claude、GLM、DeepSeek 等模型，不会修改全站默认模型。

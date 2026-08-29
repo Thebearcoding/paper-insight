@@ -3,7 +3,6 @@ import re
 
 CODE_SEGMENT_PATTERN = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
 SAME_LINE_BLOCK_MATH_PATTERN = re.compile(r"^([ \t]*)\$\$[ \t]*(\S(?:.*?\S)?)[ \t]*\$\$[ \t]*$", re.MULTILINE)
-ZOTERO_REPORT_SECTION_COUNT = 7
 
 
 def _mask_code_segments(content: str) -> tuple[str, list[str]]:
@@ -204,29 +203,3 @@ def normalize_zotero_report(content: str | None) -> str:
                 line = f"## {section.group(1).strip()}"
         lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip()
-
-
-def missing_zotero_report_sections(content: str | None) -> list[int]:
-    normalized = content or ""
-    return [
-        section
-        for section in range(1, ZOTERO_REPORT_SECTION_COUNT + 1)
-        if not re.search(rf"(?m)^## {section}\.\s+\S", normalized)
-    ]
-
-
-def zotero_report_part_completion_marker(sections: tuple[int, ...]) -> str:
-    section_suffix = "_".join(str(section) for section in sections)
-    return f"[[ZOTERO_REPORT_PART_COMPLETE_{section_suffix}]]"
-
-
-def normalize_zotero_report_part(
-    content: str | None,
-    sections: tuple[int, ...],
-) -> tuple[str, bool]:
-    raw_content = content or ""
-    marker = zotero_report_part_completion_marker(sections)
-    marker_position = raw_content.rfind(marker)
-    is_complete = marker_position >= max(0, len(raw_content) - 500)
-    cleaned = raw_content.replace(marker, "")
-    return normalize_zotero_report(cleaned), is_complete

@@ -178,18 +178,8 @@ from database import (
 )
 from chat import ChatSession
 from background_tasks import BackgroundAnalyzer
-from markdown_utils import (
-    missing_zotero_report_sections,
-    normalize_llm_markdown,
-    normalize_zotero_report,
-    normalize_zotero_report_part,
-    zotero_report_part_completion_marker,
-)
-from prompt import (
-    ZOTERO_DEEP_READING_PROMPT_PARTS,
-    ZOTERO_DEEP_READING_SECTION_GROUPS,
-    build_open_in_ai_prompt,
-)
+from markdown_utils import normalize_llm_markdown, normalize_zotero_report
+from prompt import PAPER_ANALYSIS_PROMPT, build_open_in_ai_prompt
 from paper_figures import (
     extract_and_save_zotero_framework_figure,
     zotero_figure_path,
@@ -770,6 +760,20 @@ def ensure_llm_configured() -> None:
     if not llm.is_configured():
         raise HTTPException(status_code=503, detail="当前 LLM 供应商、模型或 API Key 未配置")
 
+
+def select_configured_llm(
+    provider_id: str | None = None,
+    model_name: str | None = None,
+) -> ManagedLLM:
+    try:
+        selected_llm = llm.select(provider_id, model_name)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not selected_llm.is_configured():
+        raise HTTPException(status_code=503, detail="当前 LLM 供应商、模型或 API Key 未配置")
+    return selected_llm
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global background_task, presence_snapshot_task, hf_daily_task, feishu_push_task, typesense_index_task
@@ -846,6 +850,8 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str
     user_id: str | None = None
+    provider_id: str | None = None
+    model_name: str | None = None
 
 
 class ZoteroConnectionRequest(BaseModel):
@@ -1445,6 +1451,7 @@ async def build_zotero_chat_runtime(
     item_key: str,
     session_id: str,
     session_exists: bool,
+    chat_llm: ManagedLLM,
 ) -> ChatSession:
     item = await asyncio.to_thread(get_zotero_item, user_id, item_key)
     if not item:
@@ -1464,7 +1471,7 @@ async def build_zotero_chat_runtime(
         {"role": row["role"], "content": row["content"]}
         for row in history_rows
     ] or None
-    return ChatSession(llm, context="\n\n".join(context_parts), history=history)
+    return ChatSession(chat_llm, context="\n\n".join(context_parts), history=history)
 
 
 @app.post("/auth/register")
@@ -1945,79 +1952,23 @@ async def analyze_my_zotero_item(
             except Exception as exc:
                 logger.info("Unable to extract Zotero framework figure %s: %s", item_key, exc)
                 yield {"event": "status", "data": "框架图提取失败，将继续生成文字报告"}
-            yield {"event": "status", "data": "正在生成深度阅读报告..."}
+            yield {"event": "status", "data": "正在按原项目提示词分析论文..."}
             chunks: list[str] = []
-            for part_index, ((part_label, part_prompt), expected_sections) in enumerate(
-                zip(
-                    ZOTERO_DEEP_READING_PROMPT_PARTS,
-                    ZOTERO_DEEP_READING_SECTION_GROUPS,
-                    strict=True,
-                ),
-                start=1,
+            async for stream_chunk in selected_llm.get_response_stream_events(
+                context,
+                _analysis_instruction=PAPER_ANALYSIS_PROMPT,
+                _usage_context="zotero_analysis_stream",
             ):
-                yield {"event": "status", "data": f"正在生成报告{part_label}..."}
-                normalized_part = ""
-                missing_part_sections = list(expected_sections)
-                part_complete = False
-                completion_marker = zotero_report_part_completion_marker(expected_sections)
-                completion_instruction = (
-                    f"{part_prompt}\n\n"
-                    "完整写完本段后，最后独占一行原样输出以下完成标记；"
-                    "如果正文尚未完成，不要提前输出：\n"
-                    f"{completion_marker}"
-                )
-                for attempt in range(1, 3):
-                    part_chunks: list[str] = []
-                    async for stream_chunk in selected_llm.get_response_stream_events(
-                        context,
-                        _analysis_instruction=completion_instruction,
-                        _usage_context=f"zotero_analysis_stream_part_{part_index}_attempt_{attempt}",
-                        max_tokens=8192,
-                    ):
-                        if stream_chunk.kind == "reasoning":
-                            yield {"event": "reasoning", "data": stream_chunk.content}
-                            continue
-                        part_chunks.append(stream_chunk.content)
-                    normalized_part, part_complete = normalize_zotero_report_part(
-                        "".join(part_chunks),
-                        expected_sections,
-                    )
-                    missing_part_sections = [
-                        section
-                        for section in expected_sections
-                        if section in missing_zotero_report_sections(normalized_part)
-                    ]
-                    if not missing_part_sections and part_complete:
-                        break
-                    if attempt == 1:
-                        yield {
-                            "event": "status",
-                            "data": f"报告{part_label}输出不完整，正在重试...",
-                        }
-                if missing_part_sections or not part_complete:
-                    missing_labels = "、".join(str(section) for section in missing_part_sections)
-                    failure_reason = (
-                        f"缺少第 {missing_labels} 节"
-                        if missing_part_sections
-                        else "上游输出被截断"
-                    )
-                    yield {
-                        "event": "error",
-                        "data": f"报告{part_label}生成失败（{failure_reason}），已保留原报告",
-                    }
-                    return
-                if chunks:
-                    chunks.append("\n\n")
-                    yield {"data": "\n\n"}
-                chunks.append(normalized_part)
-                yield {"data": normalized_part}
+                if stream_chunk.kind == "reasoning":
+                    yield {"event": "reasoning", "data": stream_chunk.content}
+                    continue
+                chunks.append(stream_chunk.content)
+                yield {"data": stream_chunk.content}
             normalized = normalize_zotero_report("".join(chunks))
-            missing_sections = missing_zotero_report_sections(normalized)
-            if missing_sections:
-                missing_labels = "、".join(str(section) for section in missing_sections)
+            if not normalized:
                 yield {
                     "event": "error",
-                    "data": f"深度阅读报告输出不完整（缺少第 {missing_labels} 节），已保留原报告",
+                    "data": "论文分析没有返回内容，已保留原报告",
                 }
                 return
             analysis_enrichment = dict(item.get("analysis_enrichment") or {})
@@ -2160,7 +2111,8 @@ async def chat_with_my_zotero_item(
     req: ChatRequest,
     user: dict = Depends(require_current_user),
 ):
-    ensure_llm_configured()
+    chat_llm = select_configured_llm(req.provider_id, req.model_name)
+    chat_config = chat_llm.public_config()
     user_id = user["id"]
     try:
         session_row = assert_zotero_chat_owner(req.session_id, user_id, item_key)
@@ -2172,8 +2124,11 @@ async def chat_with_my_zotero_item(
                 item_key,
                 req.session_id,
                 session_exists=not is_new_session,
+                chat_llm=chat_llm,
             )
             zotero_chat_sessions[req.session_id] = session
+        else:
+            session.llm = chat_llm
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
     except ZoteroError as exc:
@@ -2181,6 +2136,10 @@ async def chat_with_my_zotero_item(
 
     async def generate():
         try:
+            yield {
+                "event": "chat-meta",
+                "data": json.dumps(chat_config, ensure_ascii=False),
+            }
             if is_new_session:
                 await asyncio.to_thread(
                     create_zotero_chat_session,
@@ -2258,7 +2217,8 @@ async def regenerate_my_zotero_chat(
     req: ChatRequest,
     user: dict = Depends(require_current_user),
 ):
-    ensure_llm_configured()
+    chat_llm = select_configured_llm(req.provider_id, req.model_name)
+    chat_config = chat_llm.public_config()
     user_id = user["id"]
     try:
         session_row = assert_zotero_chat_owner(req.session_id, user_id, item_key)
@@ -2277,8 +2237,11 @@ async def regenerate_my_zotero_chat(
                 item_key,
                 req.session_id,
                 session_exists=True,
+                chat_llm=chat_llm,
             )
             zotero_chat_sessions[req.session_id] = session
+        else:
+            session.llm = chat_llm
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
     except ZoteroError as exc:
@@ -2286,6 +2249,10 @@ async def regenerate_my_zotero_chat(
 
     async def generate():
         try:
+            yield {
+                "event": "chat-meta",
+                "data": json.dumps(chat_config, ensure_ascii=False),
+            }
             chunks: list[str] = []
             async for stream_chunk in session.send_stream_events(
                 req.message,

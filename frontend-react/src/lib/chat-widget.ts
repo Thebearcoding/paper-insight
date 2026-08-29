@@ -1,5 +1,22 @@
 import type { ChatSessionSummary } from '@/types';
 
+export interface ChatModelSelection {
+  provider_id: string;
+  model_name: string;
+}
+
+export function buildChatRequestPayload(
+  message: string,
+  sessionId: string,
+  selection?: ChatModelSelection,
+) {
+  return {
+    message,
+    session_id: sessionId,
+    ...(selection ?? {}),
+  };
+}
+
 export type ChatWidgetView = 'chat' | 'history';
 
 export interface ChatWidgetState {

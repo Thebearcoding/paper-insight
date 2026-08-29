@@ -2,11 +2,26 @@ import { describe, expect, it } from 'vitest';
 
 import type { ChatSessionSummary } from '@/types';
 import {
+  buildChatRequestPayload,
   chatWidgetReducer,
   formatChatSessionDate,
   groupChatSessionsByAge,
   INITIAL_CHAT_WIDGET_STATE,
 } from './chat-widget';
+
+describe('buildChatRequestPayload', () => {
+  it('carries the selected Sub2API model into chat requests', () => {
+    expect(buildChatRequestPayload('解释方法', 'session-1', {
+      provider_id: 'sub2api-provider',
+      model_name: 'glm-5.3',
+    })).toEqual({
+      message: '解释方法',
+      session_id: 'session-1',
+      provider_id: 'sub2api-provider',
+      model_name: 'glm-5.3',
+    });
+  });
+});
 
 function session(id: string, createdAt: Date): ChatSessionSummary {
   return {
