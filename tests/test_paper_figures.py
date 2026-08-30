@@ -59,6 +59,14 @@ def test_results_table_caption_score_rejects_body_reference():
     assert score < 0
 
 
+def test_results_table_caption_score_keeps_training_shot_metadata():
+    score = paper_figures.results_table_caption_score(
+        "Table 1: Pixel-level AUROC of zero-shot AD methods. The number of shots used for training is noted. Results are copied from official papers."
+    )
+
+    assert score > 0
+
+
 def test_extract_arxiv_framework_figure_selects_method_pipeline(monkeypatch):
     html = b"""
     <article class="ltx_document">

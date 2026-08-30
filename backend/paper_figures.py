@@ -32,6 +32,7 @@ from utils import ReaderError
 logger = logging.getLogger(__name__)
 MAX_FIGURE_IMAGE_BYTES = 12 * 1024 * 1024
 PDF_FIGURE_TIMEOUT_SECONDS = 60
+PDF_DOWNLOAD_TIMEOUT_SECONDS = 60
 FRAMEWORK_FIGURE_KIND = "framework"
 RESULTS_TABLE_KIND = "results_table"
 CAPTION_LABEL_PATTERN = re.compile(r"(?i)\b(?:figure|fig\.)\s*([A-Z]?\d+[A-Za-z]?)")
@@ -64,7 +65,13 @@ RESULTS_TABLE_POSITIVE_TERMS: tuple[tuple[re.Pattern[str], int], ...] = (
 )
 RESULTS_TABLE_NEGATIVE_TERMS: tuple[tuple[re.Pattern[str], int], ...] = (
     (re.compile(r"(?i)\b(?:ablation|component|variant|sensitivity)\b|消融|组件|敏感性"), 28),
-    (re.compile(r"(?i)\b(?:hyper-?parameter|parameter settings?|number of|layers?)\b|超参数|参数设置"), 18),
+    (
+        re.compile(
+            r"(?i)\b(?:hyper-?parameter|parameter settings?|"
+            r"number of (?:anchors?|queries?|layers?|prompts?|tokens?|components?))\b|超参数|参数设置"
+        ),
+        18,
+    ),
     (re.compile(r"(?i)\b(?:runtime|latency|complexity|flops|throughput)\b|运行时间|复杂度|吞吐"), 15),
     (re.compile(r"(?i)\b(?:dataset statistics|data statistics)\b|数据集统计"), 18),
 )
@@ -868,7 +875,10 @@ def _extract_asset_from_available_pdfs(
             continue
         seen_urls.add(public_pdf_url)
         try:
-            pdf_bytes = download_public_pdf_bytes(public_pdf_url)
+            pdf_bytes = download_public_pdf_bytes(
+                public_pdf_url,
+                total_timeout_seconds=PDF_DOWNLOAD_TIMEOUT_SECONDS,
+            )
             asset = extractor(pdf_bytes, public_pdf_url)
         except (ReaderError, requests.RequestException, ValueError) as exc:
             logger.info("Unable to extract %s from public PDF %s: %s", asset_name, public_pdf_url, exc)

@@ -401,16 +401,31 @@ def _is_public_url(url: str) -> bool:
         return False
 
 
-def download_public_pdf_bytes(url: str) -> bytes:
+def download_public_pdf_bytes(
+    url: str,
+    *,
+    total_timeout_seconds: float | None = None,
+) -> bytes:
     current_url = url
     max_bytes = max(settings.zotero.max_attachment_mb, 1) * 1024 * 1024
+    deadline = (
+        time.monotonic() + max(total_timeout_seconds, 1)
+        if total_timeout_seconds is not None
+        else None
+    )
     for _ in range(MAX_REDIRECTS + 1):
         if not _is_public_url(current_url):
             raise ReaderError("PDF 地址不是可公开访问的安全 URL")
+        request_timeout = max(settings.zotero.request_timeout_seconds, 5)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReaderError("公开 PDF 下载超过总时限")
+            request_timeout = min(request_timeout, max(remaining, 1))
         response = requests.get(
             current_url,
             headers={**PDF_HEADERS, "User-Agent": RESOURCE_USER_AGENT},
-            timeout=max(settings.zotero.request_timeout_seconds, 5),
+            timeout=request_timeout,
             stream=True,
             allow_redirects=False,
         )
@@ -428,6 +443,8 @@ def download_public_pdf_bytes(url: str) -> bytes:
             chunks: list[bytes] = []
             received = 0
             for chunk in response.iter_content(chunk_size=64 * 1024):
+                if deadline is not None and time.monotonic() > deadline:
+                    raise ReaderError("公开 PDF 下载超过总时限")
                 if not chunk:
                     continue
                 received += len(chunk)

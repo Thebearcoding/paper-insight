@@ -28,6 +28,22 @@ class FakeResponse:
         self.closed = True
 
 
+class FakePdfResponse:
+    status_code = 200
+    is_redirect = False
+    is_permanent_redirect = False
+    headers = {"Content-Type": "application/pdf"}
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        yield b"%PDF-slow"
+
+    def close(self):
+        return None
+
+
 def test_direct_document_candidates_normalizes_arxiv_and_openreview_urls():
     arxiv = paper_resources.direct_document_candidates(
         {
@@ -189,6 +205,23 @@ def test_arxiv_candidate_prefers_html_before_pdf(monkeypatch):
 def test_bounded_pdf_extraction_propagates_parse_failure():
     with pytest.raises(paper_resources.ReaderError, match="PDF"):
         paper_resources.extract_pdf_text_bounded(b"not-a-pdf", "invalid.pdf")
+
+
+def test_public_pdf_download_enforces_total_timeout(monkeypatch):
+    times = iter([0.0, 0.25, 2.0])
+    monkeypatch.setattr(paper_resources.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(paper_resources, "_is_public_url", lambda _url: True)
+    monkeypatch.setattr(
+        paper_resources.requests,
+        "get",
+        lambda *args, **kwargs: FakePdfResponse(),
+    )
+
+    with pytest.raises(paper_resources.ReaderError, match="总时限"):
+        paper_resources.download_public_pdf_bytes(
+            "https://example.org/slow.pdf",
+            total_timeout_seconds=1,
+        )
 
 
 def test_crossref_candidate_only_accepts_pdf_links(monkeypatch):
