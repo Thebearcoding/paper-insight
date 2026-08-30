@@ -315,8 +315,9 @@ function normalizeMarkdownSyntax(content: string, options: MarkdownNormalization
   }
 
   const { masked, segments } = maskCodeSegments(content);
-  const lines = masked
-    .replace(/\*\*(https?:\/\/[^\s*<>]+)\*\*/g, '**<$1>**')
+  const lines = normalizeAttachedBoldBoundaries(
+    masked.replace(/\*\*(https?:\/\/[^\s*<>]+)\*\*/g, '**<$1>**'),
+  )
     .split('\n')
     .flatMap(expandInlineHeadingLine)
     .map(normalizeMarkdownLine);
@@ -341,6 +342,33 @@ function normalizeMarkdownSyntax(content: string, options: MarkdownNormalization
   }
 
   return unmaskCodeSegments(normalizedLines.join('\n').replace(/\n{3,}/g, '\n\n'), segments).trimEnd();
+}
+
+function normalizeAttachedBoldBoundaries(content: string): string {
+  const isPunctuationOrSymbol = (value: string) => /[\p{P}\p{S}]/u.test(value);
+  return content.replace(
+    /(?<!\*)\*\*([^\n]+?)\*\*(?!\*)/gu,
+    (match, inner: string, offset: number, source: string) => {
+      const previous = Array.from(source.slice(0, offset)).at(-1) ?? '';
+      const following = Array.from(source.slice(offset + match.length))[0] ?? '';
+      const first = Array.from(inner)[0] ?? '';
+      const last = Array.from(inner).at(-1) ?? '';
+      const needsLeadingBoundary = Boolean(
+        previous
+        && !/\s/u.test(previous)
+        && !isPunctuationOrSymbol(previous)
+        && isPunctuationOrSymbol(first),
+      );
+      const needsTrailingBoundary = Boolean(
+        following
+        && !/\s/u.test(following)
+        && !isPunctuationOrSymbol(following)
+        && isPunctuationOrSymbol(last),
+      );
+
+      return `${needsLeadingBoundary ? '&#8203;' : ''}${match}${needsTrailingBoundary ? '&#8203;' : ''}`;
+    },
+  );
 }
 
 export function normalizeMarkdownContent(

@@ -40,6 +40,14 @@ describe('normalizeMarkdownContent', () => {
     expect(normalizeMarkdownContent(expected, { analysisMode: true })).toBe(expected);
   });
 
+  it('repairs an attached bold span ending in punctuation', () => {
+    const content = '论文解决**零样本与异常分割（AS）**任务。';
+    const normalized = normalizeMarkdownContent(content, { analysisMode: true });
+
+    expect(normalized).toBe('论文解决**零样本与异常分割（AS）**&#8203;任务。');
+    expect(normalizeMarkdownContent(normalized, { analysisMode: true })).toBe(normalized);
+  });
+
   it('splits inline heading fragments onto their own line', () => {
     const normalized = normalizeMarkdownContent(
       '开源代码仓库链接：https://github.com/lasr-spelling/sae-spelling # 问题1：论文要解决什么任务？',
@@ -125,6 +133,19 @@ describe('RichContent', () => {
     );
 
     expect(html).toContain('<strong><a href="https://github.com/7HHHHH/VisualAD"');
+    expect(html).not.toContain('**');
+  });
+
+  it('renders attached CJK bold text without visible markdown markers', () => {
+    const html = renderToStaticMarkup(
+      <RichContent
+        content={'论文解决**零样本与异常分割（AS）**任务。'}
+        analysisMode
+        className="markdown-body"
+      />,
+    );
+
+    expect(html).toContain('<strong>零样本与异常分割（AS）</strong>');
     expect(html).not.toContain('**');
   });
 

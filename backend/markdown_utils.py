@@ -1,4 +1,5 @@
 import re
+import unicodedata
 
 
 CODE_SEGMENT_PATTERN = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
@@ -72,6 +73,35 @@ def _normalize_same_line_block_math(content: str) -> str:
 
 def _normalize_bold_autolinks(content: str) -> str:
     return re.sub(r"\*\*(https?://[^\s*<>]+)\*\*", r"**<\1>**", content)
+
+
+def _normalize_attached_bold_boundaries(content: str) -> str:
+    def _is_punctuation_or_symbol(value: str) -> bool:
+        return bool(value) and unicodedata.category(value).startswith(("P", "S"))
+
+    def _replace(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        previous = content[match.start() - 1] if match.start() else ""
+        following = content[match.end()] if match.end() < len(content) else ""
+        needs_leading_boundary = (
+            bool(previous)
+            and not previous.isspace()
+            and not _is_punctuation_or_symbol(previous)
+            and _is_punctuation_or_symbol(inner[:1])
+        )
+        needs_trailing_boundary = (
+            bool(following)
+            and not following.isspace()
+            and not _is_punctuation_or_symbol(following)
+            and _is_punctuation_or_symbol(inner[-1:])
+        )
+        return (
+            ("&#8203;" if needs_leading_boundary else "")
+            + match.group(0)
+            + ("&#8203;" if needs_trailing_boundary else "")
+        )
+
+    return re.sub(r"(?<!\*)\*\*([^\n]+?)\*\*(?!\*)", _replace, content)
 
 
 def _normalize_heading_marker_prefix(line: str) -> str:
@@ -163,7 +193,7 @@ def normalize_llm_markdown(content: str | None, analysis_mode: bool = False) -> 
         )
     )
 
-    normalized = _normalize_bold_autolinks(normalized)
+    normalized = _normalize_attached_bold_boundaries(_normalize_bold_autolinks(normalized))
     lines = [
         _normalize_markdown_line(expanded_line)
         for line in normalized.split("\n")

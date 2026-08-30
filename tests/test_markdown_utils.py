@@ -42,6 +42,14 @@ def test_normalize_llm_markdown_repairs_bold_autolink():
     assert normalize_llm_markdown(expected, analysis_mode=True) == expected
 
 
+def test_normalize_llm_markdown_repairs_attached_bold_punctuation_boundary():
+    content = "论文解决**零样本与异常分割（AS）**任务。"
+    expected = "论文解决**零样本与异常分割（AS）**&#8203;任务。"
+
+    assert normalize_llm_markdown(content, analysis_mode=True) == expected
+    assert normalize_llm_markdown(expected, analysis_mode=True) == expected
+
+
 def test_normalize_llm_markdown_splits_inline_heading_fragments():
     normalized = normalize_llm_markdown(
         "开源代码仓库链接：https://github.com/lasr-spelling/sae-spelling # 问题1：论文要解决什么任务？",
