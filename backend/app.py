@@ -192,6 +192,7 @@ from zotero import (
     ZoteroAuthError,
     ZoteroClient,
     ZoteroError,
+    compact_zotero_analysis_context,
     delete_user_cache as delete_zotero_user_cache,
     get_item_reading_context,
 )
@@ -1919,6 +1920,15 @@ async def analyze_my_zotero_item(
 
             yield {"event": "status", "data": "正在读取 Zotero 全文、笔记和批注..."}
             context, source, warning = await load_zotero_reading_context(user_id, item)
+            analysis_context = context
+            if (
+                str(selected_config.get("provider_key") or "").casefold() == "sub2api"
+                and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
+            ):
+                analysis_context = compact_zotero_analysis_context(context)
+                if analysis_context != context:
+                    proxy_warning = "GLM 长文输入已保留 PDF 主文，并省略超长参考文献或补充材料"
+                    warning = f"{warning}；{proxy_warning}" if warning else proxy_warning
             if warning:
                 yield {"event": "status", "data": f"{warning}，将基于现有材料继续分析"}
             yield {"event": "source", "data": source}
@@ -1976,7 +1986,7 @@ async def analyze_my_zotero_item(
             }
             chunks: list[str] = []
             async for stream_chunk in selected_llm.get_response_stream_events(
-                context,
+                analysis_context,
                 _analysis_instruction=analysis_instruction,
                 _usage_context="zotero_analysis_stream",
             ):

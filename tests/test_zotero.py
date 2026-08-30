@@ -184,6 +184,30 @@ def test_build_metadata_context_includes_user_notes_and_annotations():
     assert "Verify this" in context
 
 
+def test_compact_zotero_analysis_context_keeps_main_text_and_drops_tail():
+    context = (
+        "Zotero 条目元数据：\n"
+        + "metadata " * 2_000
+        + "\n\n论文全文：\n"
+        + "MAIN_TEXT_START\n"
+        + "method experiment metric " * 4_000
+        + "\nSUPPLEMENT_TAIL_SENTINEL"
+    )
+
+    compact = zotero.compact_zotero_analysis_context(context, max_tokens=2_000)
+
+    assert "Zotero 条目元数据" in compact
+    assert "MAIN_TEXT_START" in compact
+    assert "模型输入范围" in compact
+    assert "SUPPLEMENT_TAIL_SENTINEL" not in compact
+
+
+def test_compact_zotero_analysis_context_preserves_short_input():
+    context = "Zotero 条目元数据：短内容\n\n论文全文：\nShort paper body."
+
+    assert zotero.compact_zotero_analysis_context(context) == context
+
+
 def test_linked_file_falls_back_to_public_pdf_and_includes_repository(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(zotero, "_cache_dir", lambda: tmp_path)
     monkeypatch.setattr(

@@ -28,6 +28,7 @@ PAGE_SIZE = 100
 MAX_RETRIES = 4
 DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "zotero_cache"
 ZOTERO_FULLTEXT_TOKEN_LIMIT = 160_000
+ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT = 16_000
 
 
 class ZoteroError(Exception):
@@ -633,6 +634,32 @@ def build_reading_context(
             + truncate_content_for_llm(content, max_tokens=ZOTERO_FULLTEXT_TOKEN_LIMIT)
         )
     return "\n\n".join(parts)
+
+
+def compact_zotero_analysis_context(
+    context: str,
+    max_tokens: int = ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT,
+) -> str:
+    """Keep paper main text while dropping oversized notes, references, and appendices."""
+    truncated = truncate_content_for_llm(context, max_tokens=max_tokens)
+    if truncated == context:
+        return context
+
+    metadata, separator, fulltext = context.partition("论文全文：\n")
+    if not separator:
+        return truncated
+
+    metadata_limit = min(3_000, max(max_tokens // 5, 500))
+    fulltext_limit = max(max_tokens - metadata_limit - 500, 1_000)
+    compact_metadata = truncate_content_for_llm(metadata.strip(), max_tokens=metadata_limit)
+    compact_fulltext = truncate_content_for_llm(fulltext.strip(), max_tokens=fulltext_limit)
+    return (
+        compact_metadata
+        + "\n\n模型输入范围：以下内容来自论文 PDF 主文；为适配当前模型代理，"
+        + "超长参考文献、附录和补充材料可能已省略。\n\n"
+        + separator
+        + compact_fulltext
+    )
 
 
 def get_item_reading_context(
