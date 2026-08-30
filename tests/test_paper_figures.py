@@ -88,3 +88,42 @@ def test_zotero_figure_path_rejects_traversal(tmp_path, monkeypatch):
 
     with pytest.raises(ReaderError):
         paper_figures.zotero_figure_path("user", "item", "../secret.png")
+
+
+def test_force_refresh_skips_existing_zotero_framework_figure(tmp_path, monkeypatch):
+    cached_file = tmp_path / "framework-cached.png"
+    cached_file.write_bytes(ONE_PIXEL_PNG)
+    monkeypatch.setattr(paper_figures, "zotero_figure_path", lambda *_args: cached_file)
+    item = {
+        "item_key": "PAPER1",
+        "analysis_figures": [
+            {
+                "id": "cached",
+                "kind": "framework",
+                "filename": cached_file.name,
+                "label": "Figure 1",
+            }
+        ],
+        "raw": {"data": {}},
+    }
+
+    cached = paper_figures.extract_and_save_zotero_framework_figure(
+        user_id="user",
+        zotero_user_id=123,
+        item=item,
+        children=[],
+        client=object(),
+        reading_context="",
+    )
+    refreshed = paper_figures.extract_and_save_zotero_framework_figure(
+        user_id="user",
+        zotero_user_id=123,
+        item=item,
+        children=[],
+        client=object(),
+        reading_context="",
+        force_refresh=True,
+    )
+
+    assert cached == item["analysis_figures"][0]
+    assert refreshed is None

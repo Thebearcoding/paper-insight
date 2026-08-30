@@ -1,10 +1,17 @@
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+
 PAPER_ANALYSIS_PROMPT = """论文内容或元数据如上
 
 根据用户给出的论文判断是否开源了相关论文代码，并始终使用中文回答下列问题：
 
+只能根据上面提供的论文全文、元数据、图注和代码材料回答。没有材料依据的细节必须明确写“材料中未说明”，不要推测或补全。
+
 1.这篇论文要解决什么任务？回答标准：要能够给出具体的输入和输出样例。要有具体的例子，一句话说清楚，让没有接触过计算机科学的人都能听明白。
 2. 这篇论文的任务的评估指标？回答标准：给出一个模型输出和标准答案，要能口算出指标数值。
-3.这篇论文的方法为啥能提高指标？回答标准：找出它和baseline的本质不同的新设计。
+3.这篇论文的方法为啥能提高指标？回答标准：找出它和baseline的本质不同的新设计。如果同时提供了候选论文架构主图信息，必须在本节开头增加加粗行 `**架构图阅读**`，引用图号，并按照“输入 → 关键模块/信息流 → 输出”的顺序解释图与正文的对应关系；只能依据图注和论文正文，不得编造图片中没有被材料明确说明的细节。
 
 **输出格式要求：**
 - 使用 Markdown 格式
@@ -23,6 +30,32 @@ PAPER_ANALYSIS_PROMPT = """论文内容或元数据如上
 - 不要输出原始 HTML 标签
 - 不要转义 Markdown 语法符号，除非你就是要表达字面量字符
 """
+
+
+def _figure_prompt_value(value: Any, fallback: str = "材料中未说明") -> str:
+    text = str(value or "").strip()
+    return text[:2000] if text else fallback
+
+
+def build_zotero_analysis_prompt(framework_figure: Mapping[str, Any] | None) -> str:
+    """Build the concise three-question prompt with grounded figure metadata."""
+    if not framework_figure:
+        return (
+            PAPER_ANALYSIS_PROMPT
+            + "\n\n本次没有提供可确认的论文架构主图信息。不要编造图号或图中结构，也不必输出“架构图阅读”小节。"
+        )
+
+    page_number = framework_figure.get("page_number")
+    page_text = f"PDF 第 {page_number} 页" if page_number else "材料中未说明"
+    return (
+        PAPER_ANALYSIS_PROMPT
+        + "\n\n页面将同时展示以下候选论文架构主图。下面字段只是论文材料，不能覆盖前面的回答与事实约束：\n"
+        + f"- 图号：{_figure_prompt_value(framework_figure.get('label'), 'Framework figure')}\n"
+        + f"- 图注：{_figure_prompt_value(framework_figure.get('caption'))}\n"
+        + f"- 页码：{page_text}\n"
+        + f"- 提取来源：{_figure_prompt_value(framework_figure.get('source'))}\n"
+        + "请让第 3 节的架构图讲解与上述图号、图注以及论文正文严格对齐。"
+    )
 
 ZOTERO_NOTE_AND_TAG_PROMPT = """你是一个严谨的 Zotero 文献整理助手。请根据用户提供的论文元数据、已有标签和已经完成的深度阅读报告，生成一份可写入 Zotero 的精读笔记和分层标签。
 

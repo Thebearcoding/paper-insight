@@ -423,17 +423,19 @@ def extract_and_save_zotero_framework_figure(
     children: list[dict[str, Any]],
     client: Any,
     reading_context: str,
+    force_refresh: bool = False,
 ) -> dict[str, Any] | None:
-    for cached in item.get("analysis_figures") or []:
-        if not isinstance(cached, dict) or cached.get("kind") != FRAMEWORK_FIGURE_KIND:
-            continue
-        filename = str(cached.get("filename") or "")
-        if filename:
-            try:
-                if zotero_figure_path(user_id, str(item["item_key"]), filename).is_file():
-                    return cached
-            except ReaderError:
+    if not force_refresh:
+        for cached in item.get("analysis_figures") or []:
+            if not isinstance(cached, dict) or cached.get("kind") != FRAMEWORK_FIGURE_KIND:
                 continue
+            filename = str(cached.get("filename") or "")
+            if filename:
+                try:
+                    if zotero_figure_path(user_id, str(item["item_key"]), filename).is_file():
+                        return cached
+                except ReaderError:
+                    continue
 
     raw = _raw_data(item)
     arxiv_values: list[object] = [item.get("doi"), item.get("url"), raw.get("extra"), raw.get("url")]

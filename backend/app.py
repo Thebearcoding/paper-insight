@@ -179,7 +179,7 @@ from database import (
 from chat import ChatSession
 from background_tasks import BackgroundAnalyzer
 from markdown_utils import normalize_llm_markdown, normalize_zotero_report
-from prompt import PAPER_ANALYSIS_PROMPT, build_open_in_ai_prompt
+from prompt import build_open_in_ai_prompt, build_zotero_analysis_prompt
 from paper_figures import (
     extract_and_save_zotero_framework_figure,
     zotero_figure_path,
@@ -1430,6 +1430,8 @@ async def extract_zotero_framework_figure(
     user_id: str,
     item: dict,
     reading_context: str,
+    *,
+    force_refresh: bool = False,
 ) -> dict | None:
     connection = await asyncio.to_thread(get_zotero_connection, user_id, True)
     if not connection:
@@ -1443,6 +1445,7 @@ async def extract_zotero_framework_figure(
         children=item.get("children") or [],
         client=client,
         reading_context=reading_context,
+        force_refresh=force_refresh,
     )
 
 
@@ -1931,12 +1934,14 @@ async def analyze_my_zotero_item(
                 "data": json.dumps(analysis_metadata, ensure_ascii=False),
             }
             analysis_figures = list(item.get("analysis_figures") or [])
+            framework_figure = None
             yield {"event": "status", "data": "正在识别并提取论文框架图..."}
             try:
                 framework_figure = await extract_zotero_framework_figure(
                     user_id,
                     item,
                     context,
+                    force_refresh=reanalyze,
                 )
                 if framework_figure:
                     analysis_figures = [framework_figure]
@@ -1952,11 +1957,27 @@ async def analyze_my_zotero_item(
             except Exception as exc:
                 logger.info("Unable to extract Zotero framework figure %s: %s", item_key, exc)
                 yield {"event": "status", "data": "框架图提取失败，将继续生成文字报告"}
-            yield {"event": "status", "data": "正在按原项目提示词分析论文..."}
+            prompt_figure = framework_figure or next(
+                (
+                    figure
+                    for figure in analysis_figures
+                    if isinstance(figure, dict) and figure.get("kind") == "framework"
+                ),
+                None,
+            )
+            analysis_instruction = build_zotero_analysis_prompt(prompt_figure)
+            yield {
+                "event": "status",
+                "data": (
+                    "正在按三问提示词结合架构图分析论文..."
+                    if prompt_figure
+                    else "正在按三问提示词分析论文..."
+                ),
+            }
             chunks: list[str] = []
             async for stream_chunk in selected_llm.get_response_stream_events(
                 context,
-                _analysis_instruction=PAPER_ANALYSIS_PROMPT,
+                _analysis_instruction=analysis_instruction,
                 _usage_context="zotero_analysis_stream",
             ):
                 if stream_chunk.kind == "reasoning":
