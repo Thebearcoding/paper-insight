@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import quote
@@ -36,6 +38,34 @@ def _json(response: requests.Response) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"expected JSON object from {response.url}")
     return payload
+
+
+def _create_trusted_session(session: requests.Session, user_id: str) -> None:
+    """Create a short-lived server-side session without changing user credentials."""
+    backend_dir = Path(__file__).resolve().parents[1] / "backend"
+    backend_path = str(backend_dir)
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+
+    from auth import generate_session_token, hash_session_token
+    from config import settings
+    from database import create_user_session, get_user_by_id, revoke_session
+
+    user = get_user_by_id(user_id)
+    if not user or not user.get("is_active"):
+        raise RuntimeError(f"active Paper Insight user {user_id!r} was not found")
+
+    token = generate_session_token()
+    token_hash = hash_session_token(token)
+    create_user_session(
+        user_id,
+        token_hash,
+        datetime.now(timezone.utc) + timedelta(hours=1),
+        "paper-insight-batch-reanalysis/1.0",
+        "127.0.0.1",
+    )
+    session.cookies.set(settings.auth.session_cookie_name, token)
+    atexit.register(revoke_session, token_hash)
 
 
 def _sse_events(response: requests.Response) -> Iterator[tuple[str, str]]:
@@ -138,7 +168,12 @@ def _analyze_item(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://paper.athebear.me")
-    parser.add_argument("--credentials-file", type=Path, required=True)
+    auth_group = parser.add_mutually_exclusive_group(required=True)
+    auth_group.add_argument("--credentials-file", type=Path)
+    auth_group.add_argument(
+        "--trusted-user-id",
+        help="Create a temporary internal session for this user; intended for the app container only.",
+    )
     parser.add_argument("--collection", default="ZSAD")
     parser.add_argument("--provider-key", default="sub2api")
     parser.add_argument("--model", default="claude-opus-5")
@@ -154,17 +189,21 @@ def main() -> int:
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
-    credentials = _credential_values(args.credentials_file, "Admin email", "Admin password")
-    email = credentials["Admin email"]
-    password = credentials["Admin password"]
     session = requests.Session()
     session.headers.update({"Accept": "application/json", "User-Agent": "paper-insight-batch-reanalysis/1.0"})
-    login = session.post(
-        f"{base_url}/auth/login",
-        json={"email": email, "password": password},
-        timeout=30,
-    )
-    login.raise_for_status()
+    if args.trusted_user_id:
+        _create_trusted_session(session, args.trusted_user_id)
+    else:
+        credentials = _credential_values(args.credentials_file, "Admin email", "Admin password")
+        login = session.post(
+            f"{base_url}/auth/login",
+            json={
+                "email": credentials["Admin email"],
+                "password": credentials["Admin password"],
+            },
+            timeout=30,
+        )
+        login.raise_for_status()
 
     collections = _json(session.get(f"{base_url}/me/zotero/collections", timeout=30)).get("collections") or []
     collection = next((entry for entry in collections if entry.get("name") == args.collection), None)
