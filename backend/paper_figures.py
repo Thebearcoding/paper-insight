@@ -33,8 +33,8 @@ PDF_FIGURE_TIMEOUT_SECONDS = 60
 FRAMEWORK_FIGURE_KIND = "framework"
 CAPTION_LABEL_PATTERN = re.compile(r"(?i)\b(?:figure|fig\.)\s*([A-Z]?\d+[A-Za-z]?)")
 POSITIVE_CAPTION_TERMS: tuple[tuple[re.Pattern[str], int], ...] = (
-    (re.compile(r"(?i)\b(?:framework|architecture)\b|框架|架构"), 16),
-    (re.compile(r"(?i)\b(?:pipeline|workflow|overview|schematic)\b|流程|概览|示意"), 12),
+    (re.compile(r"(?i)\b(?:frameworks?|architectures?)\b|框架|架构"), 16),
+    (re.compile(r"(?i)\b(?:pipelines?|workflows?|overviews?|schematics?)\b|流程|概览|示意"), 12),
     (re.compile(r"(?i)\b(?:two-stage|multi-stage|end-to-end)\b|两阶段|多阶段|端到端"), 8),
     (re.compile(r"(?i)\b(?:proposed|our)\s+(?:method|model|approach|system|network)\b"), 7),
     (re.compile(r"(?i)\b(?:method|model|approach|system|network)\b|方法|模型|系统|网络"), 3),

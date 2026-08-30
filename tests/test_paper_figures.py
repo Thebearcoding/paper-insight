@@ -31,6 +31,14 @@ def test_framework_caption_score_prefers_pipeline_over_visualization():
     assert pipeline > visualization
 
 
+def test_framework_caption_score_accepts_plural_workflows():
+    score = paper_figures.framework_caption_score(
+        "Figure 4: Workflows of WinCLIP and WinCLIP+ for zero-shot anomaly detection."
+    )
+
+    assert score > 0
+
+
 def test_extract_arxiv_framework_figure_selects_method_pipeline(monkeypatch):
     html = b"""
     <article class="ltx_document">
