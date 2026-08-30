@@ -124,7 +124,7 @@ def _normalize_markdown_line(line: str) -> str:
     if re.match(r"^[ \t]{0,3}#{1,6}[ \t]*$", line):
         return ""
 
-    line = re.sub(r"^([ \t]{0,3}[-*+])(\S)", r"\1 \2", line)
+    line = re.sub(r"^([ \t]{0,3}(?:[-+]|\*(?!\*)))(\S)", r"\1 \2", line)
     return re.sub(r"^([ \t]{0,3}\d+[.)、])(\S)", r"\1 \2", line)
 
 

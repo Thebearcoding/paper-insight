@@ -27,6 +27,12 @@ def test_normalize_llm_markdown_keeps_code_blocks_literal():
     assert normalize_llm_markdown(content) == content
 
 
+def test_normalize_llm_markdown_keeps_leading_bold_marker():
+    content = "**架构图阅读**：Figure 4 展示完整工作流。"
+
+    assert normalize_llm_markdown(content, analysis_mode=True) == content
+
+
 def test_normalize_llm_markdown_splits_inline_heading_fragments():
     normalized = normalize_llm_markdown(
         "开源代码仓库链接：https://github.com/lasr-spelling/sae-spelling # 问题1：论文要解决什么任务？",
