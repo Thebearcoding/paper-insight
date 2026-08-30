@@ -653,6 +653,13 @@ def get_item_reading_context(
             or str(child.get("filename") or "").lower().endswith(".pdf")
         )
     ]
+    primary_attachments = [
+        attachment
+        for attachment in attachments
+        if ".compare." not in str(attachment.get("filename") or "").casefold()
+    ]
+    if primary_attachments:
+        attachments = primary_attachments
     errors: list[str] = []
     if not attachments:
         errors.append("该条目没有可用的 Zotero PDF 附件")

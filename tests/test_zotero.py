@@ -118,6 +118,52 @@ def test_get_item_reading_context_prefers_zotero_indexed_fulltext(monkeypatch, t
     assert (tmp_path / "user-1" / "PDF1.txt").exists()
 
 
+def test_get_item_reading_context_skips_compare_pdf_when_primary_exists(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(zotero, "_cache_dir", lambda: tmp_path)
+
+    class FakeClient:
+        def fetch_fulltext(self, zotero_user_id: int, attachment_key: str) -> str:
+            assert zotero_user_id == 123
+            assert attachment_key == "PRIMARY"
+            return "The primary paper body."
+
+        def download_attachment(self, zotero_user_id: int, attachment_key: str) -> bytes:
+            raise AssertionError("indexed primary full text should avoid attachment download")
+
+    context, source, warning = zotero.get_item_reading_context(
+        user_id="user-1",
+        zotero_user_id=123,
+        item={
+            "item_key": "PAPER1",
+            "item_type": "journalArticle",
+            "title": "A Paper",
+            "creators": [],
+            "tags": [],
+        },
+        children=[
+            {
+                "item_key": "COMPARE",
+                "item_version": 1,
+                "item_type": "attachment",
+                "content_type": "application/pdf",
+                "filename": "paper.compare.pdf",
+            },
+            {
+                "item_key": "PRIMARY",
+                "item_version": 1,
+                "item_type": "attachment",
+                "content_type": "application/pdf",
+                "filename": "paper.pdf",
+            },
+        ],
+        client=FakeClient(),
+    )
+
+    assert source == "zotero-fulltext"
+    assert warning is None
+    assert "The primary paper body." in context
+
+
 def test_build_metadata_context_includes_user_notes_and_annotations():
     context = zotero.build_metadata_context(
         {
