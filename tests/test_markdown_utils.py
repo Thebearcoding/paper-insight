@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from markdown_utils import (
     normalize_llm_markdown,
     normalize_zotero_report,
+    zotero_report_completion_error,
 )
 
 
@@ -92,3 +93,39 @@ def test_normalize_zotero_report_repairs_section_hierarchy():
     assert "## 1. Summary" in normalized
     assert "## 2. Background" in normalized
     assert "### 3.1 Adapter" in normalized
+
+
+def test_zotero_report_completion_accepts_complete_framework_report():
+    report = "\n\n".join(
+        [
+            "## 1. 论文解决的任务\n完整任务。",
+            "## 2. 任务评估指标\n完整指标。",
+            (
+                "## 3. 方法提升指标的本质原因\n"
+                "**架构图阅读**：按照输入 → 模块 → 输出解释。\n"
+                "- **输入**：图像。\n"
+                "- **输出**：异常图。\n"
+                "以上是完整总结。"
+            ),
+        ]
+    )
+
+    assert zotero_report_completion_error(report, require_framework_figure=True) is None
+
+
+def test_zotero_report_completion_rejects_truncated_framework_report():
+    report = "\n\n".join(
+        [
+            "## 1. 论文解决的任务\n完整任务。",
+            "## 2. 任务评估指标\n完整指标。",
+            (
+                "## 3. 方法提升指标的本质原因\n"
+                "**架构图阅读**：按照输入 → 模块 → 输出解释。\n"
+                "- **输入**：图像送入冻结的 ViT 中"
+            ),
+        ]
+    )
+
+    assert "输入到输出" in (
+        zotero_report_completion_error(report, require_framework_figure=True) or ""
+    )

@@ -178,7 +178,11 @@ from database import (
 )
 from chat import ChatSession
 from background_tasks import BackgroundAnalyzer
-from markdown_utils import normalize_llm_markdown, normalize_zotero_report
+from markdown_utils import (
+    normalize_llm_markdown,
+    normalize_zotero_report,
+    zotero_report_completion_error,
+)
 from prompt import build_open_in_ai_prompt, build_zotero_analysis_prompt
 from paper_figures import (
     extract_and_save_zotero_framework_figure,
@@ -1936,7 +1940,7 @@ async def analyze_my_zotero_item(
                     context,
                     max_tokens=glm_context_limit,
                 )
-                analysis_stream_options["max_tokens"] = 12_288
+                analysis_stream_options["max_tokens"] = 16_384
                 if analysis_context != context:
                     proxy_warning = "GLM 长文输入已保留 PDF 核心主文，并省略超长参考文献或补充材料"
                     warning = f"{warning}；{proxy_warning}" if warning else proxy_warning
@@ -2012,6 +2016,16 @@ async def analyze_my_zotero_item(
                 yield {
                     "event": "error",
                     "data": "论文分析没有返回内容，已保留原报告",
+                }
+                return
+            completion_error = zotero_report_completion_error(
+                normalized,
+                require_framework_figure=bool(prompt_figure),
+            )
+            if completion_error:
+                yield {
+                    "event": "error",
+                    "data": f"上游返回的论文分析不完整（{completion_error}），已保留原报告，请重试",
                 }
                 return
             analysis_enrichment = dict(item.get("analysis_enrichment") or {})

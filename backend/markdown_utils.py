@@ -208,3 +208,41 @@ def normalize_zotero_report(content: str | None) -> str:
                 line = f"## {section.group(1).strip()}"
         lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip()
+
+
+ZOTERO_REPORT_HEADINGS = (
+    "## 1. 论文解决的任务",
+    "## 2. 任务评估指标",
+    "## 3. 方法提升指标的本质原因",
+)
+
+
+def zotero_report_completion_error(
+    content: str | None,
+    *,
+    require_framework_figure: bool = False,
+) -> str | None:
+    report = str(content or "").strip()
+    if not report:
+        return "报告为空"
+
+    missing_headings = [heading for heading in ZOTERO_REPORT_HEADINGS if heading not in report]
+    if missing_headings:
+        return "缺少固定章节：" + "、".join(missing_headings)
+
+    section_three = report.partition(ZOTERO_REPORT_HEADINGS[-1])[2]
+    if require_framework_figure:
+        if "架构图阅读" not in section_three:
+            return "缺少架构图阅读"
+        if section_three.count("输入") < 2 or section_three.count("输出") < 2:
+            return "架构图阅读没有完整覆盖输入到输出"
+
+    if report.count("**") % 2:
+        return "存在未闭合的加粗标记"
+    if report.count("```") % 2:
+        return "存在未闭合的代码块"
+    if report.count("$$") % 2:
+        return "存在未闭合的块级公式"
+    if not re.search(r"[。！？.!?）】」』]$", report):
+        return "报告停在半句话或未完成的列表项"
+    return None

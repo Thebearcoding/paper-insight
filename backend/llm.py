@@ -30,6 +30,10 @@ class LLMStreamChunk:
     content: str
 
 
+class LLMOutputTruncatedError(RuntimeError):
+    """Raised when the provider ends a response at its output-token limit."""
+
+
 @dataclass(frozen=True)
 class LLMUsageTokens:
     input_tokens: int
@@ -634,6 +638,7 @@ class ManagedLLM:
         payload = _claude_code_payload(config["model_name"], messages, params)
         timeout = httpx.Timeout(180.0, connect=20.0)
         usage: dict[str, Any] = {}
+        stop_reason: str | None = None
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async with client.stream(
@@ -671,6 +676,12 @@ class ManagedLLM:
                         error = event.get("error") or {}
                         raise RuntimeError(str(error.get("message") or "LLM upstream stream error"))
 
+                    if event_type == "message_delta":
+                        delta = event.get("delta") or {}
+                        if delta.get("stop_reason"):
+                            stop_reason = str(delta["stop_reason"])
+                        continue
+
                     if event_type == "content_block_start":
                         block = event.get("content_block") or {}
                         if block.get("type") == "text" and block.get("text"):
@@ -696,6 +707,8 @@ class ManagedLLM:
             model_name=config["model_name"],
             request_type=request_type,
         )
+        if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+            raise LLMOutputTruncatedError("上游模型达到输出长度上限，未保存不完整的回答")
 
     def _require_config(self) -> dict:
         config = self._get_config()

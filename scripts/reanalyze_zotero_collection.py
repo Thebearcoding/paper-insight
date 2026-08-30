@@ -15,6 +15,12 @@ from urllib.parse import quote
 
 import requests
 
+BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from markdown_utils import zotero_report_completion_error
+
 
 def _credential_values(path: Path, *labels: str) -> dict[str, str]:
     """Read credentials once so non-seekable sources such as /dev/stdin work."""
@@ -156,6 +162,12 @@ def _analyze_item(
             timeout=30,
         )
     )
+    completion_error = zotero_report_completion_error(
+        refreshed.get("llm_response"),
+        require_framework_figure=bool(refreshed.get("analysis_figures")),
+    )
+    if completion_error:
+        errors.append(f"saved report is incomplete: {completion_error}")
     return {
         "item_key": item_key,
         "title": item.get("title") or "(untitled)",

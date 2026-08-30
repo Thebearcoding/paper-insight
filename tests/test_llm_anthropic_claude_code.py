@@ -83,7 +83,7 @@ async def test_managed_llm_claude_code_transport_reads_anthropic_sse(monkeypatch
             yield 'data: {"type":"message_start","message":{"usage":{"input_tokens":12,"output_tokens":0}}}'
             yield 'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"check"}}'
             yield 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"OK"}}'
-            yield 'data: {"type":"message_delta","usage":{"output_tokens":2}}'
+            yield 'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}'
             yield 'data: {"type":"message_stop"}'
 
     class FakeClient:
@@ -133,3 +133,48 @@ async def test_managed_llm_claude_code_transport_reads_anthropic_sse(monkeypatch
     assert captured["headers"]["user-agent"].startswith("claude-cli/")
     assert captured["payload"]["model"] == "claude-opus-5"
     assert captured["payload"]["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_managed_llm_claude_code_transport_rejects_max_token_stop(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}'
+            yield 'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":256}}'
+            yield 'data: {"type":"message_stop"}'
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, *, headers, json):
+            return FakeResponse()
+
+    config = {
+        "id": "provider-id",
+        "provider_key": "sub2api",
+        "name": "Sub2API",
+        "base_url": "https://sub2api.example/v1",
+        "api_key": "secret-client-key",
+        "model_name": "glm-5.3",
+        "default_parameters": {"_api_protocol": llm_module.ANTHROPIC_CLAUDE_CODE_PROTOCOL},
+    }
+    managed = llm_module.ManagedLLM()
+    monkeypatch.setattr(managed, "_get_active_config", lambda: config)
+    monkeypatch.setattr(llm_module.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(llm_module, "_record_llm_usage", lambda *args, **kwargs: None)
+
+    with pytest.raises(llm_module.LLMOutputTruncatedError):
+        async for _ in managed.get_response_stream_events("analyze"):
+            pass
