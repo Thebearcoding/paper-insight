@@ -29,13 +29,22 @@ def test_zotero_analysis_prompt_includes_grounded_framework_figure():
             "caption": "Overview of the two-stage anomaly-aware training pipeline.",
             "page_number": 5,
             "source": "arxiv-html",
-        }
+        },
+        {
+            "label": "Table 1",
+            "caption": "Comparison with state-of-the-art methods using AUROC and AP.",
+            "page_number": 6,
+            "source": "pdf-caption-crop",
+        },
     )
 
     assert "Figure 3" in prompt
     assert "two-stage anomaly-aware training pipeline" in prompt
     assert "PDF 第 5 页" in prompt
     assert "输入 → 关键模块/信息流 → 输出" in prompt
+    assert "Table 1" in prompt
+    assert "PDF 第 6 页" in prompt
+    assert "不能仅凭表注猜测" in prompt
 
 
 def test_zotero_analysis_prompt_does_not_invent_missing_figure():
@@ -43,3 +52,4 @@ def test_zotero_analysis_prompt_does_not_invent_missing_figure():
 
     assert "没有提供可确认的论文架构主图信息" in prompt
     assert "不要编造图号" in prompt
+    assert "没有识别到可靠的 SOTA 主结果表" in prompt

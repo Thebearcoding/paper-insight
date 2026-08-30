@@ -185,7 +185,7 @@ from markdown_utils import (
 )
 from prompt import build_open_in_ai_prompt, build_zotero_analysis_prompt
 from paper_figures import (
-    extract_and_save_zotero_framework_figure,
+    extract_and_save_zotero_analysis_assets,
     zotero_figure_path,
 )
 from zotero_enrichment import (
@@ -1431,19 +1431,19 @@ async def load_zotero_reading_context(user_id: str, item: dict) -> tuple[str, st
     )
 
 
-async def extract_zotero_framework_figure(
+async def extract_zotero_analysis_assets(
     user_id: str,
     item: dict,
     reading_context: str,
     *,
     force_refresh: bool = False,
-) -> dict | None:
+) -> list[dict]:
     connection = await asyncio.to_thread(get_zotero_connection, user_id, True)
     if not connection:
         raise HTTPException(status_code=404, detail="请先连接 Zotero 文库")
     client = ZoteroClient(connection["api_key"])
     return await asyncio.to_thread(
-        extract_and_save_zotero_framework_figure,
+        extract_and_save_zotero_analysis_assets,
         user_id=user_id,
         zotero_user_id=int(connection["zotero_user_id"]),
         item=item,
@@ -1875,10 +1875,10 @@ async def get_my_zotero_item_figure(
             None,
         )
         if not figure or not figure.get("filename"):
-            raise HTTPException(status_code=404, detail="论文框架图不存在")
+            raise HTTPException(status_code=404, detail="论文图表不存在")
         path = zotero_figure_path(user["id"], item_key, str(figure["filename"]))
         if not path.is_file():
-            raise HTTPException(status_code=404, detail="论文框架图文件不存在")
+            raise HTTPException(status_code=404, detail="论文图表文件不存在")
         return FileResponse(
             path,
             media_type=str(figure.get("media_type") or "image/png"),
@@ -1959,17 +1959,16 @@ async def analyze_my_zotero_item(
                 "data": json.dumps(analysis_metadata, ensure_ascii=False),
             }
             analysis_figures = list(item.get("analysis_figures") or [])
-            framework_figure = None
-            yield {"event": "status", "data": "正在识别并提取论文框架图..."}
+            yield {"event": "status", "data": "正在识别论文架构图与 SOTA 主结果表..."}
             try:
-                framework_figure = await extract_zotero_framework_figure(
+                extracted_assets = await extract_zotero_analysis_assets(
                     user_id,
                     item,
                     context,
                     force_refresh=reanalyze,
                 )
-                if framework_figure:
-                    analysis_figures = [framework_figure]
+                if extracted_assets:
+                    analysis_figures = extracted_assets
                     yield {
                         "event": "figures",
                         "data": json.dumps(
@@ -1977,12 +1976,20 @@ async def analyze_my_zotero_item(
                             ensure_ascii=False,
                         ),
                     }
-                else:
-                    yield {"event": "status", "data": "未识别到明确的论文框架图，将继续生成报告"}
+                if not any(
+                    isinstance(entry, dict) and entry.get("kind") == "framework"
+                    for entry in analysis_figures
+                ):
+                    yield {"event": "status", "data": "未识别到明确的论文架构图，将继续生成报告"}
+                if not any(
+                    isinstance(entry, dict) and entry.get("kind") == "results_table"
+                    for entry in analysis_figures
+                ):
+                    yield {"event": "status", "data": "未识别到可靠的 SOTA 主结果表，禁止猜测实验数值"}
             except Exception as exc:
-                logger.info("Unable to extract Zotero framework figure %s: %s", item_key, exc)
-                yield {"event": "status", "data": "框架图提取失败，将继续生成文字报告"}
-            prompt_figure = framework_figure or next(
+                logger.info("Unable to extract Zotero analysis assets %s: %s", item_key, exc)
+                yield {"event": "status", "data": "论文图表提取失败，将继续生成文字报告"}
+            prompt_figure = next(
                 (
                     figure
                     for figure in analysis_figures
@@ -1990,12 +1997,23 @@ async def analyze_my_zotero_item(
                 ),
                 None,
             )
-            analysis_instruction = build_zotero_analysis_prompt(prompt_figure)
+            prompt_results_table = next(
+                (
+                    figure
+                    for figure in analysis_figures
+                    if isinstance(figure, dict) and figure.get("kind") == "results_table"
+                ),
+                None,
+            )
+            analysis_instruction = build_zotero_analysis_prompt(
+                prompt_figure,
+                prompt_results_table,
+            )
             yield {
                 "event": "status",
                 "data": (
-                    "正在按三问提示词结合架构图分析论文..."
-                    if prompt_figure
+                    "正在按三问提示词结合论文图表分析论文..."
+                    if prompt_figure or prompt_results_table
                     else "正在按三问提示词分析论文..."
                 ),
             }

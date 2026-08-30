@@ -181,7 +181,7 @@ export interface ZoteroCreator {
 
 export interface ZoteroAnalysisFigure {
   id: string;
-  kind: 'framework' | string;
+  kind: 'framework' | 'results_table' | string;
   label: string;
   caption: string;
   source: string;

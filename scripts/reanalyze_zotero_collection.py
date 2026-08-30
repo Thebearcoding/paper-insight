@@ -162,9 +162,16 @@ def _analyze_item(
             timeout=30,
         )
     )
+    refreshed_figures = [
+        entry
+        for entry in refreshed.get("analysis_figures") or []
+        if isinstance(entry, dict)
+    ]
     completion_error = zotero_report_completion_error(
         refreshed.get("llm_response"),
-        require_framework_figure=bool(refreshed.get("analysis_figures")),
+        require_framework_figure=any(
+            entry.get("kind") == "framework" for entry in refreshed_figures
+        ),
     )
     if completion_error:
         errors.append(f"saved report is incomplete: {completion_error}")
@@ -178,7 +185,9 @@ def _analyze_item(
         "analysis_warning": refreshed.get("analysis_warning"),
         "analysis_provider_name": refreshed.get("analysis_provider_name"),
         "analysis_model_name": refreshed.get("analysis_model_name"),
-        "figure_count": len(refreshed.get("analysis_figures") or []),
+        "figure_count": len(refreshed_figures),
+        "framework_count": sum(entry.get("kind") == "framework" for entry in refreshed_figures),
+        "results_table_count": sum(entry.get("kind") == "results_table" for entry in refreshed_figures),
         "figures_seen_during_stream": figures_seen,
     }
 
@@ -292,7 +301,8 @@ def main() -> int:
         "model": args.model,
         "total": len(results),
         "succeeded": sum(bool(result.get("ok")) for result in results),
-        "with_framework_figure": sum(int(result.get("figure_count") or 0) > 0 for result in results),
+        "with_framework_figure": sum(int(result.get("framework_count") or 0) > 0 for result in results),
+        "with_results_table": sum(int(result.get("results_table_count") or 0) > 0 for result in results),
         "results": results,
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)

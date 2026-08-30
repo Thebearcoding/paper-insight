@@ -39,6 +39,26 @@ def test_framework_caption_score_accepts_plural_workflows():
     assert score > 0
 
 
+def test_results_table_caption_score_prefers_sota_over_ablation():
+    sota = paper_figures.results_table_caption_score(
+        "Table 1. Comparison with state-of-the-art methods on MVTec AD using AUROC and AP."
+    )
+    ablation = paper_figures.results_table_caption_score(
+        "Table 4. Ablation study on the number of layers using AUROC and AP."
+    )
+
+    assert sota > 0
+    assert sota > ablation
+
+
+def test_results_table_caption_score_rejects_body_reference():
+    score = paper_figures.results_table_caption_score(
+        "We compare against five baselines, and Table 1 reports the state-of-the-art results."
+    )
+
+    assert score < 0
+
+
 def test_extract_arxiv_framework_figure_selects_method_pipeline(monkeypatch):
     html = b"""
     <article class="ltx_document">
@@ -89,6 +109,40 @@ def test_extract_framework_figure_from_pdf_uses_caption_page():
     assert asset.page_number == 1
     assert asset.image_bytes.startswith(b"\x89PNG")
     assert asset.width and asset.height
+
+
+def test_extract_results_table_from_pdf_crops_caption_and_grid():
+    document = pymupdf.open()
+    page = document.new_page(width=600, height=800)
+    page.insert_textbox(
+        pymupdf.Rect(50, 70, 550, 115),
+        "Table 1. Comparison with state-of-the-art methods on MVTec AD using AUROC and AP.",
+        fontsize=11,
+    )
+    for x in (50, 220, 385, 550):
+        page.draw_line((x, 130), (x, 300), color=(0, 0, 0))
+    for y in (130, 175, 220, 265, 300):
+        page.draw_line((50, y), (550, y), color=(0, 0, 0))
+    page.insert_text((65, 160), "Method", fontsize=10)
+    page.insert_text((235, 160), "AUROC", fontsize=10)
+    page.insert_text((400, 160), "AP", fontsize=10)
+    page.insert_text((65, 205), "Baseline", fontsize=10)
+    page.insert_text((235, 205), "90.0", fontsize=10)
+    page.insert_text((400, 205), "88.0", fontsize=10)
+    page.insert_text((65, 250), "Ours", fontsize=10)
+    page.insert_text((235, 250), "95.0", fontsize=10)
+    page.insert_text((400, 250), "93.0", fontsize=10)
+    pdf_bytes = document.tobytes()
+    document.close()
+
+    asset = paper_figures.extract_results_table_from_pdf(pdf_bytes, "https://example.org/paper.pdf")
+
+    assert asset is not None
+    assert asset.label == "Table 1"
+    assert asset.page_number == 1
+    assert asset.image_bytes.startswith(b"\x89PNG")
+    assert asset.width and asset.width > 900
+    assert asset.height and asset.height < 550
 
 
 def test_zotero_figure_path_rejects_traversal(tmp_path, monkeypatch):

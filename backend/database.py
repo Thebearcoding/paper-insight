@@ -3669,6 +3669,30 @@ def update_zotero_analysis(
     _run_with_retry(operation, f"update_zotero_analysis:{user_id}:{item_key}")
 
 
+def update_zotero_analysis_figures(
+    user_id: str,
+    item_key: str,
+    analysis_figures: list[dict],
+) -> None:
+    if not DATABASE_URL:
+        return
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE zotero_items
+                    SET analysis_figures = %s, updated_at = NOW()
+                    WHERE user_id = %s AND item_key = %s
+                    """,
+                    (Jsonb(analysis_figures), user_id, item_key),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"update_zotero_analysis_figures:{user_id}:{item_key}")
+
+
 def update_zotero_enrichment_writeback(
     user_id: str,
     item_key: str,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Cpu, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles, Tags, UploadCloud } from 'lucide-react';
+import { ArrowLeft, Cpu, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles, Table2, Tags, UploadCloud } from 'lucide-react';
 
 import { ChatPanel } from '@/components/chat-panel';
 import { ReasoningStreamPanel } from '@/components/reasoning-stream-panel';
@@ -25,6 +25,7 @@ import {
   writebackZoteroEnrichment,
   zoteroItemApiPath,
 } from '@/lib/api';
+import { splitAnalysisAtMethodSection } from '@/lib/analysis-layout';
 import { useAuth } from '@/lib/auth';
 import { navigate } from '@/lib/router';
 import type {
@@ -102,6 +103,40 @@ function sourceLabel(source?: string | null): string {
 function providerModelLabel(provider: SelectableLlmProvider, modelName: string): string {
   const model = provider.models.find((entry) => entry.model_name === modelName);
   return model?.display_name || modelName;
+}
+
+function AnalysisAsset({ figure, itemTitle }: { figure: ZoteroAnalysisFigure; itemTitle: string }) {
+  const isResultsTable = figure.kind === 'results_table';
+  const Icon = isResultsTable ? Table2 : Images;
+  const title = isResultsTable ? 'SOTA 对比表' : '论文架构图';
+  return (
+    <figure className="overflow-hidden rounded-lg border border-[#e8edf4] bg-[#f8fafc]">
+      <div className="flex items-center gap-2 border-b border-[#e8edf4] bg-white px-4 py-3 text-sm font-medium text-[#334155]">
+        <Icon className="h-4 w-4 text-[#ff9900]" />
+        {title} · {figure.label}
+      </div>
+      <a href={figure.url} target="_blank" rel="noreferrer" className="block bg-white p-3 sm:p-5">
+        <img
+          src={figure.url}
+          alt={figure.caption || `${itemTitle}${title}`}
+          className="mx-auto max-h-[48rem] w-auto max-w-full rounded-md object-contain"
+          loading="lazy"
+        />
+      </a>
+      <figcaption className="space-y-2 px-4 py-3 text-sm leading-6 text-[#64748b]">
+        <p>{figure.caption}</p>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#94a3b8]">
+          <span>来源：{figure.source}</span>
+          {figure.page_number ? <span>PDF 第 {figure.page_number} 页</span> : null}
+          {figure.source_url ? (
+            <a href={figure.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+              查看原文 <ExternalLink className="ml-1 inline h-3 w-3" />
+            </a>
+          ) : null}
+        </div>
+      </figcaption>
+    </figure>
+  );
 }
 
 export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
@@ -394,6 +429,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   const chatModelLabel = chatModelSelection && chatModelProvider
     ? `${chatModelProvider.name} / ${providerModelLabel(chatModelProvider, chatModelSelection.model_name)}`
     : undefined;
+  const analysisSplit = splitAnalysisAtMethodSection(analysis);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -508,40 +544,28 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
         ) : (
           <div className="mt-6 space-y-4">
             <ReasoningStreamPanel reasoning={analyzing ? reasoning : ''} />
-            {analysisFigures.map((figure) => (
-              <figure
-                key={figure.id}
-                className="overflow-hidden rounded-2xl border border-[#e8edf4] bg-[#f8fafc]"
-              >
-                <div className="flex items-center gap-2 border-b border-[#e8edf4] bg-white px-4 py-3 text-sm font-medium text-[#334155]">
-                  <Images className="h-4 w-4 text-[#ff9900]" />
-                  论文框架图 · {figure.label}
-                </div>
-                <a href={figure.url} target="_blank" rel="noreferrer" className="block bg-white p-3 sm:p-5">
-                  <img
-                    src={figure.url}
-                    alt={figure.caption || `${item.title || '论文'}框架图`}
-                    className="mx-auto max-h-[42rem] w-auto max-w-full rounded-lg object-contain"
-                    loading="lazy"
-                  />
-                </a>
-                <figcaption className="space-y-2 px-4 py-3 text-sm leading-6 text-[#64748b]">
-                  <p>{figure.caption}</p>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#94a3b8]">
-                    <span>来源：{figure.source}</span>
-                    {figure.page_number ? <span>PDF 第 {figure.page_number} 页</span> : null}
-                    {figure.source_url ? (
-                      <a href={figure.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
-                        查看原图 <ExternalLink className="ml-1 inline h-3 w-3" />
-                      </a>
-                    ) : null}
-                  </div>
-                </figcaption>
-              </figure>
-            ))}
             {analysis ? (
               <RichContent
-                content={analysis}
+                content={analysisSplit.beforeAssets}
+                analysisMode
+                isStreaming={analyzing}
+                className="markdown-body analysis-markdown text-base leading-7 text-[#334155]"
+              />
+            ) : null}
+            {analysisFigures.length ? (
+              <div className="space-y-4 border-l-2 border-[#fed7aa] pl-3 sm:pl-5">
+                {analysisFigures.map((figure) => (
+                  <AnalysisAsset
+                    key={`${figure.kind}-${figure.id}`}
+                    figure={figure}
+                    itemTitle={item.title || '论文'}
+                  />
+                ))}
+              </div>
+            ) : null}
+            {analysisSplit.afterAssets ? (
+              <RichContent
+                content={analysisSplit.afterAssets}
                 analysisMode
                 isStreaming={analyzing}
                 className="markdown-body analysis-markdown text-base leading-7 text-[#334155]"
