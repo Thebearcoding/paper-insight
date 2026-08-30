@@ -14,12 +14,20 @@ from urllib.parse import quote
 import requests
 
 
-def _credential_value(path: Path, label: str) -> str:
-    prefix = f"{label}: "
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith(prefix):
-            return line.removeprefix(prefix).strip()
-    raise RuntimeError(f"credentials file is missing {label!r}")
+def _credential_values(path: Path, *labels: str) -> dict[str, str]:
+    """Read credentials once so non-seekable sources such as /dev/stdin work."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    values: dict[str, str] = {}
+    for label in labels:
+        prefix = f"{label}: "
+        value = next(
+            (line.removeprefix(prefix).strip() for line in lines if line.startswith(prefix)),
+            "",
+        )
+        if not value:
+            raise RuntimeError(f"credentials file is missing {label!r}")
+        values[label] = value
+    return values
 
 
 def _json(response: requests.Response) -> dict[str, Any]:
@@ -146,8 +154,9 @@ def main() -> int:
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
-    email = _credential_value(args.credentials_file, "Admin email")
-    password = _credential_value(args.credentials_file, "Admin password")
+    credentials = _credential_values(args.credentials_file, "Admin email", "Admin password")
+    email = credentials["Admin email"]
+    password = credentials["Admin password"]
     session = requests.Session()
     session.headers.update({"Accept": "application/json", "User-Agent": "paper-insight-batch-reanalysis/1.0"})
     login = session.post(
