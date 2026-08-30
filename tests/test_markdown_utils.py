@@ -33,6 +33,14 @@ def test_normalize_llm_markdown_keeps_leading_bold_marker():
     assert normalize_llm_markdown(content, analysis_mode=True) == content
 
 
+def test_normalize_llm_markdown_repairs_bold_autolink():
+    content = "代码地址：**https://github.com/7HHHHH/VisualAD**（README）"
+    expected = "代码地址：**<https://github.com/7HHHHH/VisualAD>**（README）"
+
+    assert normalize_llm_markdown(content, analysis_mode=True) == expected
+    assert normalize_llm_markdown(expected, analysis_mode=True) == expected
+
+
 def test_normalize_llm_markdown_splits_inline_heading_fragments():
     normalized = normalize_llm_markdown(
         "开源代码仓库链接：https://github.com/lasr-spelling/sae-spelling # 问题1：论文要解决什么任务？",

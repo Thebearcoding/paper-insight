@@ -316,6 +316,7 @@ function normalizeMarkdownSyntax(content: string, options: MarkdownNormalization
 
   const { masked, segments } = maskCodeSegments(content);
   const lines = masked
+    .replace(/\*\*(https?:\/\/[^\s*<>]+)\*\*/g, '**<$1>**')
     .split('\n')
     .flatMap(expandInlineHeadingLine)
     .map(normalizeMarkdownLine);

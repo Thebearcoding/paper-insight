@@ -70,6 +70,10 @@ def _normalize_same_line_block_math(content: str) -> str:
     return SAME_LINE_BLOCK_MATH_PATTERN.sub(_replace, content)
 
 
+def _normalize_bold_autolinks(content: str) -> str:
+    return re.sub(r"\*\*(https?://[^\s*<>]+)\*\*", r"**<\1>**", content)
+
+
 def _normalize_heading_marker_prefix(line: str) -> str:
     return re.sub(
         r"^([ \t]{0,3})([＃#]{1,6})(?=\s*\S)",
@@ -159,6 +163,7 @@ def normalize_llm_markdown(content: str | None, analysis_mode: bool = False) -> 
         )
     )
 
+    normalized = _normalize_bold_autolinks(normalized)
     lines = [
         _normalize_markdown_line(expanded_line)
         for line in normalized.split("\n")

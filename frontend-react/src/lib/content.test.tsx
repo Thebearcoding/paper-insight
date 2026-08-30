@@ -32,6 +32,14 @@ describe('normalizeMarkdownContent', () => {
     expect(normalizeMarkdownContent(content, { analysisMode: true })).toBe(content);
   });
 
+  it('repairs a bold bare URL so GFM does not consume the closing marker', () => {
+    const content = '代码地址：**https://github.com/7HHHHH/VisualAD**（README）';
+    const expected = '代码地址：**<https://github.com/7HHHHH/VisualAD>**（README）';
+
+    expect(normalizeMarkdownContent(content, { analysisMode: true })).toBe(expected);
+    expect(normalizeMarkdownContent(expected, { analysisMode: true })).toBe(expected);
+  });
+
   it('splits inline heading fragments onto their own line', () => {
     const normalized = normalizeMarkdownContent(
       '开源代码仓库链接：https://github.com/lasr-spelling/sae-spelling # 问题1：论文要解决什么任务？',
@@ -104,6 +112,19 @@ describe('RichContent', () => {
     expect(html).toContain('<strong>');
     expect(html).toContain('（1）');
     expect(html).not.toContain('<ul>');
+    expect(html).not.toContain('**');
+  });
+
+  it('renders a bold bare URL without visible markdown markers', () => {
+    const html = renderToStaticMarkup(
+      <RichContent
+        content={'代码地址：**https://github.com/7HHHHH/VisualAD**（README）'}
+        analysisMode
+        className="markdown-body"
+      />,
+    );
+
+    expect(html).toContain('<strong><a href="https://github.com/7HHHHH/VisualAD"');
     expect(html).not.toContain('**');
   });
 
