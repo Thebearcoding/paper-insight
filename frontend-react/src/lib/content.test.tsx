@@ -26,6 +26,12 @@ describe('normalizeMarkdownContent', () => {
     expect(normalized).toBe("```python\nvalue = '$x$'\n```");
   });
 
+  it('keeps a leading bold marker instead of turning it into a list item', () => {
+    const content = '**手算示例（图像级）**：设 4 张测试图。';
+
+    expect(normalizeMarkdownContent(content, { analysisMode: true })).toBe(content);
+  });
+
   it('splits inline heading fragments onto their own line', () => {
     const normalized = normalizeMarkdownContent(
       '开源代码仓库链接：https://github.com/lasr-spelling/sae-spelling # 问题1：论文要解决什么任务？',
@@ -84,6 +90,21 @@ describe('RichContent', () => {
 
     expect(html).toContain('katex-display');
     expect(html).not.toContain('math-inline');
+  });
+
+  it('renders a leading bold label as strong text instead of a list item', () => {
+    const html = renderToStaticMarkup(
+      <RichContent
+        content={'**（1）$F_1$（取阈值 0.5）**：被判为异常的是 A 和 C。'}
+        analysisMode
+        className="markdown-body"
+      />,
+    );
+
+    expect(html).toContain('<strong>');
+    expect(html).toContain('（1）');
+    expect(html).not.toContain('<ul>');
+    expect(html).not.toContain('**');
   });
 
   it('does not render code blocks as math', () => {

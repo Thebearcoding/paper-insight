@@ -132,7 +132,7 @@ function normalizeMarkdownLine(line: string): string {
   }
 
   return normalizedLine
-    .replace(/^([ \t]{0,3}[-*+])(\S)/, '$1 $2')
+    .replace(/^([ \t]{0,3}(?:[-+]|\*(?!\*)))(\S)/, '$1 $2')
     .replace(/^([ \t]{0,3}\d+[.)、])(\S)/, '$1 $2');
 }
 
