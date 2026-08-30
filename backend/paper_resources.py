@@ -200,6 +200,17 @@ def _openreview_pdf_url(value: str) -> str | None:
     return f"https://openreview.net/pdf?id={quote(paper_id, safe='')}"
 
 
+def _cvf_open_access_pdf_url(value: str) -> str | None:
+    parsed = urlparse(value)
+    if parsed.hostname != "openaccess.thecvf.com":
+        return None
+    match = re.fullmatch(r"(/content/[^/]+)/html/([^/]+)_paper\.html", parsed.path)
+    if not match:
+        return None
+    pdf_path = f"{match.group(1)}/papers/{match.group(2)}_paper.pdf"
+    return parsed._replace(path=pdf_path, params="", query="", fragment="").geturl()
+
+
 def _looks_like_pdf_url(value: str) -> bool:
     parsed = urlparse(value)
     path = parsed.path.casefold().rstrip("/")
@@ -216,6 +227,9 @@ def _canonical_document_candidate(value: str, source: str) -> DocumentCandidate 
     openreview_url = _openreview_pdf_url(text)
     if openreview_url:
         return DocumentCandidate(openreview_url, "openreview")
+    cvf_pdf_url = _cvf_open_access_pdf_url(text)
+    if cvf_pdf_url:
+        return DocumentCandidate(cvf_pdf_url, "cvf-openaccess")
     if _looks_like_pdf_url(text):
         return DocumentCandidate(text, source)
     return None

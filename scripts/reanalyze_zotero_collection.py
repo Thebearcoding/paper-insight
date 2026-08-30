@@ -110,6 +110,7 @@ def _analyze_item(
     provider_id: str,
     model_name: str,
     timeout_seconds: int,
+    context_token_limit: int | None,
 ) -> dict[str, Any]:
     item_key = str(item["item_key"])
     response = session.get(
@@ -118,6 +119,11 @@ def _analyze_item(
             "reanalyze": "true",
             "provider_id": provider_id,
             "model_name": model_name,
+            **(
+                {"context_token_limit": context_token_limit}
+                if context_token_limit is not None
+                else {}
+            ),
         },
         stream=True,
         timeout=(15, timeout_seconds),
@@ -185,6 +191,11 @@ def main() -> int:
     )
     parser.add_argument("--delay-seconds", type=float, default=1.0)
     parser.add_argument("--timeout-seconds", type=int, default=1200)
+    parser.add_argument(
+        "--context-token-limit",
+        type=int,
+        help="Override the GLM analysis context limit for targeted retries.",
+    )
     parser.add_argument("--report", type=Path, default=Path("/tmp/zotero-reanalysis-report.json"))
     args = parser.parse_args()
 
@@ -244,6 +255,7 @@ def main() -> int:
                 provider_id,
                 args.model,
                 max(args.timeout_seconds, 60),
+                args.context_token_limit,
             )
         except Exception as exc:
             result = {

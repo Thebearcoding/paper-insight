@@ -1890,6 +1890,7 @@ async def analyze_my_zotero_item(
     reanalyze: bool = False,
     provider_id: str | None = None,
     model_name: str | None = None,
+    context_token_limit: int | None = None,
     user: dict = Depends(require_current_user),
 ):
     user_id = user["id"]
@@ -1926,7 +1927,15 @@ async def analyze_my_zotero_item(
                 str(selected_config.get("provider_key") or "").casefold() == "sub2api"
                 and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
             ):
-                analysis_context = compact_zotero_analysis_context(context)
+                glm_context_limit = (
+                    min(max(context_token_limit, 2_000), 16_000)
+                    if context_token_limit is not None
+                    else 8_000
+                )
+                analysis_context = compact_zotero_analysis_context(
+                    context,
+                    max_tokens=glm_context_limit,
+                )
                 analysis_stream_options["max_tokens"] = 12_288
                 if analysis_context != context:
                     proxy_warning = "GLM 长文输入已保留 PDF 核心主文，并省略超长参考文献或补充材料"

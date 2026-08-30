@@ -50,6 +50,27 @@ def test_direct_document_candidates_normalizes_arxiv_and_openreview_urls():
     ]
 
 
+def test_direct_document_candidates_converts_cvf_open_access_page_to_pdf():
+    candidates = paper_resources.direct_document_candidates(
+        {
+            "url": (
+                "https://openaccess.thecvf.com/content/ICCV2025/html/"
+                "Gong_FE-CLIP_Frequency_Enhanced_CLIP_Model_ICCV_2025_paper.html"
+            ),
+            "raw": {"data": {}},
+        },
+        [],
+    )
+
+    assert candidates == [
+        paper_resources.DocumentCandidate(
+            "https://openaccess.thecvf.com/content/ICCV2025/papers/"
+            "Gong_FE-CLIP_Frequency_Enhanced_CLIP_Model_ICCV_2025_paper.pdf",
+            "cvf-openaccess",
+        )
+    ]
+
+
 def test_discover_code_repositories_uses_explicit_material_and_normalizes_subpaths():
     repositories = paper_resources.discover_code_repositories(
         {
