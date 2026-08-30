@@ -19,7 +19,7 @@ from paper_resources import (
     extract_pdf_text_bounded,
     resolve_public_document,
 )
-from utils import ReaderError, truncate_content_for_llm
+from utils import ReaderError, _TOKEN_ENCODING, truncate_content_for_llm
 
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,15 @@ PAGE_SIZE = 100
 MAX_RETRIES = 4
 DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "zotero_cache"
 ZOTERO_FULLTEXT_TOKEN_LIMIT = 160_000
-ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT = 16_000
+ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT = 8_000
+EXPERIMENT_SECTION_PATTERN = re.compile(
+    r"(?im)^(?:\d+(?:\.\d+)*[.)]?\s+)?"
+    r"(?:experiments?|experimental (?:setup|results)|evaluation|empirical (?:evaluation|results)|results)"
+    r"\b[^\n]{0,120}$"
+)
+CONCLUSION_SECTION_PATTERN = re.compile(
+    r"(?im)^(?:\d+(?:\.\d+)*[.)]?\s+)?(?:conclusions?|discussion and conclusion)\b[^\n]{0,120}$"
+)
 
 
 class ZoteroError(Exception):
@@ -652,13 +660,59 @@ def compact_zotero_analysis_context(
     metadata_limit = min(3_000, max(max_tokens // 5, 500))
     fulltext_limit = max(max_tokens - metadata_limit - 500, 1_000)
     compact_metadata = truncate_content_for_llm(metadata.strip(), max_tokens=metadata_limit)
-    compact_fulltext = truncate_content_for_llm(fulltext.strip(), max_tokens=fulltext_limit)
+    compact_fulltext = _select_zotero_main_text(fulltext.strip(), fulltext_limit)
     return (
         compact_metadata
         + "\n\n模型输入范围：以下内容来自论文 PDF 主文；为适配当前模型代理，"
         + "超长参考文献、附录和补充材料可能已省略。\n\n"
         + separator
         + compact_fulltext
+    )
+
+
+def _select_zotero_main_text(fulltext: str, max_tokens: int) -> str:
+    token_ids = _TOKEN_ENCODING.encode(fulltext, disallowed_special=())
+    if len(token_ids) <= max_tokens:
+        return fulltext
+
+    experiment_match = EXPERIMENT_SECTION_PATTERN.search(fulltext)
+    if not experiment_match:
+        return _TOKEN_ENCODING.decode(token_ids[:max_tokens])
+
+    experiment_index = len(
+        _TOKEN_ENCODING.encode(fulltext[: experiment_match.start()], disallowed_special=())
+    )
+    head_budget = max(int(max_tokens * 0.25), 500)
+    method_budget = max(int(max_tokens * 0.45), 900)
+    experiment_budget = max(int(max_tokens * 0.23), 500)
+    conclusion_budget = max(max_tokens - head_budget - method_budget - experiment_budget, 200)
+    ranges = [
+        (0, min(head_budget, len(token_ids))),
+        (max(experiment_index - method_budget, 0), min(experiment_index + experiment_budget, len(token_ids))),
+    ]
+
+    conclusion_match = CONCLUSION_SECTION_PATTERN.search(fulltext, experiment_match.end())
+    if conclusion_match:
+        conclusion_index = len(
+            _TOKEN_ENCODING.encode(fulltext[: conclusion_match.start()], disallowed_special=())
+        )
+        ranges.append(
+            (conclusion_index, min(conclusion_index + conclusion_budget, len(token_ids)))
+        )
+    else:
+        start, end = ranges[-1]
+        ranges[-1] = (start, min(end + conclusion_budget, len(token_ids)))
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return "\n\n[...省略与三问分析关系较弱的长文段落...]\n\n".join(
+        _TOKEN_ENCODING.decode(token_ids[start:end]).strip()
+        for start, end in merged
+        if end > start
     )
 
 

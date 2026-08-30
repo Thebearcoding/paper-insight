@@ -1921,13 +1921,15 @@ async def analyze_my_zotero_item(
             yield {"event": "status", "data": "正在读取 Zotero 全文、笔记和批注..."}
             context, source, warning = await load_zotero_reading_context(user_id, item)
             analysis_context = context
+            analysis_stream_options: dict[str, Any] = {}
             if (
                 str(selected_config.get("provider_key") or "").casefold() == "sub2api"
                 and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
             ):
                 analysis_context = compact_zotero_analysis_context(context)
+                analysis_stream_options["max_tokens"] = 12_288
                 if analysis_context != context:
-                    proxy_warning = "GLM 长文输入已保留 PDF 主文，并省略超长参考文献或补充材料"
+                    proxy_warning = "GLM 长文输入已保留 PDF 核心主文，并省略超长参考文献或补充材料"
                     warning = f"{warning}；{proxy_warning}" if warning else proxy_warning
             if warning:
                 yield {"event": "status", "data": f"{warning}，将基于现有材料继续分析"}
@@ -1989,6 +1991,7 @@ async def analyze_my_zotero_item(
                 analysis_context,
                 _analysis_instruction=analysis_instruction,
                 _usage_context="zotero_analysis_stream",
+                **analysis_stream_options,
             ):
                 if stream_chunk.kind == "reasoning":
                     yield {"event": "reasoning", "data": stream_chunk.content}

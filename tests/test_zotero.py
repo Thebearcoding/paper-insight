@@ -208,6 +208,32 @@ def test_compact_zotero_analysis_context_preserves_short_input():
     assert zotero.compact_zotero_analysis_context(context) == context
 
 
+def test_compact_zotero_analysis_context_samples_method_experiment_and_conclusion():
+    context = (
+        "Zotero 条目元数据：\nA paper\n\n论文全文：\n"
+        + "Abstract\nTASK_SENTINEL "
+        + "introduction " * 1_500
+        + "\n4 Proposed Method\n"
+        + "method details " * 250
+        + "METHOD_SENTINEL "
+        + "method details " * 100
+        + "\n5 Experiments\nEXPERIMENT_SENTINEL "
+        + "results " * 800
+        + "\n6 Conclusion\nCONCLUSION_SENTINEL "
+        + "summary " * 300
+        + "\nReferences\nREFERENCE_TAIL_SENTINEL "
+        + "citation " * 2_000
+    )
+
+    compact = zotero.compact_zotero_analysis_context(context, max_tokens=2_000)
+
+    assert "TASK_SENTINEL" in compact
+    assert "METHOD_SENTINEL" in compact
+    assert "EXPERIMENT_SENTINEL" in compact
+    assert "CONCLUSION_SENTINEL" in compact
+    assert "REFERENCE_TAIL_SENTINEL" not in compact
+
+
 def test_linked_file_falls_back_to_public_pdf_and_includes_repository(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(zotero, "_cache_dir", lambda: tmp_path)
     monkeypatch.setattr(
