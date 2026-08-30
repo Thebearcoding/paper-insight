@@ -85,13 +85,9 @@ def main() -> int:
             item = get_zotero_item(args.user_id, item_key)
             if not item:
                 raise RuntimeError("Zotero item disappeared during backfill")
-            context, source, warning = get_item_reading_context(
-                user_id=args.user_id,
-                zotero_user_id=int(connection["zotero_user_id"]),
-                item=item,
-                children=item.get("children") or [],
-                client=client,
-            )
+            context = ""
+            source = str(item.get("analysis_source") or "direct-pdf")
+            warning = item.get("analysis_warning")
             assets = extract_and_save_zotero_analysis_assets(
                 user_id=args.user_id,
                 zotero_user_id=int(connection["zotero_user_id"]),
@@ -101,6 +97,23 @@ def main() -> int:
                 reading_context=context,
                 force_refresh=args.force_refresh,
             )
+            if not any(asset.get("kind") == RESULTS_TABLE_KIND for asset in assets):
+                context, source, warning = get_item_reading_context(
+                    user_id=args.user_id,
+                    zotero_user_id=int(connection["zotero_user_id"]),
+                    item=item,
+                    children=item.get("children") or [],
+                    client=client,
+                )
+                assets = extract_and_save_zotero_analysis_assets(
+                    user_id=args.user_id,
+                    zotero_user_id=int(connection["zotero_user_id"]),
+                    item={**item, "analysis_figures": assets},
+                    children=item.get("children") or [],
+                    client=client,
+                    reading_context=context,
+                    force_refresh=False,
+                )
             if assets != list(item.get("analysis_figures") or []):
                 update_zotero_analysis_figures(args.user_id, item_key, assets)
             counts = _asset_counts(assets)
