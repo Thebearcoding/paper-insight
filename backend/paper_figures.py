@@ -64,15 +64,20 @@ RESULTS_TABLE_POSITIVE_TERMS: tuple[tuple[re.Pattern[str], int], ...] = (
     (re.compile(r"(?i)\b(?:our|proposed)\s+(?:method|model|approach)\b|本文方法|所提方法"), 4),
 )
 RESULTS_TABLE_NEGATIVE_TERMS: tuple[tuple[re.Pattern[str], int], ...] = (
-    (re.compile(r"(?i)\b(?:ablation|component|variant|sensitivity)\b|消融|组件|敏感性"), 28),
+    (re.compile(r"(?i)\b(?:ablations?|components?|variants?|sensitivity)\b|消融|组件|敏感性"), 28),
     (
         re.compile(
             r"(?i)\b(?:hyper-?parameter|parameter settings?|"
-            r"number of (?:anchors?|queries?|layers?|prompts?|tokens?|components?))\b|超参数|参数设置"
+            r"number of (?:anchors?|queries?|layers?|prompts?|tokens?|components?)|"
+            r"backbone architectures?)\b|超参数|参数设置"
         ),
         18,
     ),
-    (re.compile(r"(?i)\b(?:runtime|latency|complexity|flops|throughput)\b|运行时间|复杂度|吞吐"), 15),
+    (
+        re.compile(r"(?i)\b(?:runtime|inference time|latency|complexity|flops|throughput)\b|运行时间|复杂度|吞吐"),
+        15,
+    ),
+    (re.compile(r"(?i)\bclass-wise\b|分类别"), 10),
     (re.compile(r"(?i)\b(?:dataset statistics|data statistics)\b|数据集统计"), 18),
 )
 
@@ -163,14 +168,33 @@ class _ArxivFigureParser(HTMLParser):
 
 
 class _ArxivTableParser(HTMLParser):
+    _VOID_TAGS = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+
     def __init__(self, base_url: str) -> None:
         super().__init__(convert_charrefs=True)
         self.base_url = base_url
         self.tables: list[_HtmlTable] = []
-        self.current: _HtmlTable | None = None
-        self.figure_depth = 0
+        self.figure_id = ""
+        self.element_stack: list[tuple[str, str]] = []
+        self.pending_tables: list[_HtmlTable] = []
+        self.pending_caption = ""
+        self.current_table: _HtmlTable | None = None
         self.caption_depth = 0
-        self.table_depth = 0
         self.caption_parts: list[str] = []
         self.current_row: list[dict[str, Any]] | None = None
         self.current_cell: dict[str, Any] | None = None
@@ -178,43 +202,128 @@ class _ArxivTableParser(HTMLParser):
         self.math_depth = 0
 
     @staticmethod
-    def _span(attributes: dict[str, str | None], name: str) -> int:
+    def _span(attributes: dict[str, str | None], classes: set[str], name: str) -> int:
+        raw_value = attributes.get(name)
+        if not raw_value:
+            prefix = f"ltx_{name}_"
+            raw_value = next((value.removeprefix(prefix) for value in classes if value.startswith(prefix)), None)
         try:
-            return min(max(int(attributes.get(name) or 1), 1), 20)
+            return min(max(int(raw_value or 1), 1), 20)
         except (TypeError, ValueError):
             return 1
 
+    def _reset_figure(self) -> None:
+        self.figure_id = ""
+        self.element_stack = []
+        self.pending_tables = []
+        self.pending_caption = ""
+        self.current_table = None
+        self.caption_depth = 0
+        self.caption_parts = []
+        self.current_row = None
+        self.current_cell = None
+        self.cell_parts = []
+        self.math_depth = 0
+
+    def _finish_cell(self) -> None:
+        if self.current_cell is None:
+            return
+        text = _normalize_caption("".join(self.cell_parts))
+        text = text.replace(r"\pm", "±").replace(r"\%", "%").replace(r"\times", "×")
+        self.current_cell["text"] = text[:500]
+        if self.current_row is not None:
+            self.current_row.append(self.current_cell)
+        self.current_cell = None
+        self.cell_parts = []
+        self.math_depth = 0
+
+    def _finish_row(self) -> None:
+        if self.current_cell is not None:
+            self._finish_cell()
+        if self.current_row and self.current_table is not None and self.current_table.rows is not None:
+            self.current_table.rows.append(self.current_row)
+        self.current_row = None
+
+    def _finish_table(self) -> None:
+        if self.current_row is not None:
+            self._finish_row()
+        if self.current_table is not None and self.current_table.rows:
+            self.pending_tables.append(self.current_table)
+        self.current_table = None
+
+    def _finish_caption(self) -> None:
+        caption = _normalize_caption("".join(self.caption_parts))
+        self.caption_parts = []
+        self.caption_depth = 0
+        if not caption:
+            return
+        for table in reversed(self.pending_tables):
+            if not table.caption:
+                table.caption = caption
+                return
+        self.pending_caption = caption
+
+    def _finish_figure(self) -> None:
+        if self.current_table is not None:
+            self._finish_table()
+        self.tables.extend(table for table in self.pending_tables if table.caption and table.rows)
+        self._reset_figure()
+
+    def _push(self, tag: str, role: str) -> None:
+        if tag not in self._VOID_TAGS:
+            self.element_stack.append((tag, role))
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
-        classes = str(attributes.get("class") or "").split()
-        if self.current is None and tag == "figure" and "ltx_table" in classes:
-            self.current = _HtmlTable(
-                element_id=str(attributes.get("id") or ""),
+        classes = set(str(attributes.get("class") or "").split())
+        if not self.element_stack and tag == "figure" and "ltx_table" in classes:
+            self._reset_figure()
+            self.figure_id = str(attributes.get("id") or "")
+            self._push(tag, "figure")
+            return
+        if not self.element_stack:
+            return
+
+        if self.math_depth:
+            self.math_depth += int(tag not in self._VOID_TAGS)
+            self._push(tag, "math-child")
+            return
+
+        role = "other"
+        is_table = tag == "table" or "ltx_tabular" in classes
+        is_row = tag == "tr" or "ltx_tr" in classes
+        is_cell = tag in {"td", "th"} or "ltx_td" in classes
+
+        if tag == "figcaption":
+            role = "caption"
+            self.caption_depth = 1
+            self.caption_parts = []
+        elif self.caption_depth:
+            role = "caption-child"
+            self.caption_depth += int(tag not in self._VOID_TAGS)
+        elif is_table and self.current_table is None:
+            role = "table"
+            self.current_table = _HtmlTable(
+                element_id=str(attributes.get("id") or self.figure_id),
+                caption=self.pending_caption,
                 rows=[],
             )
-            self.figure_depth = 1
-            self.caption_depth = 0
-            self.table_depth = 0
-            self.caption_parts = []
-            return
-        if self.current is None:
-            return
-        if tag == "figure":
-            self.figure_depth += 1
-        if tag == "figcaption":
-            self.caption_depth = 1
-        elif self.caption_depth:
-            self.caption_depth += 1
-        if tag == "table":
-            self.table_depth += 1
-        elif self.table_depth and tag == "tr" and self.current_row is None:
+            self.pending_caption = ""
+        elif is_row and self.current_table is not None and self.current_row is None:
+            role = "row"
             self.current_row = []
-        elif self.table_depth and tag in {"td", "th"} and self.current_row is not None:
+        elif is_cell and self.current_table is not None and self.current_row is not None:
+            role = "cell"
+            emphasis = ""
+            if tag in {"strong", "b"} or "ltx_font_bold" in classes:
+                emphasis = "best"
+            if tag == "u" or "ltx_underline" in classes:
+                emphasis = "second"
             self.current_cell = {
-                "header": tag == "th",
-                "col_span": self._span(attributes, "colspan"),
-                "row_span": self._span(attributes, "rowspan"),
-                "emphasis": "",
+                "header": tag == "th" or "ltx_th" in classes,
+                "col_span": self._span(attributes, classes, "colspan"),
+                "row_span": self._span(attributes, classes, "rowspan"),
+                "emphasis": emphasis,
             }
             self.cell_parts = []
             self.math_depth = 0
@@ -224,50 +333,41 @@ class _ArxivTableParser(HTMLParser):
             if tag == "u" or "ltx_underline" in classes:
                 self.current_cell["emphasis"] = "second"
             if tag == "math":
+                role = "math"
                 alttext = str(attributes.get("alttext") or "").strip()
                 if alttext:
                     self.cell_parts.append(alttext)
                 self.math_depth = 1
-            elif self.math_depth:
-                self.math_depth += 1
             elif tag == "br":
                 self.cell_parts.append(" ")
+        self._push(tag, role)
 
     def handle_endtag(self, tag: str) -> None:
-        if self.current is None:
+        if not self.element_stack:
             return
-        if self.math_depth:
-            self.math_depth -= 1
-        if self.caption_depth:
-            self.caption_depth -= 1
-        if tag in {"td", "th"} and self.current_cell is not None:
-            self.current_cell["text"] = _normalize_caption("".join(self.cell_parts))[:500]
-            if self.current_row is not None:
-                self.current_row.append(self.current_cell)
-            self.current_cell = None
-            self.cell_parts = []
-            self.math_depth = 0
-        elif tag == "tr" and self.current_row is not None:
-            if self.current_row and self.current is not None and self.current.rows is not None:
-                self.current.rows.append(self.current_row)
-            self.current_row = None
-        if tag == "table" and self.table_depth:
-            self.table_depth -= 1
-        if tag == "figure":
-            self.figure_depth -= 1
-            if self.figure_depth == 0:
-                self.current.caption = _normalize_caption("".join(self.caption_parts))
-                if self.current.rows:
-                    self.tables.append(self.current)
-                self.current = None
-                self.caption_depth = 0
-                self.table_depth = 0
-                self.caption_parts = []
-                self.current_row = None
-                self.current_cell = None
+
+        open_tag, role = self.element_stack.pop()
+        if open_tag != tag:
+            self.element_stack.append((open_tag, role))
+            return
+
+        if role in {"math", "math-child"}:
+            self.math_depth = max(self.math_depth - 1, 0)
+        elif role == "cell":
+            self._finish_cell()
+        elif role == "row":
+            self._finish_row()
+        elif role == "table":
+            self._finish_table()
+        elif role == "caption-child":
+            self.caption_depth = max(self.caption_depth - 1, 0)
+        elif role == "caption":
+            self._finish_caption()
+        elif role == "figure":
+            self._finish_figure()
 
     def handle_data(self, data: str) -> None:
-        if self.current is None:
+        if not self.element_stack:
             return
         if self.current_cell is not None and not self.math_depth:
             self.cell_parts.append(data)

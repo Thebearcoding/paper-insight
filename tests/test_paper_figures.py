@@ -67,6 +67,17 @@ def test_results_table_caption_score_keeps_training_shot_metadata():
     assert score > 0
 
 
+def test_results_table_caption_score_prefers_main_benchmark_over_backbone_comparison():
+    benchmark = paper_figures.results_table_caption_score(
+        "Table 1: Comparison of anomaly classification performance on MVTec-AD and VisA benchmarks."
+    )
+    backbone = paper_figures.results_table_caption_score(
+        "Table 9: Comparison of performance in AUROC across different CLIP backbone architectures."
+    )
+
+    assert benchmark > backbone
+
+
 def test_extract_arxiv_framework_figure_selects_method_pipeline(monkeypatch):
     html = b"""
     <article class="ltx_document">
@@ -133,6 +144,55 @@ def test_extract_arxiv_results_table_preserves_cells_and_emphasis(monkeypatch):
     }
     assert asset.rows[2][1]["emphasis"] == "best"
     assert asset.rows[2][2]["text"] == "93.0"
+
+
+def test_extract_arxiv_results_table_supports_latexml_span_tables(monkeypatch):
+    html = b"""
+    <article class="ltx_document">
+      <figure id="S5.T3" class="ltx_table">
+        <div class="ltx_figure_panel">
+          <span id="main-table" class="ltx_tabular ltx_guessed_headers">
+            <span class="ltx_tbody">
+              <span class="ltx_tr">
+                <span class="ltx_td ltx_th ltx_colspan_2">Method</span>
+                <span class="ltx_td">AUROC</span>
+              </span>
+              <span class="ltx_tr">
+                <span class="ltx_td ltx_th ltx_rowspan_2">WinCLIP</span>
+                <span class="ltx_td"><span class="ltx_font_bold">91.8<math alttext="\\pm"><mo>+/-</mo></math>0.0</span></span>
+              </span>
+            </span>
+          </span>
+          <figcaption><span>Table 1: </span>Comparison with state-of-the-art methods using AUROC.</figcaption>
+        </div>
+        <div class="ltx_figure_panel">
+          <span id="ablation-table" class="ltx_tabular">
+            <span class="ltx_tr"><span class="ltx_td">Variant</span><span class="ltx_td">AUROC</span></span>
+            <span class="ltx_tr"><span class="ltx_td">No prompt</span><span class="ltx_td">80.0</span></span>
+          </span>
+          <figcaption><span>Table 2: </span>Ablation study on prompt components using AUROC.</figcaption>
+        </div>
+      </figure>
+    </article>
+    """
+
+    def fake_download(url: str, *, max_bytes: int, accept: str):
+        assert url == "https://arxiv.org/html/2303.14814v1"
+        return html, "text/html", url
+
+    monkeypatch.setattr(paper_figures, "_download_public_bytes", fake_download)
+
+    asset = paper_figures.extract_arxiv_results_table("2303.14814v1")
+
+    assert asset is not None
+    assert asset.label == "Table 1"
+    assert asset.source_url.endswith("#main-table")
+    assert len(asset.rows) == 2
+    assert asset.rows[0][0]["col_span"] == 2
+    assert asset.rows[1][0]["row_span"] == 2
+    assert asset.rows[1][1]["text"] == "91.8±0.0"
+    assert asset.rows[1][1]["emphasis"] == "best"
+    assert all("Ablation" not in cell["text"] for row in asset.rows for cell in row)
 
 
 def test_extract_framework_figure_from_pdf_uses_caption_page():
