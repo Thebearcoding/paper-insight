@@ -234,8 +234,8 @@ def zotero_report_completion_error(
     if require_framework_figure:
         if "架构图阅读" not in section_three:
             return "缺少架构图阅读"
-        if section_three.count("输入") < 2 or section_three.count("输出") < 2:
-            return "架构图阅读没有完整覆盖输入到输出"
+        if len(section_three.strip()) < 400:
+            return "架构图阅读内容过短"
 
     if report.count("**") % 2:
         return "存在未闭合的加粗标记"

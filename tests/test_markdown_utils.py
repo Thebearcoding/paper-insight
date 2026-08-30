@@ -105,6 +105,8 @@ def test_zotero_report_completion_accepts_complete_framework_report():
                 "**架构图阅读**：按照输入 → 模块 → 输出解释。\n"
                 "- **输入**：图像。\n"
                 "- **输出**：异常图。\n"
+                + "方法模块依据正文逐项对应。" * 40
+                + "\n"
                 "以上是完整总结。"
             ),
         ]
@@ -126,6 +128,6 @@ def test_zotero_report_completion_rejects_truncated_framework_report():
         ]
     )
 
-    assert "输入到输出" in (
+    assert "内容过短" in (
         zotero_report_completion_error(report, require_framework_figure=True) or ""
     )
