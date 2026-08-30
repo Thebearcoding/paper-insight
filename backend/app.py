@@ -1309,16 +1309,19 @@ def public_zotero_connection(connection: dict | None) -> dict:
 
 
 def public_zotero_analysis_figures(item_key: str, figures: list[dict] | None) -> list[dict]:
-    return [
-        {
+    public_figures: list[dict] = []
+    for figure in figures or []:
+        if not isinstance(figure, dict) or not figure.get("id"):
+            continue
+        payload = {
             key: value
             for key, value in figure.items()
             if key != "filename"
         }
-        | {"url": f"/me/zotero/items/{item_key}/figures/{figure.get('id')}"}
-        for figure in figures or []
-        if isinstance(figure, dict) and figure.get("id")
-    ]
+        if figure.get("filename"):
+            payload["url"] = f"/me/zotero/items/{item_key}/figures/{figure.get('id')}"
+        public_figures.append(payload)
+    return public_figures
 
 
 def public_zotero_item(item: dict) -> dict:

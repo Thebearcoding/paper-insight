@@ -90,6 +90,43 @@ def test_extract_arxiv_framework_figure_selects_method_pipeline(monkeypatch):
     assert asset.media_type == "image/png"
 
 
+def test_extract_arxiv_results_table_preserves_cells_and_emphasis(monkeypatch):
+    html = b"""
+    <article class="ltx_document">
+      <figure id="S5.T1" class="ltx_table">
+        <figcaption>Table 1: Comparison with state-of-the-art methods using AUROC and AP.</figcaption>
+        <table>
+          <tr><th>Method</th><th>AUROC</th><th>AP</th></tr>
+          <tr><td>Baseline</td><td><span class="ltx_underline">90.0</span></td><td>88.0</td></tr>
+          <tr><td>Ours</td><td><span class="ltx_font_bold">95.0</span></td><td><b>93.0</b></td></tr>
+        </table>
+      </figure>
+    </article>
+    """
+
+    def fake_download(url: str, *, max_bytes: int, accept: str):
+        assert url == "https://arxiv.org/html/2407.15795"
+        return html, "text/html", url
+
+    monkeypatch.setattr(paper_figures, "_download_public_bytes", fake_download)
+
+    asset = paper_figures.extract_arxiv_results_table("2407.15795")
+
+    assert asset is not None
+    assert asset.label == "Table 1"
+    assert asset.source == "arxiv-html-table"
+    assert asset.source_url.endswith("#S5.T1")
+    assert asset.rows[1][1] == {
+        "header": False,
+        "col_span": 1,
+        "row_span": 1,
+        "emphasis": "second",
+        "text": "90.0",
+    }
+    assert asset.rows[2][1]["emphasis"] == "best"
+    assert asset.rows[2][2]["text"] == "93.0"
+
+
 def test_extract_framework_figure_from_pdf_uses_caption_page():
     document = pymupdf.open()
     page = document.new_page(width=600, height=800)

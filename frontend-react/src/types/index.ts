@@ -179,6 +179,14 @@ export interface ZoteroCreator {
   name?: string;
 }
 
+export interface ZoteroAnalysisTableCell {
+  text: string;
+  header?: boolean;
+  col_span?: number;
+  row_span?: number;
+  emphasis?: 'best' | 'second' | string;
+}
+
 export interface ZoteroAnalysisFigure {
   id: string;
   kind: 'framework' | 'results_table' | string;
@@ -190,7 +198,10 @@ export interface ZoteroAnalysisFigure {
   width?: number | null;
   height?: number | null;
   media_type?: string | null;
-  url: string;
+  table_data?: {
+    rows?: ZoteroAnalysisTableCell[][];
+  } | null;
+  url?: string;
 }
 
 export interface ZoteroEnrichmentTag {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import logging
 import multiprocessing
 import queue
@@ -83,10 +84,26 @@ class FrameworkFigureAsset:
     height: int | None = None
 
 
+@dataclass(frozen=True)
+class StructuredResultsTableAsset:
+    label: str
+    caption: str
+    source: str
+    source_url: str
+    rows: list[list[dict[str, Any]]]
+
+
 @dataclass
 class _HtmlFigure:
     image_url: str = ""
     caption: str = ""
+
+
+@dataclass
+class _HtmlTable:
+    element_id: str = ""
+    caption: str = ""
+    rows: list[list[dict[str, Any]]] | None = None
 
 
 class _ArxivFigureParser(HTMLParser):
@@ -135,6 +152,119 @@ class _ArxivFigureParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if self.current is not None and self.caption_depth:
+            self.caption_parts.append(data)
+
+
+class _ArxivTableParser(HTMLParser):
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.tables: list[_HtmlTable] = []
+        self.current: _HtmlTable | None = None
+        self.figure_depth = 0
+        self.caption_depth = 0
+        self.table_depth = 0
+        self.caption_parts: list[str] = []
+        self.current_row: list[dict[str, Any]] | None = None
+        self.current_cell: dict[str, Any] | None = None
+        self.cell_parts: list[str] = []
+        self.math_depth = 0
+
+    @staticmethod
+    def _span(attributes: dict[str, str | None], name: str) -> int:
+        try:
+            return min(max(int(attributes.get(name) or 1), 1), 20)
+        except (TypeError, ValueError):
+            return 1
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = str(attributes.get("class") or "").split()
+        if self.current is None and tag == "figure" and "ltx_table" in classes:
+            self.current = _HtmlTable(
+                element_id=str(attributes.get("id") or ""),
+                rows=[],
+            )
+            self.figure_depth = 1
+            self.caption_depth = 0
+            self.table_depth = 0
+            self.caption_parts = []
+            return
+        if self.current is None:
+            return
+        if tag == "figure":
+            self.figure_depth += 1
+        if tag == "figcaption":
+            self.caption_depth = 1
+        elif self.caption_depth:
+            self.caption_depth += 1
+        if tag == "table":
+            self.table_depth += 1
+        elif self.table_depth and tag == "tr" and self.current_row is None:
+            self.current_row = []
+        elif self.table_depth and tag in {"td", "th"} and self.current_row is not None:
+            self.current_cell = {
+                "header": tag == "th",
+                "col_span": self._span(attributes, "colspan"),
+                "row_span": self._span(attributes, "rowspan"),
+                "emphasis": "",
+            }
+            self.cell_parts = []
+            self.math_depth = 0
+        elif self.current_cell is not None:
+            if tag in {"strong", "b"} or "ltx_font_bold" in classes:
+                self.current_cell["emphasis"] = "best"
+            if tag == "u" or "ltx_underline" in classes:
+                self.current_cell["emphasis"] = "second"
+            if tag == "math":
+                alttext = str(attributes.get("alttext") or "").strip()
+                if alttext:
+                    self.cell_parts.append(alttext)
+                self.math_depth = 1
+            elif self.math_depth:
+                self.math_depth += 1
+            elif tag == "br":
+                self.cell_parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.current is None:
+            return
+        if self.math_depth:
+            self.math_depth -= 1
+        if self.caption_depth:
+            self.caption_depth -= 1
+        if tag in {"td", "th"} and self.current_cell is not None:
+            self.current_cell["text"] = _normalize_caption("".join(self.cell_parts))[:500]
+            if self.current_row is not None:
+                self.current_row.append(self.current_cell)
+            self.current_cell = None
+            self.cell_parts = []
+            self.math_depth = 0
+        elif tag == "tr" and self.current_row is not None:
+            if self.current_row and self.current is not None and self.current.rows is not None:
+                self.current.rows.append(self.current_row)
+            self.current_row = None
+        if tag == "table" and self.table_depth:
+            self.table_depth -= 1
+        if tag == "figure":
+            self.figure_depth -= 1
+            if self.figure_depth == 0:
+                self.current.caption = _normalize_caption("".join(self.caption_parts))
+                if self.current.rows:
+                    self.tables.append(self.current)
+                self.current = None
+                self.caption_depth = 0
+                self.table_depth = 0
+                self.caption_parts = []
+                self.current_row = None
+                self.current_cell = None
+
+    def handle_data(self, data: str) -> None:
+        if self.current is None:
+            return
+        if self.current_cell is not None and not self.math_depth:
+            self.cell_parts.append(data)
+        elif self.caption_depth:
             self.caption_parts.append(data)
 
 
@@ -289,6 +419,43 @@ def extract_arxiv_framework_figure(arxiv_id: str) -> FrameworkFigureAsset | None
         media_type=media_type,
         width=width,
         height=height,
+    )
+
+
+def extract_arxiv_results_table(arxiv_id: str) -> StructuredResultsTableAsset | None:
+    html_url = f"https://arxiv.org/html/{arxiv_id}"
+    html_bytes, _, resolved_html_url = _download_public_bytes(
+        html_url,
+        max_bytes=10 * 1024 * 1024,
+        accept="text/html",
+    )
+    parser = _ArxivTableParser(resolved_html_url)
+    parser.feed(html_bytes.decode("utf-8", errors="replace"))
+    ranked = sorted(
+        (
+            (results_table_caption_score(table.caption), index, table)
+            for index, table in enumerate(parser.tables)
+            if table.caption and table.rows
+        ),
+        key=lambda entry: (entry[0], -entry[1]),
+        reverse=True,
+    )
+    if not ranked or ranked[0][0] <= 0:
+        return None
+    _, _, table = ranked[0]
+    rows = (table.rows or [])[:80]
+    cell_count = sum(len(row) for row in rows)
+    if not rows or cell_count > 5_000:
+        return None
+    source_url = resolved_html_url
+    if table.element_id:
+        source_url = f"{resolved_html_url.split('#', 1)[0]}#{table.element_id}"
+    return StructuredResultsTableAsset(
+        label=_table_label(table.caption),
+        caption=table.caption,
+        source="arxiv-html-table",
+        source_url=source_url,
+        rows=rows,
     )
 
 
@@ -616,6 +783,37 @@ def save_zotero_results_table(
     )
 
 
+def save_zotero_structured_results_table(
+    asset: StructuredResultsTableAsset,
+) -> dict[str, Any]:
+    table_data = {"rows": asset.rows}
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "caption": asset.caption,
+                "source_url": asset.source_url,
+                "table_data": table_data,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "id": digest,
+        "kind": RESULTS_TABLE_KIND,
+        "label": asset.label,
+        "caption": asset.caption,
+        "source": asset.source,
+        "source_url": asset.source_url,
+        "page_number": None,
+        "width": None,
+        "height": None,
+        "media_type": "application/vnd.paper-insight.table+json",
+        "table_data": table_data,
+    }
+
+
 def zotero_figure_path(user_id: str, item_key: str, filename: str) -> Path:
     if Path(filename).name != filename:
         raise ReaderError("无效的论文图表文件名")
@@ -634,6 +832,10 @@ def _cached_zotero_asset(
     for cached in item.get("analysis_figures") or []:
         if not isinstance(cached, dict) or cached.get("kind") != kind:
             continue
+        if kind == RESULTS_TABLE_KIND and isinstance(cached.get("table_data"), dict):
+            rows = cached["table_data"].get("rows")
+            if isinstance(rows, list) and rows:
+                return cached
         filename = str(cached.get("filename") or "")
         if not filename:
             continue
@@ -757,6 +959,21 @@ def extract_and_save_zotero_results_table(
         cached = _cached_zotero_asset(user_id, item, RESULTS_TABLE_KIND)
         if cached:
             return cached
+
+    raw = _raw_data(item)
+    arxiv_values: list[object] = [item.get("doi"), item.get("url"), raw.get("extra"), raw.get("url")]
+    for child in children:
+        child_raw = _raw_data(child)
+        arxiv_values.extend([child.get("url"), child_raw.get("url")])
+    arxiv_id = extract_arxiv_id(*arxiv_values)
+    if arxiv_id:
+        try:
+            structured_asset = extract_arxiv_results_table(arxiv_id)
+        except (ReaderError, requests.RequestException, ValueError) as exc:
+            logger.info("Unable to extract arXiv HTML results table %s: %s", arxiv_id, exc)
+            structured_asset = None
+        if structured_asset:
+            return save_zotero_structured_results_table(structured_asset)
 
     asset = _extract_asset_from_available_pdfs(
         item=item,

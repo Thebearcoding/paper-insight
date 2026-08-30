@@ -107,6 +107,7 @@ function providerModelLabel(provider: SelectableLlmProvider, modelName: string):
 
 function AnalysisAsset({ figure, itemTitle }: { figure: ZoteroAnalysisFigure; itemTitle: string }) {
   const isResultsTable = figure.kind === 'results_table';
+  const tableRows = figure.table_data?.rows ?? [];
   const Icon = isResultsTable ? Table2 : Images;
   const title = isResultsTable ? 'SOTA 对比表' : '论文架构图';
   return (
@@ -115,14 +116,44 @@ function AnalysisAsset({ figure, itemTitle }: { figure: ZoteroAnalysisFigure; it
         <Icon className="h-4 w-4 text-[#ff9900]" />
         {title} · {figure.label}
       </div>
-      <a href={figure.url} target="_blank" rel="noreferrer" className="block bg-white p-3 sm:p-5">
-        <img
-          src={figure.url}
-          alt={figure.caption || `${itemTitle}${title}`}
-          className="mx-auto max-h-[48rem] w-auto max-w-full rounded-md object-contain"
-          loading="lazy"
-        />
-      </a>
+      {isResultsTable && tableRows.length ? (
+        <div className="max-h-[48rem] overflow-auto bg-white p-3 sm:p-5">
+          <table className="min-w-full border-collapse text-[11px] leading-5 text-slate-700 sm:text-xs" aria-label={figure.caption || title}>
+            <tbody>
+              {tableRows.map((row, rowIndex) => (
+                <tr key={rowIndex} className="border-b border-slate-200 last:border-b-0">
+                  {row.map((cell, cellIndex) => {
+                    const CellTag = cell.header || rowIndex === 0 ? 'th' : 'td';
+                    return (
+                      <CellTag
+                        key={cellIndex}
+                        colSpan={cell.col_span || 1}
+                        rowSpan={cell.row_span || 1}
+                        className={`min-w-20 whitespace-nowrap border-r border-slate-100 px-2.5 py-2 text-center align-middle last:border-r-0 ${
+                          CellTag === 'th' ? 'bg-slate-50 font-semibold text-slate-900' : ''
+                        } ${cell.emphasis === 'best' ? 'font-semibold text-[#c2410c]' : ''} ${
+                          cell.emphasis === 'second' ? 'underline decoration-slate-400 underline-offset-2' : ''
+                        }`}
+                      >
+                        {cell.text || ' '}
+                      </CellTag>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : figure.url ? (
+        <a href={figure.url} target="_blank" rel="noreferrer" className="block bg-white p-3 sm:p-5">
+          <img
+            src={figure.url}
+            alt={figure.caption || `${itemTitle}${title}`}
+            className="mx-auto max-h-[48rem] w-auto max-w-full rounded-md object-contain"
+            loading="lazy"
+          />
+        </a>
+      ) : null}
       <figcaption className="space-y-2 px-4 py-3 text-sm leading-6 text-[#64748b]">
         <p>{figure.caption}</p>
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#94a3b8]">
