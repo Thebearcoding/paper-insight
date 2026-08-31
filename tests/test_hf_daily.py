@@ -6,7 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import database
-from hf_daily import select_top_hf_daily_entries
+import hf_daily
+from hf_daily import fetch_hf_daily_entries, select_top_hf_daily_entries
 
 
 class FakeCursor:
@@ -121,6 +122,35 @@ def test_select_top_hf_daily_entries_skips_invalid_entries():
     )
 
     assert selected == []
+
+
+def test_fetch_hf_daily_entries_uses_dedicated_proxy(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"paper": {"id": "2608.00001", "title": "Test"}}]
+
+    def fake_get(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return FakeResponse()
+
+    monkeypatch.setattr(hf_daily.requests, "get", fake_get)
+
+    result = fetch_hf_daily_entries(
+        "https://huggingface.co/api/daily_papers",
+        proxy_url="http://172.19.0.1:18080",
+    )
+
+    assert len(result) == 1
+    assert captured["proxies"] == {
+        "http": "http://172.19.0.1:18080",
+        "https": "http://172.19.0.1:18080",
+    }
+    assert captured["headers"]["User-Agent"] == "Paper Insight/1.0"
 
 
 def test_get_hf_daily_papers_deduplicates_papers_by_latest_daily_record(monkeypatch):

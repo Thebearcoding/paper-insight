@@ -41,6 +41,7 @@ class BackgroundAnalysisConfig:
 class HfDailyConfig:
     enabled: bool = True
     api_url: str = "https://huggingface.co/api/daily_papers"
+    proxy_url: str | None = None
     fetch_time: str = "22:00"
     timezone: str = "Asia/Shanghai"
     top_n: int = 5
@@ -290,6 +291,7 @@ def load_app_config() -> AppConfig:
             raw_hf_daily.get("api_url"),
             default_hf_daily.api_url,
         ),
+        proxy_url=str(raw_hf_daily.get("proxy_url") or "").strip() or None,
         fetch_time=_as_str(
             raw_hf_daily.get("fetch_time"),
             default_hf_daily.fetch_time,

@@ -89,12 +89,17 @@ def _normalize_entry(raw_entry: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def fetch_hf_daily_entries(api_url: str) -> list[dict[str, Any]]:
-    response = requests.get(
-        api_url,
-        timeout=HF_DAILY_TIMEOUT_SECONDS,
-        headers={"Accept": "application/json", "User-Agent": "Paper Insight/1.0"},
-    )
+def fetch_hf_daily_entries(
+    api_url: str,
+    proxy_url: str | None = None,
+) -> list[dict[str, Any]]:
+    request_options: dict[str, Any] = {
+        "timeout": HF_DAILY_TIMEOUT_SECONDS,
+        "headers": {"Accept": "application/json", "User-Agent": "Paper Insight/1.0"},
+    }
+    if proxy_url:
+        request_options["proxies"] = {"http": proxy_url, "https": proxy_url}
+    response = requests.get(api_url, **request_options)
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, list):
@@ -124,8 +129,13 @@ def select_top_hf_daily_entries(raw_entries: list[dict[str, Any]], top_n: int) -
     return selected
 
 
-def sync_hf_daily_papers(api_url: str, top_n: int, daily_date: date) -> dict[str, Any]:
-    raw_entries = fetch_hf_daily_entries(api_url)
+def sync_hf_daily_papers(
+    api_url: str,
+    top_n: int,
+    daily_date: date,
+    proxy_url: str | None = None,
+) -> dict[str, Any]:
+    raw_entries = fetch_hf_daily_entries(api_url, proxy_url=proxy_url)
     selected_entries = select_top_hf_daily_entries(raw_entries, top_n)
     analyzable_paper_ids = upsert_hf_daily_papers(daily_date, selected_entries)
     logger.info(

@@ -98,6 +98,8 @@ api_search:
 hf_daily:
   enabled: true
   api_url: https://huggingface.co/api/daily_papers
+  # Optional HTTP proxy used only for HF Daily synchronization.
+  proxy_url:
   fetch_time: "22:00"
   timezone: Asia/Shanghai
   top_n: 5

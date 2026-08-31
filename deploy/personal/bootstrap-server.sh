@@ -100,8 +100,9 @@ background_analysis:
   check_interval_seconds: 86400
 
 hf_daily:
-  enabled: false
+  enabled: true
   api_url: https://huggingface.co/api/daily_papers
+  proxy_url:
   fetch_time: "22:00"
   timezone: Asia/Hong_Kong
   top_n: 5

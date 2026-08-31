@@ -539,6 +539,7 @@ async def sync_hf_daily_once() -> dict:
         settings.hf_daily.api_url,
         top_n,
         daily_date,
+        settings.hf_daily.proxy_url,
     )
     schedule_hf_daily_analysis(result.get("analyzable_paper_ids", []))
     return result

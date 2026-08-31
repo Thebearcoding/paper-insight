@@ -100,6 +100,8 @@ auth:
 hf_daily:
   enabled: true
   api_url: https://huggingface.co/api/daily_papers
+  # 国内服务器可填写仅供 HF Daily 使用的 HTTP 代理。
+  proxy_url:
   fetch_time: "22:00"
   timezone: Asia/Shanghai
   top_n: 5
@@ -244,6 +246,7 @@ hf_daily:
 
 - 定时任务运行在 FastAPI 进程内
 - 每个配置日期抓取一次 Hugging Face Daily Papers API
+- `proxy_url` 仅作用于 HF Daily API，不会改变 LLM、Zotero 或其他外部请求的网络出口
 - 点赞数最高的论文会写入 `papers`，来源元数据写入 `hf_daily_papers`
 - 新论文在 AI 分析完成前保持 `llm_response IS NULL`
 - 管理员后台提供手动同步按钮
