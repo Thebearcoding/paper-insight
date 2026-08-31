@@ -193,6 +193,7 @@ from zotero_enrichment import (
     markdown_to_zotero_note_html,
 )
 from zotero import (
+    ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT,
     ZoteroAuthError,
     ZoteroClient,
     ZoteroError,
@@ -1935,9 +1936,9 @@ async def analyze_my_zotero_item(
                 and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
             ):
                 glm_context_limit = (
-                    min(max(context_token_limit, 2_000), 16_000)
+                    min(max(context_token_limit, 2_000), ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT)
                     if context_token_limit is not None
-                    else 8_000
+                    else ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT
                 )
                 analysis_context = compact_zotero_analysis_context(
                     context,
@@ -1945,7 +1946,10 @@ async def analyze_my_zotero_item(
                 )
                 analysis_stream_options["max_tokens"] = 16_384
                 if analysis_context != context:
-                    proxy_warning = "GLM 长文输入已保留 PDF 核心主文，并省略超长参考文献或补充材料"
+                    proxy_warning = (
+                        f"GLM 长文输入已使用 {glm_context_limit:,} token 保留 PDF 核心主文，"
+                        "并省略超长参考文献或补充材料"
+                    )
                     warning = f"{warning}；{proxy_warning}" if warning else proxy_warning
             if warning:
                 yield {"event": "status", "data": f"{warning}，将基于现有材料继续分析"}
@@ -2015,9 +2019,9 @@ async def analyze_my_zotero_item(
             yield {
                 "event": "status",
                 "data": (
-                    "正在按三问提示词结合论文图表分析论文..."
+                    "正在结合论文正文、证据锚点与图表生成深度阅读报告..."
                     if prompt_figure or prompt_results_table
-                    else "正在按三问提示词分析论文..."
+                    else "正在结合论文正文与证据锚点生成深度阅读报告..."
                 ),
             }
             chunks: list[str] = []

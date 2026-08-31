@@ -20,6 +20,11 @@ def test_paper_analysis_prompt_defines_canonical_markdown_structure():
     assert "必须分别独占一行" in PAPER_ANALYSIS_PROMPT
     assert "架构图阅读" in PAPER_ANALYSIS_PROMPT
     assert "材料中未说明" in PAPER_ANALYSIS_PROMPT
+    assert "Section 3.2；Figure 2；Table 1" in PAPER_ANALYSIS_PROMPT
+    assert "方法链路与训练/推理过程" in PAPER_ANALYSIS_PROMPT
+    assert "方法变体与组件区别" in PAPER_ANALYSIS_PROMPT
+    assert "设计 → 机制 → 指标" in PAPER_ANALYSIS_PROMPT
+    assert "不要只围绕摘要重复" in PAPER_ANALYSIS_PROMPT
 
 
 def test_zotero_analysis_prompt_includes_grounded_framework_figure():

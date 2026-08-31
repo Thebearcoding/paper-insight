@@ -208,6 +208,10 @@ def test_compact_zotero_analysis_context_preserves_short_input():
     assert zotero.compact_zotero_analysis_context(context) == context
 
 
+def test_glm_analysis_context_defaults_to_sixteen_thousand_tokens():
+    assert zotero.ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT == 16_000
+
+
 def test_compact_zotero_analysis_context_samples_method_experiment_and_conclusion():
     context = (
         "Zotero 条目元数据：\nA paper\n\n论文全文：\n"
