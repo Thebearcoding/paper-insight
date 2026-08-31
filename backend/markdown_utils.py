@@ -245,6 +245,11 @@ ZOTERO_REPORT_HEADINGS = (
     "## 2. 任务评估指标",
     "## 3. 方法提升指标的本质原因",
 )
+ZOTERO_DEEP_REPORT_SUBHEADINGS = (
+    "### 方法链路与训练/推理过程",
+    "### 提升指标的本质原因",
+    "### SOTA 对比实验",
+)
 
 
 def zotero_report_completion_error(
@@ -275,4 +280,27 @@ def zotero_report_completion_error(
         return "存在未闭合的块级公式"
     if not re.search(r"[。！？.!?）】」』]$", report):
         return "报告停在半句话或未完成的列表项"
+    return None
+
+
+def zotero_stream_recovery_error(
+    content: str | None,
+    *,
+    require_framework_figure: bool = False,
+) -> str | None:
+    """Apply stricter checks before saving a report from an interrupted upstream stream."""
+    report = str(content or "").strip()
+    if len(report) < 4_000:
+        return "断流报告长度不足 4000 字符"
+    completion_error = zotero_report_completion_error(
+        report,
+        require_framework_figure=require_framework_figure,
+    )
+    if completion_error:
+        return completion_error
+    missing_subheadings = [heading for heading in ZOTERO_DEEP_REPORT_SUBHEADINGS if heading not in report]
+    if missing_subheadings:
+        return "断流报告缺少深度分析小节：" + "、".join(missing_subheadings)
+    if report.count("依据：") < 3:
+        return "断流报告的论文内证据锚点不足"
     return None

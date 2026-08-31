@@ -182,6 +182,7 @@ from markdown_utils import (
     normalize_llm_markdown,
     normalize_zotero_report,
     zotero_report_completion_error,
+    zotero_stream_recovery_error,
 )
 from prompt import build_open_in_ai_prompt, build_zotero_analysis_prompt
 from paper_figures import (
@@ -2025,17 +2026,28 @@ async def analyze_my_zotero_item(
                 ),
             }
             chunks: list[str] = []
-            async for stream_chunk in selected_llm.get_response_stream_events(
-                analysis_context,
-                _analysis_instruction=analysis_instruction,
-                _usage_context="zotero_analysis_stream",
-                **analysis_stream_options,
-            ):
-                if stream_chunk.kind == "reasoning":
-                    yield {"event": "reasoning", "data": stream_chunk.content}
-                    continue
-                chunks.append(stream_chunk.content)
-                yield {"data": stream_chunk.content}
+            stream_error: RuntimeError | None = None
+            try:
+                async for stream_chunk in selected_llm.get_response_stream_events(
+                    analysis_context,
+                    _analysis_instruction=analysis_instruction,
+                    _usage_context="zotero_analysis_stream",
+                    **analysis_stream_options,
+                ):
+                    if stream_chunk.kind == "reasoning":
+                        yield {"event": "reasoning", "data": stream_chunk.content}
+                        continue
+                    chunks.append(stream_chunk.content)
+                    yield {"data": stream_chunk.content}
+            except RuntimeError as exc:
+                stream_error = exc
+                logger.warning(
+                    "Zotero analysis upstream stream ended with an error for %s/%s after %s characters: %s",
+                    user_id,
+                    item_key,
+                    sum(len(chunk) for chunk in chunks),
+                    exc,
+                )
             normalized = normalize_zotero_report("".join(chunks))
             if not normalized:
                 yield {
@@ -2043,16 +2055,32 @@ async def analyze_my_zotero_item(
                     "data": "论文分析没有返回内容，已保留原报告",
                 }
                 return
-            completion_error = zotero_report_completion_error(
-                normalized,
-                require_framework_figure=bool(prompt_figure),
+            completion_error = (
+                zotero_stream_recovery_error(
+                    normalized,
+                    require_framework_figure=bool(prompt_figure),
+                )
+                if stream_error
+                else zotero_report_completion_error(
+                    normalized,
+                    require_framework_figure=bool(prompt_figure),
+                )
             )
             if completion_error:
                 yield {
                     "event": "error",
-                    "data": f"上游返回的论文分析不完整（{completion_error}），已保留原报告，请重试",
+                    "data": (
+                        f"上游流中断且论文分析不完整（{completion_error}），已保留原报告，请重试"
+                        if stream_error
+                        else f"上游返回的论文分析不完整（{completion_error}），已保留原报告，请重试"
+                    ),
                 }
                 return
+            if stream_error:
+                recovery_warning = "上游流在收尾阶段中断，完整报告已通过严格校验并保存"
+                warning = f"{warning}；{recovery_warning}" if warning else recovery_warning
+                analysis_metadata["warning"] = warning
+                yield {"event": "status", "data": recovery_warning}
             analysis_enrichment = dict(item.get("analysis_enrichment") or {})
             yield {"event": "status", "data": "正在生成 Zotero 精读笔记和分层标签..."}
             try:

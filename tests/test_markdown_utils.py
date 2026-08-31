@@ -7,6 +7,7 @@ from markdown_utils import (
     normalize_llm_markdown,
     normalize_zotero_report,
     zotero_report_completion_error,
+    zotero_stream_recovery_error,
 )
 
 
@@ -121,6 +122,41 @@ def test_zotero_report_completion_accepts_complete_framework_report():
     )
 
     assert zotero_report_completion_error(report, require_framework_figure=True) is None
+
+
+def test_zotero_stream_recovery_accepts_complete_evidence_anchored_report():
+    report = "\n\n".join(
+        [
+            "> 代码已开源。",
+            "## 1. 论文解决的任务\n" + "任务说明（依据：Section 1）。" * 120,
+            "## 2. 任务评估指标\n" + "指标说明（依据：Table 1）。" * 120,
+            (
+                "## 3. 方法提升指标的本质原因\n"
+                "**架构图阅读**：Figure 3 展示完整流程（依据：Figure 3）。\n\n"
+                "### 方法链路与训练/推理过程\n构建与推理过程。\n\n"
+                "### 提升指标的本质原因\n设计、机制与指标。\n\n"
+                "### SOTA 对比实验\n可比实验结果。\n\n"
+                + "证据分析（依据：Section 3）。" * 120
+                + "总结完整。"
+            ),
+        ]
+    )
+
+    assert zotero_stream_recovery_error(report, require_framework_figure=True) is None
+
+
+def test_zotero_stream_recovery_rejects_short_or_unstructured_partial_report():
+    partial = "\n\n".join(
+        [
+            "## 1. 论文解决的任务\n任务。",
+            "## 2. 任务评估指标\n指标。",
+            "## 3. 方法提升指标的本质原因\n**架构图阅读**：Figure 3。\n报告结束。",
+        ]
+    )
+
+    assert "长度不足" in str(
+        zotero_stream_recovery_error(partial, require_framework_figure=True)
+    )
 
 
 def test_zotero_report_completion_rejects_truncated_framework_report():
