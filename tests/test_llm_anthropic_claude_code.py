@@ -16,13 +16,18 @@ def test_claude_code_payload_adds_required_identity_and_preserves_system_prompt(
             {"role": "system", "content": "Academic research assistant."},
             {"role": "user", "content": "Summarize this paper."},
         ],
-        {"max_completion_tokens": 321, "temperature": 0.3},
+        {
+            "max_completion_tokens": 321,
+            "temperature": 0.3,
+            "thinking": {"type": "disabled"},
+        },
     )
 
     assert payload["model"] == "claude-opus-5"
     assert payload["max_tokens"] == 321
     assert payload["stream"] is True
     assert payload["temperature"] == 0.3
+    assert payload["thinking"] == {"type": "disabled"}
     assert payload["system"][0]["text"] == llm_module.CLAUDE_CODE_SYSTEM_PROMPT
     assert payload["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert payload["system"][1]["text"] == "Academic research assistant."

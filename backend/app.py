@@ -194,6 +194,7 @@ from zotero_enrichment import (
     markdown_to_zotero_note_html,
 )
 from zotero import (
+    ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
     ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT,
     ZoteroAuthError,
     ZoteroClient,
@@ -1945,11 +1946,17 @@ async def analyze_my_zotero_item(
                     context,
                     max_tokens=glm_context_limit,
                 )
-                analysis_stream_options["max_tokens"] = 16_384
+                analysis_stream_options.update(
+                    {
+                        "max_tokens": ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
+                        "thinking": {"type": "disabled"},
+                    }
+                )
                 if analysis_context != context:
                     proxy_warning = (
                         f"GLM 长文输入已使用 {glm_context_limit:,} token 保留 PDF 核心主文，"
-                        "并省略超长参考文献或补充材料"
+                        "并省略超长参考文献或补充材料；"
+                        f"同时压低思考开销并预留 {ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT:,} token 输出额度"
                     )
                     warning = f"{warning}；{proxy_warning}" if warning else proxy_warning
             if warning:
