@@ -194,6 +194,7 @@ from zotero_enrichment import (
     markdown_to_zotero_note_html,
 )
 from zotero import (
+    ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT,
     ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
     ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT,
     ZoteroAuthError,
@@ -1933,10 +1934,12 @@ async def analyze_my_zotero_item(
             context, source, warning = await load_zotero_reading_context(user_id, item)
             analysis_context = context
             analysis_stream_options: dict[str, Any] = {}
-            if (
+            is_glm_proxy_analysis = (
                 str(selected_config.get("provider_key") or "").casefold() == "sub2api"
                 and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
-            ):
+            )
+            glm_context_limit: int | None = None
+            if is_glm_proxy_analysis:
                 glm_context_limit = (
                     min(max(context_token_limit, 2_000), ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT)
                     if context_token_limit is not None
@@ -1950,6 +1953,7 @@ async def analyze_my_zotero_item(
                     {
                         "max_tokens": ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
                         "thinking": {"type": "disabled"},
+                        "output_config": {"effort": "low"},
                     }
                 )
                 if analysis_context != context:
@@ -2032,62 +2036,117 @@ async def analyze_my_zotero_item(
                     else "正在结合论文正文与证据锚点生成深度阅读报告..."
                 ),
             }
-            chunks: list[str] = []
-            stream_error: RuntimeError | None = None
-            try:
-                async for stream_chunk in selected_llm.get_response_stream_events(
-                    analysis_context,
-                    _analysis_instruction=analysis_instruction,
-                    _usage_context="zotero_analysis_stream",
-                    **analysis_stream_options,
-                ):
-                    if stream_chunk.kind == "reasoning":
-                        yield {"event": "reasoning", "data": stream_chunk.content}
-                        continue
-                    chunks.append(stream_chunk.content)
-                    yield {"data": stream_chunk.content}
-            except RuntimeError as exc:
-                stream_error = exc
-                logger.warning(
-                    "Zotero analysis upstream stream ended with an error for %s/%s after %s characters: %s",
-                    user_id,
-                    item_key,
-                    sum(len(chunk) for chunk in chunks),
-                    exc,
+            analysis_attempts: list[tuple[str, int | None]] = [(analysis_context, None)]
+            if (
+                is_glm_proxy_analysis
+                and glm_context_limit
+                and glm_context_limit > ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT
+            ):
+                fallback_context = compact_zotero_analysis_context(
+                    context,
+                    max_tokens=ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT,
                 )
-            normalized = normalize_zotero_report("".join(chunks))
+                if fallback_context != analysis_context:
+                    analysis_attempts.append(
+                        (fallback_context, ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT)
+                    )
+
+            normalized = ""
+            accepted_stream_error: RuntimeError | None = None
+            used_fallback_limit: int | None = None
+            last_failure_message = "论文分析没有返回内容"
+            for attempt_index, (attempt_context, fallback_limit) in enumerate(analysis_attempts):
+                if attempt_index:
+                    yield {"event": "final", "data": ""}
+                    yield {
+                        "event": "status",
+                        "data": (
+                            "首次长文请求未返回可保存正文，正在使用 "
+                            f"{fallback_limit:,} token 的 PDF 核心上下文自动重试..."
+                        ),
+                    }
+                chunks: list[str] = []
+                stream_error: RuntimeError | None = None
+                try:
+                    async for stream_chunk in selected_llm.get_response_stream_events(
+                        attempt_context,
+                        _analysis_instruction=analysis_instruction,
+                        _usage_context=(
+                            "zotero_analysis_stream_fallback"
+                            if attempt_index
+                            else "zotero_analysis_stream"
+                        ),
+                        **analysis_stream_options,
+                    ):
+                        if stream_chunk.kind == "reasoning":
+                            yield {"event": "reasoning", "data": stream_chunk.content}
+                            continue
+                        chunks.append(stream_chunk.content)
+                        yield {"data": stream_chunk.content}
+                except RuntimeError as exc:
+                    stream_error = exc
+                    logger.warning(
+                        "Zotero analysis upstream stream ended with an error for %s/%s after %s characters%s: %s",
+                        user_id,
+                        item_key,
+                        sum(len(chunk) for chunk in chunks),
+                        f" on {fallback_limit:,}-token fallback" if fallback_limit else "",
+                        exc,
+                    )
+
+                candidate = normalize_zotero_report("".join(chunks))
+                if not candidate:
+                    last_failure_message = "论文分析没有返回正式正文"
+                    continue
+                completion_error = (
+                    zotero_stream_recovery_error(
+                        candidate,
+                        require_framework_figure=bool(prompt_figure),
+                    )
+                    if stream_error or attempt_index
+                    else zotero_report_completion_error(
+                        candidate,
+                        require_framework_figure=bool(prompt_figure),
+                    )
+                )
+                if completion_error:
+                    last_failure_message = (
+                        f"上游返回的论文分析不完整（{completion_error}）"
+                    )
+                    continue
+                normalized = candidate
+                accepted_stream_error = stream_error
+                used_fallback_limit = fallback_limit
+                break
+
             if not normalized:
                 yield {
                     "event": "error",
-                    "data": "论文分析没有返回内容，已保留原报告",
+                    "data": f"{last_failure_message}，已保留原报告，请稍后重试",
                 }
                 return
-            completion_error = (
-                zotero_stream_recovery_error(
-                    normalized,
-                    require_framework_figure=bool(prompt_figure),
+
+            metadata_changed = False
+            if used_fallback_limit:
+                fallback_warning = (
+                    "供应商首轮未返回可保存正文，已自动使用 "
+                    f"{used_fallback_limit:,} token 的 PDF 核心上下文重试完成"
                 )
-                if stream_error
-                else zotero_report_completion_error(
-                    normalized,
-                    require_framework_figure=bool(prompt_figure),
-                )
-            )
-            if completion_error:
-                yield {
-                    "event": "error",
-                    "data": (
-                        f"上游流中断且论文分析不完整（{completion_error}），已保留原报告，请重试"
-                        if stream_error
-                        else f"上游返回的论文分析不完整（{completion_error}），已保留原报告，请重试"
-                    ),
-                }
-                return
-            if stream_error:
+                warning = f"{warning}；{fallback_warning}" if warning else fallback_warning
+                analysis_metadata["warning"] = warning
+                metadata_changed = True
+                yield {"event": "status", "data": fallback_warning}
+            if accepted_stream_error:
                 recovery_warning = "上游流在收尾阶段中断，完整报告已通过严格校验并保存"
                 warning = f"{warning}；{recovery_warning}" if warning else recovery_warning
                 analysis_metadata["warning"] = warning
+                metadata_changed = True
                 yield {"event": "status", "data": recovery_warning}
+            if metadata_changed:
+                yield {
+                    "event": "analysis-meta",
+                    "data": json.dumps(analysis_metadata, ensure_ascii=False),
+                }
             analysis_enrichment = dict(item.get("analysis_enrichment") or {})
             yield {"event": "status", "data": "正在生成 Zotero 精读笔记和分层标签..."}
             try:

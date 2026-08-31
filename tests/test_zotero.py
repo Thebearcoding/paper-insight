@@ -210,6 +210,7 @@ def test_compact_zotero_analysis_context_preserves_short_input():
 
 def test_glm_analysis_context_defaults_to_sixteen_thousand_tokens():
     assert zotero.ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT == 16_000
+    assert zotero.ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT == 8_000
     assert zotero.ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT == 32_768
 
 

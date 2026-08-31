@@ -163,6 +163,7 @@ def _claude_code_payload(model: str, messages: list, params: dict) -> dict:
         "tools",
         "tool_choice",
         "thinking",
+        "output_config",
         "context_management",
     }
     for key in supported:
