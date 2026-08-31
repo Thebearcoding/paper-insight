@@ -4,6 +4,12 @@ import unicodedata
 
 CODE_SEGMENT_PATTERN = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
 SAME_LINE_BLOCK_MATH_PATTERN = re.compile(r"^([ \t]*)\$\$[ \t]*(\S(?:.*?\S)?)[ \t]*\$\$[ \t]*$", re.MULTILINE)
+ZOTERO_DEEP_REPORT_TITLES = (
+    "方法链路与训练/推理过程",
+    "方法变体与组件区别",
+    "提升指标的本质原因",
+    "SOTA 对比实验",
+)
 
 
 def _mask_code_segments(content: str) -> tuple[str, list[str]]:
@@ -230,9 +236,15 @@ def normalize_zotero_report(content: str | None) -> str:
             lines.append(line)
             continue
         if not in_fence:
+            deep_subsection = re.match(r"^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$", line)
             subsection = re.match(r"^[ \t]*#{1,6}[ \t]+(\d+\.\d+(?:\.\d+)*\s+.+)$", line)
             section = re.match(r"^[ \t]*#{1,6}[ \t]+([1-7]\.\s+.+)$", line)
-            if subsection:
+            if (
+                deep_subsection
+                and deep_subsection.group(1).strip() in ZOTERO_DEEP_REPORT_TITLES
+            ):
+                line = f"### {deep_subsection.group(1).strip()}"
+            elif subsection:
                 line = f"### {subsection.group(1).strip()}"
             elif section:
                 line = f"## {section.group(1).strip()}"
@@ -245,10 +257,10 @@ ZOTERO_REPORT_HEADINGS = (
     "## 2. 任务评估指标",
     "## 3. 方法提升指标的本质原因",
 )
-ZOTERO_DEEP_REPORT_SUBHEADINGS = (
-    "### 方法链路与训练/推理过程",
-    "### 提升指标的本质原因",
-    "### SOTA 对比实验",
+ZOTERO_DEEP_REPORT_SUBHEADINGS = tuple(
+    f"### {title}"
+    for title in ZOTERO_DEEP_REPORT_TITLES
+    if title != "方法变体与组件区别"
 )
 
 

@@ -104,6 +104,33 @@ async def test_generate_zotero_enrichment_retries_truncated_json():
     assert "保证 JSON 完整闭合" in fake_llm.calls[1][0][1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_generate_zotero_enrichment_limits_glm_reasoning():
+    class FakeLLM:
+        def __init__(self):
+            self.kwargs = None
+
+        def public_config(self):
+            return {"provider_key": "sub2api", "model_name": "glm-5.3"}
+
+        async def chat(self, messages, **kwargs):
+            self.kwargs = kwargs
+            return json.dumps(
+                {
+                    "note_markdown": "# 一句话结论\n生成成功。",
+                    "tags": [{"group": "状态", "value": "已精读"}],
+                },
+                ensure_ascii=False,
+            )
+
+    fake_llm = FakeLLM()
+    await generate_zotero_enrichment(fake_llm, {"title": "MRAD"}, "完整报告")
+
+    assert fake_llm.kwargs["max_tokens"] == 8192
+    assert fake_llm.kwargs["thinking"] == {"type": "disabled"}
+    assert fake_llm.kwargs["output_config"] == {"effort": "low"}
+
+
 def test_markdown_to_zotero_note_html_marks_and_escapes_content():
     result = markdown_to_zotero_note_html(
         "## 核心问题\n- <script>alert(1)</script>\n结论",

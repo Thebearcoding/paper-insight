@@ -90,6 +90,25 @@ async def generate_zotero_enrichment(
             report,
         ]
     )
+    chat_options: dict[str, Any] = {
+        "temperature": 0.1,
+        "max_tokens": 4096,
+    }
+    try:
+        public_config = llm.public_config()
+    except (AttributeError, RuntimeError):
+        public_config = {}
+    if (
+        str(public_config.get("provider_key") or "").casefold() == "sub2api"
+        and str(public_config.get("model_name") or "").casefold() == "glm-5.3"
+    ):
+        chat_options.update(
+            {
+                "max_tokens": 8192,
+                "thinking": {"type": "disabled"},
+                "output_config": {"effort": "low"},
+            }
+        )
     last_error: Exception | None = None
     for attempt in range(1, 3):
         retry_instruction = ""
@@ -103,13 +122,12 @@ async def generate_zotero_enrichment(
                 {"role": "system", "content": ZOTERO_NOTE_AND_TAG_PROMPT},
                 {"role": "user", "content": prompt + retry_instruction},
             ],
-            temperature=0.1,
-            max_tokens=4096,
             _usage_context=(
                 "zotero_note_and_tags"
                 if attempt == 1
                 else "zotero_note_and_tags_retry"
             ),
+            **chat_options,
         )
         try:
             parsed = _extract_json_object(raw_response or "")

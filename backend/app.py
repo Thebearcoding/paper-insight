@@ -2103,7 +2103,7 @@ async def analyze_my_zotero_item(
                         candidate,
                         require_framework_figure=bool(prompt_figure),
                     )
-                    if stream_error or attempt_index
+                    if stream_error or attempt_index or is_glm_proxy_analysis
                     else zotero_report_completion_error(
                         candidate,
                         require_framework_figure=bool(prompt_figure),

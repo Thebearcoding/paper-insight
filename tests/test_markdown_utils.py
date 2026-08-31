@@ -145,6 +145,26 @@ def test_zotero_stream_recovery_accepts_complete_evidence_anchored_report():
     assert zotero_stream_recovery_error(report, require_framework_figure=True) is None
 
 
+def test_zotero_report_normalizes_named_deep_sections_to_level_three():
+    report = "\n".join(
+        [
+            "## 3. 方法提升指标的本质原因",
+            "## 方法链路与训练/推理过程",
+            "#### 方法变体与组件区别",
+            "## 提升指标的本质原因",
+            "## SOTA 对比实验",
+        ]
+    )
+
+    normalized = normalize_zotero_report(report)
+
+    assert "### 方法链路与训练/推理过程" in normalized
+    assert "### 方法变体与组件区别" in normalized
+    assert "### 提升指标的本质原因" in normalized
+    assert "### SOTA 对比实验" in normalized
+    assert "\n## 方法链路与训练/推理过程" not in normalized
+
+
 def test_zotero_stream_recovery_rejects_short_or_unstructured_partial_report():
     partial = "\n\n".join(
         [
