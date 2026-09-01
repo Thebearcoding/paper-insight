@@ -246,7 +246,8 @@ hf_daily:
 
 - 定时任务运行在 FastAPI 进程内
 - 每个配置日期抓取一次 Hugging Face Daily Papers API
-- `proxy_url` 仅作用于 HF Daily API，不会改变 LLM、Zotero 或其他外部请求的网络出口
+- `proxy_url` 仅作用于 HF Daily API；需要让整个应用的外部 HTTP(S) 请求统一走代理时，在 `.env` 配置 `OUTBOUND_PROXY_URL`
+- `OUTBOUND_NO_PROXY` 默认保留 PostgreSQL、Typesense 和其他容器内部服务直连；不要删除这些内部主机名
 - 点赞数最高的论文会写入 `papers`，来源元数据写入 `hf_daily_papers`
 - 新论文在 AI 分析完成前保持 `llm_response IS NULL`
 - 管理员后台提供手动同步按钮

@@ -46,6 +46,14 @@ services:
       TYPESENSE_SEMANTIC_SEARCH_ENABLED: ${TYPESENSE_SEMANTIC_SEARCH_ENABLED:-true}
       TYPESENSE_TIMEOUT_SECONDS: ${TYPESENSE_TIMEOUT_SECONDS:-10}
       OPENALEX_API_KEY: ${OPENALEX_API_KEY:-}
+      HTTP_PROXY: ${OUTBOUND_PROXY_URL:-}
+      HTTPS_PROXY: ${OUTBOUND_PROXY_URL:-}
+      ALL_PROXY: ${OUTBOUND_PROXY_URL:-}
+      NO_PROXY: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api}
+      http_proxy: ${OUTBOUND_PROXY_URL:-}
+      https_proxy: ${OUTBOUND_PROXY_URL:-}
+      all_proxy: ${OUTBOUND_PROXY_URL:-}
+      no_proxy: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api}
     ports:
       - "127.0.0.1:${PORT:-8000}:8000"
     volumes:

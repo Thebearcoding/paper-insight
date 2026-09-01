@@ -11,6 +11,12 @@ Set `PAPER_DOMAIN` and the database variables in `.env`, and create
 `config.yaml` from `config.server.yaml.example`. The application stays bound to
 localhost while Caddy publishes ports 80 and 443.
 
+To route every outbound HTTP(S) request from the application through one HTTP
+proxy, set `OUTBOUND_PROXY_URL` in `.env`. Keep `OUTBOUND_NO_PROXY` populated
+with the bundled internal service names so PostgreSQL, Typesense, and other
+Docker-network traffic remain direct. Both uppercase and lowercase proxy
+variables are injected for compatibility with the application's HTTP clients.
+
 On a fresh server checkout, the bootstrap helper can generate the secret files
 without printing their values:
 
