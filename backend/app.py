@@ -3,6 +3,7 @@ import json
 import math
 import logging
 import secrets
+from typing import Any
 from pathlib import Path
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from contextlib import asynccontextmanager
@@ -203,6 +204,7 @@ from zotero import (
     compact_zotero_analysis_context,
     delete_user_cache as delete_zotero_user_cache,
     get_item_reading_context,
+    select_paper_main_text,
 )
 import typesense_search
 
@@ -3176,19 +3178,130 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             content_error = "论文没有可用 PDF 链接"
             yield {"event": "status", "data": "未找到 PDF 链接，正在基于论文元数据分析..."}
 
-        yield {"event": "status", "data": "正在分析论文..."}
+        try:
+            selected_config = llm.public_config()
+        except Exception as exc:
+            logger.warning("Unable to read active LLM config for paper analysis: %s", exc)
+            yield {"event": "error", "data": "当前 LLM 配置读取失败，请稍后重试"}
+            return
 
-        user_prompt = build_analysis_prompt(paper_info, paper_content, content_error)
+        is_glm_proxy_analysis = (
+            str(selected_config.get("provider_key") or "").casefold() == "sub2api"
+            and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
+        )
+        analysis_stream_options: dict[str, Any] = {}
+        analysis_attempts: list[tuple[str | None, int | None]] = [(paper_content, None)]
+        if is_glm_proxy_analysis:
+            primary_content = (
+                select_paper_main_text(paper_content, ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT)
+                if paper_content
+                else None
+            )
+            fallback_content = (
+                select_paper_main_text(
+                    paper_content,
+                    ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT,
+                )
+                if paper_content
+                else None
+            )
+            # Keep a second attempt even when the paper already fits in 8k tokens.
+            # A retry still recovers transient upstream connection failures.
+            analysis_attempts = [
+                (primary_content, ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT),
+                (fallback_content, ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT),
+            ]
+            analysis_stream_options.update(
+                {
+                    "max_tokens": ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
+                    "thinking": {"type": "disabled"},
+                    "output_config": {"effort": "low"},
+                }
+            )
+            if paper_content and primary_content != paper_content:
+                yield {
+                    "event": "status",
+                    "data": (
+                        "GLM 长文输入已保留 16,000 token 的 PDF 核心主文，"
+                        "正在生成深度分析..."
+                    ),
+                }
+            else:
+                yield {"event": "status", "data": "正在分析论文..."}
+        else:
+            yield {"event": "status", "data": "正在分析论文..."}
 
-        full_response = []
-        async for stream_chunk in llm.get_response_stream_events(user_prompt):
-            if stream_chunk.kind == "reasoning":
-                yield {"event": "reasoning", "data": stream_chunk.content}
-                continue
-            full_response.append(stream_chunk.content)
-            yield {"data": stream_chunk.content}
+        normalized_response = ""
+        last_failure_message = "论文分析没有返回内容"
+        for attempt_index, (attempt_content, context_limit) in enumerate(analysis_attempts):
+            if attempt_index:
+                yield {"event": "final", "data": ""}
+                yield {
+                    "event": "status",
+                    "data": (
+                        "上游长连接中断或返回内容不完整，正在使用 "
+                        f"{context_limit:,} token 的 PDF 核心正文自动重试..."
+                    ),
+                }
 
-        normalized_response = normalize_llm_markdown("".join(full_response), analysis_mode=True)
+            user_prompt = build_analysis_prompt(paper_info, attempt_content, content_error)
+            full_response: list[str] = []
+            stream_error: Exception | None = None
+            try:
+                async for stream_chunk in llm.get_response_stream_events(
+                    user_prompt,
+                    _usage_context=(
+                        "paper_analysis_stream_fallback"
+                        if attempt_index
+                        else "paper_analysis_stream"
+                    ),
+                    **analysis_stream_options,
+                ):
+                    if stream_chunk.kind == "reasoning":
+                        yield {"event": "reasoning", "data": stream_chunk.content}
+                        continue
+                    full_response.append(stream_chunk.content)
+                    yield {"data": stream_chunk.content}
+            except Exception as exc:
+                stream_error = exc
+                logger.warning(
+                    "Paper analysis upstream stream ended for %s after %s characters%s: %s: %s",
+                    paper_id,
+                    sum(len(chunk) for chunk in full_response),
+                    f" on {context_limit:,}-token context" if context_limit else "",
+                    type(exc).__name__,
+                    exc,
+                )
+
+            candidate = normalize_zotero_report("".join(full_response))
+            completion_error = (
+                zotero_stream_recovery_error(candidate)
+                if stream_error
+                else zotero_report_completion_error(candidate)
+            )
+            if candidate and not completion_error:
+                normalized_response = candidate
+                if stream_error:
+                    yield {
+                        "event": "status",
+                        "data": "上游连接在收尾阶段中断，但完整报告已校验通过并保留",
+                    }
+                break
+
+            if stream_error:
+                last_failure_message = "上游模型连接中断"
+                if completion_error:
+                    last_failure_message += f"，且已生成内容不完整（{completion_error}）"
+            elif completion_error:
+                last_failure_message = f"上游返回的论文分析不完整（{completion_error}）"
+
+        if not normalized_response:
+            yield {
+                "event": "error",
+                "data": f"{last_failure_message}，未覆盖原有报告，请稍后重试",
+            }
+            return
+
         await asyncio.to_thread(update_llm_response, paper_id, normalized_response)
         paper_info["llm_response"] = normalized_response
         await background_analyzer.update_code_availability(paper_info, normalized_response)

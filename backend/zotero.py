@@ -662,7 +662,7 @@ def compact_zotero_analysis_context(
     metadata_limit = min(3_000, max(max_tokens // 5, 500))
     fulltext_limit = max(max_tokens - metadata_limit - 500, 1_000)
     compact_metadata = truncate_content_for_llm(metadata.strip(), max_tokens=metadata_limit)
-    compact_fulltext = _select_zotero_main_text(fulltext.strip(), fulltext_limit)
+    compact_fulltext = select_paper_main_text(fulltext.strip(), fulltext_limit)
     return (
         compact_metadata
         + "\n\n模型输入范围：以下内容来自论文 PDF 主文；为适配当前模型代理，"
@@ -672,7 +672,8 @@ def compact_zotero_analysis_context(
     )
 
 
-def _select_zotero_main_text(fulltext: str, max_tokens: int) -> str:
+def select_paper_main_text(fulltext: str, max_tokens: int) -> str:
+    """Keep the introduction, method/experiment boundary, and conclusion of long papers."""
     token_ids = _TOKEN_ENCODING.encode(fulltext, disallowed_special=())
     if len(token_ids) <= max_tokens:
         return fulltext
