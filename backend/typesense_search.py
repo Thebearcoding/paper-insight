@@ -23,6 +23,17 @@ from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
+_MULTILINGUAL_QUERY_REPLACEMENTS = (
+    ("工业图像缺陷检测", "industrial image defect detection"),
+    ("表面缺陷检测", "surface defect detection"),
+    ("工业缺陷检测", "industrial defect detection"),
+    ("工业异常检测", "industrial anomaly detection"),
+    ("零样本异常检测", "zero-shot anomaly detection"),
+    ("少样本异常检测", "few-shot anomaly detection"),
+    ("缺陷检测", "defect detection"),
+    ("异常检测", "anomaly detection"),
+)
+
 
 class TypesenseSearchError(RuntimeError):
     """Raised when Typesense cannot serve or update the paper index."""
@@ -288,15 +299,35 @@ def _import_documents(collection_name: str, documents: list[dict[str, Any]]) -> 
     return imported
 
 
-def collection_document_count() -> int | None:
+def collection_status() -> tuple[int | None, bool]:
+    """Return the indexed document count and whether the schema matches search settings."""
+
     response = _request(
         "GET",
         f"/collections/{settings.typesense.collection_alias}",
         allow_not_found=True,
     )
     if response is None:
-        return None
-    return int(response.json().get("num_documents") or 0)
+        return None, False
+
+    payload = response.json()
+    schema_compatible = True
+    if settings.typesense.semantic_search_enabled:
+        embedding = next(
+            (
+                field
+                for field in payload.get("fields", [])
+                if field.get("name") == "embedding" and field.get("type") == "float[]"
+            ),
+            None,
+        )
+        model_config = ((embedding or {}).get("embed") or {}).get("model_config") or {}
+        schema_compatible = model_config.get("model_name") == settings.typesense.embedding_model
+    return int(payload.get("num_documents") or 0), schema_compatible
+
+
+def collection_document_count() -> int | None:
+    return collection_status()[0]
 
 
 def rebuild_index(batch_size: int = 100, prune_old: bool = True) -> int:
@@ -357,6 +388,13 @@ def _filter_value(value: str) -> str:
     return f"`{escaped}`"
 
 
+def _expand_multilingual_query(value: str) -> str:
+    expanded = value
+    for source, target in _MULTILINGUAL_QUERY_REPLACEMENTS:
+        expanded = expanded.replace(source, target)
+    return expanded
+
+
 def _build_filter(venue_prefix: str | None, code_filter: str) -> str | None:
     filters: list[str] = []
     if venue_prefix:
@@ -406,7 +444,7 @@ def search_paper_ids(
         query_fields.append("embedding")
 
     params: dict[str, Any] = {
-        "q": search.strip(),
+        "q": _expand_multilingual_query(search.strip()),
         "query_by": ",".join(query_fields),
         "page": max(page, 1),
         "per_page": max(per_page, 1),

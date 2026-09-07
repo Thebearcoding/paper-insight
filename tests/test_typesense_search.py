@@ -83,6 +83,41 @@ def test_collection_schema_keeps_full_text_search_but_limits_embedding_cost(monk
     )
 
 
+def test_collection_status_rejects_stale_schema_without_embedding(monkeypatch):
+    monkeypatch.setattr(typesense_search, "settings", _settings())
+    monkeypatch.setattr(
+        typesense_search,
+        "_request",
+        lambda *args, **kwargs: FakeResponse({"num_documents": 42, "fields": []}),
+    )
+
+    assert typesense_search.collection_status() == (42, False)
+
+
+def test_collection_status_accepts_configured_embedding_model(monkeypatch):
+    monkeypatch.setattr(typesense_search, "settings", _settings())
+    monkeypatch.setattr(
+        typesense_search,
+        "_request",
+        lambda *args, **kwargs: FakeResponse(
+            {
+                "num_documents": 42,
+                "fields": [
+                    {
+                        "name": "embedding",
+                        "type": "float[]",
+                        "embed": {
+                            "model_config": {"model_name": "ts/multilingual-e5-small"}
+                        },
+                    }
+                ],
+            }
+        ),
+    )
+
+    assert typesense_search.collection_status() == (42, True)
+
+
 def test_search_paper_ids_builds_multilingual_hybrid_query(monkeypatch):
     monkeypatch.setattr(typesense_search, "settings", _settings())
     captured = {}
@@ -115,6 +150,7 @@ def test_search_paper_ids_builds_multilingual_hybrid_query(monkeypatch):
     assert paper_ids == ["paper-2", "paper-1"]
     assert total == 2
     assert captured["path"] == "/collections/papers/documents/search"
+    assert captured["params"]["q"] == "defect detection"
     assert captured["params"]["query_by"] == "title,keywords,abstract,embedding"
     assert captured["params"]["rerank_hybrid_matches"] == "false"
     assert "alpha:0.4" in captured["params"]["vector_query"]
@@ -146,6 +182,15 @@ def test_search_paper_ids_respects_field_filters(monkeypatch):
 
     assert captured["params"]["query_by"] == "title"
     assert "vector_query" not in captured["params"]
+
+
+def test_multilingual_query_expansion_prefers_specific_domain_terms():
+    assert typesense_search._expand_multilingual_query("工业图像缺陷检测") == (
+        "industrial image defect detection"
+    )
+    assert typesense_search._expand_multilingual_query("工业异常检测 Transformer") == (
+        "industrial anomaly detection Transformer"
+    )
 
 
 def test_database_search_prefers_typesense_and_preserves_order(monkeypatch):

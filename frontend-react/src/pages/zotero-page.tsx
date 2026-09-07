@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   BookOpen,
   CheckCircle2,
   ExternalLink,
+  FolderClosed,
   KeyRound,
   Library,
   Loader2,
@@ -26,6 +27,7 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { navigate } from '@/lib/router';
+import { flattenZoteroCollections } from '@/lib/zotero-collections';
 import type { ZoteroCollection, ZoteroConnection, ZoteroItem } from '@/types';
 
 
@@ -52,6 +54,7 @@ export function ZoteroPage() {
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const collectionTree = useMemo(() => flattenZoteroCollections(collections), [collections]);
 
   const loadLibrary = useCallback(async () => {
     const [nextCollections, nextItems] = await Promise.all([
@@ -294,9 +297,17 @@ export function ZoteroPage() {
           <CardHeader><CardTitle className="text-base">分类</CardTitle></CardHeader>
           <CardContent className="space-y-1">
             <Button variant={collectionKey === null ? 'secondary' : 'ghost'} className="w-full justify-start" onClick={() => { setCollectionKey(null); setPage(1); }}>全部条目</Button>
-            {collections.map((collection) => (
-              <Button key={collection.collection_key} variant={collectionKey === collection.collection_key ? 'secondary' : 'ghost'} className="w-full justify-start truncate" onClick={() => { setCollectionKey(collection.collection_key); setPage(1); }}>
-                {collection.name}
+            {collectionTree.map((collection) => (
+              <Button
+                key={collection.collection_key}
+                variant={collectionKey === collection.collection_key ? 'secondary' : 'ghost'}
+                className="w-full justify-start overflow-hidden"
+                style={{ paddingLeft: `${12 + collection.depth * 16}px` }}
+                title={collection.path}
+                onClick={() => { setCollectionKey(collection.collection_key); setPage(1); }}
+              >
+                <FolderClosed className="mr-2 h-4 w-4 shrink-0 text-slate-400" />
+                <span className="truncate">{collection.name}</span>
               </Button>
             ))}
           </CardContent>

@@ -235,9 +235,12 @@ async def ensure_typesense_index() -> None:
 
     for attempt in range(1, 13):
         try:
-            document_count = await asyncio.to_thread(typesense_search.collection_document_count)
-            if document_count is None or document_count == 0:
-                logger.info("Typesense 索引为空，开始后台重建")
+            document_count, schema_compatible = await asyncio.to_thread(
+                typesense_search.collection_status
+            )
+            if document_count is None or document_count == 0 or not schema_compatible:
+                reason = "为空" if not document_count else "结构与当前搜索配置不一致"
+                logger.info("Typesense 索引%s，开始后台重建", reason)
                 document_count = await asyncio.to_thread(typesense_search.rebuild_index)
             logger.info("Typesense 搜索已就绪，共 %s 篇论文", document_count)
             return
