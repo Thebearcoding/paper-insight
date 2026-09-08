@@ -7,9 +7,56 @@ afterEach(() => {
 });
 
 describe('streamSse', () => {
+  it('parses CRLF boundaries even when each byte arrives separately', async () => {
+    const bytes = new TextEncoder().encode('data: 中文\r\n\r\nevent: done\r\ndata: \r\n\r\n');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of bytes) controller.enqueue(new Uint8Array([byte]));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body)));
+    const chunks: string[] = [];
+    const events: string[] = [];
+    await streamSse('/test-stream', {}, {
+      onChunk: (chunk) => chunks.push(chunk),
+      onEvent: (event) => events.push(event),
+    });
+    expect(chunks).toEqual(['中文']);
+    expect(events).toContain('done');
+  });
+
+  it('rejects a stream that closes without confirming completion', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('data: half a report\n\n')));
+    await expect(streamSse('/test-stream', {}, {})).rejects.toThrow('完成');
+  });
+
+  it('stops and releases the connection on done without waiting for EOF', async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: done\ndata: \n\n'));
+      },
+      cancel,
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body)));
+    await streamSse('/test-stream', {}, {});
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a server error instead of replacing it with an EOF error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('event: error\ndata: 模型不可用\n\n')));
+    await expect(streamSse('/test-stream', {}, {})).rejects.toThrow('模型不可用');
+  });
+
+  it('shows the API explanation for an unsuccessful request', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ detail: '请重新登录' }), { status: 401 })));
+    await expect(streamSse('/test-stream', {}, {})).rejects.toThrow('请重新登录');
+  });
+
   it('removes only the protocol space and preserves content indentation', async () => {
     const chunks: string[] = [];
-    const body = 'data: top\ndata:   nested\n\ndata:  \n\n';
+    const body = 'data: top\ndata:   nested\n\ndata:  \n\nevent: done\ndata: \n\n';
     vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200 })));
 
     await streamSse('/test-stream', { method: 'GET' }, {

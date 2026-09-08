@@ -31,6 +31,11 @@ def main() -> int:
         action="store_true",
         help="Keep the previously aliased physical collection after the alias switch.",
     )
+    parser.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Allow an empty PostgreSQL source to replace a non-empty index.",
+    )
     args = parser.parse_args()
 
     if not is_enabled():
@@ -50,6 +55,7 @@ def main() -> int:
         total = rebuild_index(
             batch_size=max(args.batch_size, 1),
             prune_old=not args.keep_old,
+            allow_empty=args.allow_empty,
         )
     except TypesenseSearchError as exc:
         print(f"Typesense reindex failed: {exc}")

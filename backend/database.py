@@ -4326,6 +4326,8 @@ def _search_papers(
                 exc,
             )
 
+    if search:
+        search = typesense_search._expand_multilingual_query(search)
     cache_key = _build_cache_key(
         venue_prefix, offset, limit, search, search_title, search_abstract, search_keywords, code_filter
     )
@@ -4393,6 +4395,8 @@ def _search_papers_with_read_filter(
         return [], 0
 
     read_clause, read_params = _paper_read_filter_clause(user_id, read_status, "p")
+    if search:
+        search = typesense_search._expand_multilingual_query(search)
 
     def operation() -> tuple[list[dict], int]:
         with _get_connection() as conn:
@@ -4466,6 +4470,8 @@ def count_search_paper_read_states(
         return _read_counts_payload(0, 0)
     if search and not (search_title or search_abstract or search_keywords):
         return _read_counts_payload(0, 0)
+    if search:
+        search = typesense_search._expand_multilingual_query(search)
 
     def operation() -> dict[str, int]:
         with _get_connection() as conn:

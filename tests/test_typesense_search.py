@@ -1,4 +1,5 @@
 import sys
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import database
 import typesense_search
+import pytest
 
 
 class FakeResponse:
@@ -17,6 +19,54 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+
+@pytest.mark.parametrize(
+    'failure',
+    ['short_import', 'count_mismatch', 'empty_source', 'switch_timeout', 'prune_error'],
+)
+def test_rebuild_preserves_serving_index_on_failure(monkeypatch, failure):
+    monkeypatch.setattr(typesense_search, 'settings', _settings())
+    state = {'alias': 'old', 'new': None, 'deleted': []}
+
+    def request(method, path, **kwargs):
+        if method == 'GET' and path == '/aliases/papers':
+            return FakeResponse({'collection_name': state['alias']})
+        if method == 'POST' and path == '/collections':
+            state['new'] = kwargs['payload']['name']
+            return FakeResponse({})
+        if method == 'POST' and path.endswith('/documents/import'):
+            return FakeResponse({}, '' if failure == 'short_import' else '{"success":true}')
+        if method == 'GET' and path.startswith('/collections/'):
+            if path == '/collections/papers':
+                return FakeResponse({'num_documents': 1})
+            return FakeResponse(
+                {'num_documents': 0 if failure in {'count_mismatch', 'empty_source'} else 1}
+            )
+        if method == 'PUT':
+            state['alias'] = kwargs['payload']['collection_name']
+            if failure == 'switch_timeout':
+                raise typesense_search.TypesenseSearchError('response lost after committed write')
+            return FakeResponse({})
+        if method == 'DELETE':
+            name = path.split('/')[-1]
+            if failure == 'prune_error' and name == 'old':
+                raise typesense_search.TypesenseSearchError('cleanup failed')
+            state['deleted'].append(name)
+            return FakeResponse({})
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(typesense_search, '_request', request)
+    documents = [] if failure == 'empty_source' else [[{'id': 'p1'}]]
+    monkeypatch.setattr(typesense_search, 'iter_postgres_documents', lambda **kwargs: iter(documents))
+    if failure in {'short_import', 'count_mismatch', 'empty_source'}:
+        with pytest.raises(typesense_search.TypesenseSearchError):
+            typesense_search.rebuild_index()
+        assert state['alias'] == 'old'
+    else:
+        assert typesense_search.rebuild_index() == 1
+        assert state['alias'] == state['new']
+    assert state['alias'] not in state['deleted']
 
 
 def _settings(**overrides):
@@ -191,6 +241,37 @@ def test_multilingual_query_expansion_prefers_specific_domain_terms():
     assert typesense_search._expand_multilingual_query("工业异常检测 Transformer") == (
         "industrial anomaly detection Transformer"
     )
+
+
+@pytest.mark.parametrize('mode', ['fallback', 'unread', 'read_counts'])
+def test_chinese_query_is_preserved_across_search_backends(monkeypatch, mode):
+    monkeypatch.setattr(database, 'DATABASE_URL', 'postgresql://test/paper_online')
+    database._conference_cache.clear()
+    database._cache_timestamp.clear()
+    monkeypatch.setattr(typesense_search, 'should_use_search', lambda *a, **kw: False)
+    queries = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, sql, params): queries.append(params[0])
+        def fetchall(self): return []
+        def fetchone(self): return {'total': 0, 'read_total': 0}
+
+    @contextmanager
+    def connection():
+        yield SimpleNamespace(cursor=lambda: Cursor())
+
+    monkeypatch.setattr(database, '_get_connection', connection)
+    monkeypatch.setattr(database, '_load_keywords_for_papers', lambda rows: (rows, {}))
+    if mode == 'fallback':
+        database._search_papers(None, 0, 8, '缺陷检测', True, True, True)
+    elif mode == 'unread':
+        database._search_papers_with_read_filter(None, 0, 8, '缺陷检测', True, True, True, 'user', 'unread')
+    else:
+        database.count_search_paper_read_states(None, '缺陷检测', True, True, True, 'user')
+    assert queries
+    assert all(query == 'defect detection' for query in queries)
 
 
 def test_database_search_prefers_typesense_and_preserves_order(monkeypatch):

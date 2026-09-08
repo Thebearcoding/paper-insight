@@ -324,8 +324,13 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
         zoteroItemApiPath(itemKey, `/analysis${query ? `?${query}` : ''}`),
         { method: 'GET', signal: controller.signal },
         {
-          onChunk: (chunk) => setAnalysis((current) => current + chunk),
+          onChunk: (chunk) => {
+            if (!controller.signal.aborted && abortRef.current === controller) {
+              setAnalysis((current) => current + chunk);
+            }
+          },
           onEvent: (event, data) => {
+            if (controller.signal.aborted || abortRef.current !== controller) return;
             if (event === 'status') {
               setAnalysisStatus(data);
             } else if (event === 'reasoning') {

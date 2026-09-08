@@ -16,9 +16,17 @@ class ChatSession:
         return messages
 
     async def send(self, user_message: str, **kwargs) -> str:
-        self.history.append({"role": "user", "content": user_message})
-        reply = await self.llm.chat(self._build_messages(), **kwargs)
-        normalized_reply = normalize_llm_markdown(reply)
+        user_turn = {"role": "user", "content": user_message}
+        self.history.append(user_turn)
+        try:
+            reply = await self.llm.chat(self._build_messages(), **kwargs)
+            normalized_reply = normalize_llm_markdown(reply)
+        except BaseException:
+            # Keep a failed attempt out of the next prompt. Otherwise a retry
+            # contains an unanswered duplicate user message.
+            if self.history and self.history[-1] is user_turn:
+                self.history.pop()
+            raise
         self.history.append({"role": "assistant", "content": normalized_reply})
         return normalized_reply
 
@@ -28,13 +36,22 @@ class ChatSession:
                 yield stream_chunk.content
 
     async def send_stream_events(self, user_message: str, **kwargs):
-        self.history.append({"role": "user", "content": user_message})
+        user_turn = {"role": "user", "content": user_message}
+        self.history.append(user_turn)
         chunks = []
-        async for stream_chunk in self.llm.chat_stream_events(self._build_messages(), **kwargs):
-            if stream_chunk.kind == "content":
-                chunks.append(stream_chunk.content)
-            yield stream_chunk
-        self.history.append({"role": "assistant", "content": normalize_llm_markdown("".join(chunks))})
+        try:
+            async for stream_chunk in self.llm.chat_stream_events(self._build_messages(), **kwargs):
+                if stream_chunk.kind == "content":
+                    chunks.append(stream_chunk.content)
+                yield stream_chunk
+            normalized_reply = normalize_llm_markdown("".join(chunks))
+        except BaseException:
+            # Also covers client cancellation, which closes an async generator
+            # with GeneratorExit/CancelledError rather than a normal Exception.
+            if self.history and self.history[-1] is user_turn:
+                self.history.pop()
+            raise
+        self.history.append({"role": "assistant", "content": normalized_reply})
 
     def clear(self):
         self.history.clear()

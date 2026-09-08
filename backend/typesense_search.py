@@ -296,6 +296,10 @@ def _import_documents(collection_name: str, documents: list[dict[str, Any]]) -> 
         raise TypesenseSearchError(
             f"Typesense import failed for {len(failures)} documents: {failures[0][:300]}"
         )
+    if imported != len(documents):
+        raise TypesenseSearchError(
+            f"Typesense import acknowledged {imported} of {len(documents)} documents"
+        )
     return imported
 
 
@@ -330,7 +334,11 @@ def collection_document_count() -> int | None:
     return collection_status()[0]
 
 
-def rebuild_index(batch_size: int = 100, prune_old: bool = True) -> int:
+def rebuild_index(
+    batch_size: int = 100,
+    prune_old: bool = True,
+    allow_empty: bool = False,
+) -> int:
     """Build a fresh physical collection and atomically switch the alias."""
 
     alias = settings.typesense.collection_alias
@@ -339,18 +347,42 @@ def rebuild_index(batch_size: int = 100, prune_old: bool = True) -> int:
     previous_collection = (
         str(previous_alias.json().get("collection_name")) if previous_alias is not None else None
     )
+    previous_document_count = 0
+    if previous_collection:
+        previous_index = _request(
+            "GET",
+            f"/collections/{alias}",
+            allow_not_found=True,
+        )
+        if previous_index is not None:
+            previous_document_count = int(previous_index.json().get("num_documents") or 0)
 
-    _request(
-        "POST",
-        "/collections",
-        payload=_collection_schema(physical_name),
-        timeout_seconds=max(settings.typesense.timeout_seconds, 300),
-    )
     total = 0
     try:
+        _request(
+            "POST",
+            "/collections",
+            payload=_collection_schema(physical_name),
+            timeout_seconds=max(settings.typesense.timeout_seconds, 300),
+        )
         for documents in iter_postgres_documents(batch_size=batch_size):
             total += _import_documents(physical_name, documents)
             logger.info("Typesense indexed %s papers", total)
+        verification = _request("GET", f"/collections/{physical_name}")
+        if verification is None or int(verification.json().get("num_documents") or 0) != total:
+            raise TypesenseSearchError("Typesense rebuilt collection document count mismatch")
+        if not allow_empty and previous_document_count > 0 and total == 0:
+            raise TypesenseSearchError(
+                "Refusing to replace a non-empty Typesense index with an empty rebuild"
+            )
+    except Exception:
+        try:
+            _request("DELETE", f"/collections/{physical_name}", allow_not_found=True)
+        except Exception:
+            logger.warning("Could not clean up failed index %s", physical_name, exc_info=True)
+        raise
+
+    try:
         _request(
             "PUT",
             f"/aliases/{alias}",
@@ -358,11 +390,18 @@ def rebuild_index(batch_size: int = 100, prune_old: bool = True) -> int:
             timeout_seconds=max(settings.typesense.timeout_seconds, 60),
         )
     except Exception:
-        _request("DELETE", f"/collections/{physical_name}", allow_not_found=True)
-        raise
+        # A timed-out write can already have committed. Never delete the candidate
+        # after attempting the alias switch; preserve it even if readback also fails.
+        confirmed_alias = _request("GET", f"/aliases/{alias}", allow_not_found=True)
+        if confirmed_alias is None or confirmed_alias.json().get("collection_name") != physical_name:
+            raise
+        logger.warning("Typesense alias switch response failed, but readback confirmed success")
 
     if prune_old and previous_collection and previous_collection != physical_name:
-        _request("DELETE", f"/collections/{previous_collection}", allow_not_found=True)
+        try:
+            _request("DELETE", f"/collections/{previous_collection}", allow_not_found=True)
+        except Exception:
+            logger.warning("New index is serving; could not prune %s", previous_collection, exc_info=True)
     return total
 
 

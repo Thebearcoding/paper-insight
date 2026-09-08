@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   BookOpen,
@@ -54,23 +54,31 @@ export function ZoteroPage() {
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reloadVersion, setReloadVersion] = useState(0);
+  const libraryRequestRef = useRef(0);
+  const connectionRequestRef = useRef(0);
   const collectionTree = useMemo(() => flattenZoteroCollections(collections), [collections]);
 
-  const loadLibrary = useCallback(async () => {
+  const loadLibrary = useCallback(async (isCurrent: () => boolean = () => true) => {
+    const requestId = ++libraryRequestRef.current;
     const [nextCollections, nextItems] = await Promise.all([
       fetchZoteroCollections(),
       fetchZoteroItems(page, search, collectionKey),
     ]);
+    if (!isCurrent() || requestId !== libraryRequestRef.current) return;
     setCollections(nextCollections);
     setItems(nextItems.items);
     setPages(nextItems.pages);
     setTotal(nextItems.total);
   }, [collectionKey, page, search]);
 
-  const refreshConnection = useCallback(async () => {
+  const refreshConnection = useCallback(async (isCurrent: () => boolean = () => true) => {
+    const requestId = ++connectionRequestRef.current;
     const next = await fetchZoteroConnection();
-    setConnection(next);
-    setSyncing(next.sync_status === 'running');
+    if (isCurrent() && requestId === connectionRequestRef.current) {
+      setConnection(next);
+      setSyncing(next.sync_status === 'running');
+    }
     return next;
   }, []);
 
@@ -84,10 +92,11 @@ export function ZoteroPage() {
     }
     let active = true;
     setLoading(true);
-    void refreshConnection()
+    setError(null);
+    void refreshConnection(() => active)
       .then(async (next) => {
         if (active && next.configured) {
-          await loadLibrary();
+          await loadLibrary(() => active);
         }
       })
       .catch((nextError) => {
@@ -102,25 +111,45 @@ export function ZoteroPage() {
       });
     return () => {
       active = false;
+      libraryRequestRef.current += 1;
+      connectionRequestRef.current += 1;
     };
-  }, [isAuthLoading, loadLibrary, refreshConnection, user]);
+  }, [isAuthLoading, loadLibrary, refreshConnection, reloadVersion, user]);
 
   useEffect(() => {
     if (!user || connection?.sync_status !== 'running') {
       return;
     }
     let active = true;
+    let polling = false;
     const timer = window.setInterval(() => {
-      void refreshConnection()
+      if (polling) return;
+      polling = true;
+      const requestId = ++connectionRequestRef.current;
+      void fetchZoteroConnection()
         .then(async (next) => {
-          if (active && next.sync_status !== 'running') {
+          // Do not publish an idle status until its replacement library data has
+          // finished loading. Publishing it first tears down this effect and can
+          // otherwise invalidate the in-flight library request.
+          const isCurrent = () => active && requestId === connectionRequestRef.current;
+          if (!isCurrent()) return;
+          if (next.sync_status === 'idle') {
+            await loadLibrary(isCurrent);
+          }
+          if (!isCurrent()) return;
+          setError(null);
+          setConnection(next);
+          setSyncing(next.sync_status === 'running');
+          if (next.sync_status !== 'running') {
             window.clearInterval(timer);
-            if (next.sync_status === 'idle') {
-              await loadLibrary();
-            }
           }
         })
-        .catch(() => undefined);
+        .catch((nextError) => {
+          if (active && requestId === connectionRequestRef.current) {
+            setError(nextError instanceof Error ? nextError.message : '同步状态读取失败');
+          }
+        })
+        .finally(() => { polling = false; });
     }, 2000);
     return () => {
       active = false;
@@ -133,6 +162,9 @@ export function ZoteroPage() {
     if (!apiKey.trim() || saving) {
       return;
     }
+    // A response from the initial page load must not overwrite a newly saved key.
+    libraryRequestRef.current += 1;
+    connectionRequestRef.current += 1;
     setSaving(true);
     setError(null);
     try {
@@ -150,6 +182,8 @@ export function ZoteroPage() {
   };
 
   const sync = async () => {
+    // Ignore a poll response that was started before this explicit sync request.
+    connectionRequestRef.current += 1;
     setError(null);
     setSyncing(true);
     try {
@@ -168,6 +202,8 @@ export function ZoteroPage() {
     setError(null);
     try {
       await deleteZoteroConnection();
+      libraryRequestRef.current += 1;
+      connectionRequestRef.current += 1;
       setConnection({ configured: false, credential_encryption_configured: true, sync_status: 'idle' });
       setCollections([]);
       setItems([]);
@@ -192,6 +228,18 @@ export function ZoteroPage() {
         </CardHeader>
         <CardContent>
           <Button onClick={() => navigate('/login')}>前往登录</Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!loading && !connection && error) {
+    return (
+      <Card className="mx-auto max-w-2xl">
+        <CardHeader><CardTitle>Zotero 文库加载失败</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p role="alert" className="text-sm text-red-600">{error}</p>
+          <Button onClick={() => setReloadVersion((current) => current + 1)}>重新加载</Button>
         </CardContent>
       </Card>
     );
@@ -252,7 +300,7 @@ export function ZoteroPage() {
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-red-600"><Library className="h-4 w-4" />私人文库</div>
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">{connection.display_name || connection.username || 'Zotero Library'}</h1>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-500">
-              <span>{total} 个论文条目 · 文库版本 {connection.library_version ?? 0}</span>
+              <span>{total} 个{collectionKey || search ? '匹配' : '论文'}条目 · 文库版本 {connection.library_version ?? 0}</span>
               <Badge variant={connection.can_write ? 'default' : 'secondary'}>{connection.can_write ? '可写回笔记与标签' : '只读连接'}</Badge>
             </div>
           </div>

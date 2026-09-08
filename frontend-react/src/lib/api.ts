@@ -653,7 +653,7 @@ export async function streamSse(
   const request = typeof input === 'string' ? apiUrl(input) : input;
   const response = await fetch(request, { credentials: 'include', ...init });
   if (!response.ok) {
-    throw new Error(response.statusText || 'Stream request failed');
+    await readJson(response);
   }
 
   if (!response.body) {
@@ -664,21 +664,32 @@ export async function streamSse(
   const decoder = new TextDecoder();
   let buffer = '';
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        throw new Error('连接已结束，但未收到分析完成确认。请重试；已保存的结果可刷新查看。');
+      }
 
-    buffer += decoder.decode(value, { stream: true }).replaceAll('\r\n', '\n');
-    const parts = buffer.split('\n\n');
-    buffer = parts.pop() ?? '';
-    for (const part of parts) {
-      dispatchEvent(part, handlers);
+      // Keep CRLF intact across network chunks, including a split between CR and LF.
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split(/\r?\n\r?\n/);
+      buffer = parts.pop() ?? '';
+      for (const part of parts) {
+        let completed = false;
+        dispatchEvent(part.replaceAll('\r\n', '\n'), {
+          onChunk: handlers.onChunk,
+          onEvent: (event, data) => {
+            handlers.onEvent?.(event, data);
+            if (event === 'error') throw new Error(data || '分析失败，请稍后重试');
+            completed = event === 'done';
+          },
+        });
+        if (completed) return;
+      }
     }
-  }
-
-  if (buffer.trim()) {
-    dispatchEvent(buffer, handlers);
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }

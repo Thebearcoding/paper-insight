@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from pathlib import Path
 
@@ -130,3 +131,95 @@ async def test_paper_analysis_returns_sse_error_instead_of_breaking_stream(monke
     assert "上游模型连接中断" in events[-1]["data"]
     assert "network error" not in events[-1]["data"]
     assert updates == []
+
+
+@pytest.mark.asyncio
+async def test_saved_analysis_remains_readable_without_model_or_code_metadata_service(monkeypatch):
+    fake_llm = AlwaysFailLlm()
+    monkeypatch.setattr(fake_llm, 'is_configured', lambda: False)
+    configure_paper_analysis_dependencies(monkeypatch, fake_llm, [])
+    monkeypatch.setattr(app_module, 'get_or_fetch_paper_info', lambda _: {
+        'id': 'cached', 'llm_response': COMPLETE_REPORT,
+    })
+
+    async def metadata_failure(*args):
+        raise RuntimeError('code lookup unavailable')
+
+    monkeypatch.setattr(app_module.background_analyzer, 'update_code_availability', metadata_failure)
+    response = await app_module.get_paper_analysis('cached')
+    events = [event async for event in response.body_iterator]
+    assert events[-1]['event'] == 'done'
+    assert '论文解决的任务' in events[-2]['data']
+    assert '总结而言' in events[-2]['data']
+    assert fake_llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cached_analysis_still_streams_when_normalization_write_fails(monkeypatch):
+    fake_llm = AlwaysFailLlm()
+    configure_paper_analysis_dependencies(monkeypatch, fake_llm, [])
+    monkeypatch.setattr(app_module, 'get_or_fetch_paper_info', lambda _: {
+        'id': 'cached-write-failure',
+        'llm_response': 'old cached report',
+    })
+    monkeypatch.setattr(
+        app_module,
+        'normalize_llm_markdown',
+        lambda *_args, **_kwargs: 'normalized cached report',
+    )
+
+    def write_failure(*_args):
+        raise RuntimeError('database write unavailable')
+
+    monkeypatch.setattr(app_module, 'update_llm_response', write_failure)
+    response = await app_module.get_paper_analysis('cached-write-failure')
+    events = [event async for event in response.body_iterator]
+
+    assert events[-2] == {'data': 'normalized cached report'}
+    assert events[-1] == {'event': 'done', 'data': ''}
+    assert fake_llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_generated_analysis_finishes_when_persistence_fails(monkeypatch):
+    fake_llm = RetryThenSucceedLlm()
+    configure_paper_analysis_dependencies(monkeypatch, fake_llm, [])
+
+    def write_failure(*_args):
+        raise RuntimeError('database write unavailable')
+
+    monkeypatch.setattr(app_module, 'update_llm_response', write_failure)
+    response = await app_module.get_paper_analysis('generated-write-failure', reanalyze=True)
+    events = [event async for event in response.body_iterator]
+
+    assert any('暂未保存' in event.get('data', '') for event in events)
+    assert events[-2] == {'event': 'final', 'data': COMPLETE_REPORT}
+    assert events[-1] == {'event': 'done', 'data': ''}
+
+
+@pytest.mark.asyncio
+async def test_generated_analysis_does_not_wait_for_code_metadata_enrichment(monkeypatch):
+    fake_llm = RetryThenSucceedLlm()
+    configure_paper_analysis_dependencies(monkeypatch, fake_llm, [])
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingBackgroundAnalyzer:
+        async def update_code_availability(self, paper_info, response):
+            del paper_info, response
+            started.set()
+            await release.wait()
+
+    monkeypatch.setattr(app_module, 'background_analyzer', BlockingBackgroundAnalyzer())
+    response = await app_module.get_paper_analysis('background-code-check', reanalyze=True)
+    events = [event async for event in response.body_iterator]
+
+    assert events[-1] == {'event': 'done', 'data': ''}
+    await asyncio.wait_for(started.wait(), timeout=0.2)
+    task = app_module.code_availability_tasks['background-code-check']
+    assert not task.done()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass

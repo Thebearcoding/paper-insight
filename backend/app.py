@@ -217,6 +217,7 @@ llm = ManagedLLM()
 chat_sessions: dict[str, ChatSession] = {}
 zotero_chat_sessions: dict[str, ChatSession] = {}
 zotero_sync_tasks: dict[str, asyncio.Task] = {}
+code_availability_tasks: dict[str, asyncio.Task] = {}
 background_analyzer = BackgroundAnalyzer(llm, check_interval=settings.background_analysis.check_interval_seconds)
 background_task = None
 presence_snapshot_task = None
@@ -250,6 +251,38 @@ async def ensure_typesense_index() -> None:
                 return
             logger.warning("Typesense 尚未就绪（%s/12）: %s", attempt, exc)
             await asyncio.sleep(5)
+
+
+def schedule_code_availability(paper_info: dict, llm_response: str) -> None:
+    """Run optional code metadata enrichment without holding an SSE response open."""
+
+    paper_id = str(paper_info.get("id") or "")
+    if not paper_id or not llm_response:
+        return
+    existing = code_availability_tasks.get(paper_id)
+    if existing and not existing.done():
+        return
+
+    task = asyncio.create_task(
+        background_analyzer.update_code_availability(dict(paper_info), llm_response)
+    )
+    code_availability_tasks[paper_id] = task
+
+    def finish(completed: asyncio.Task, *, task_paper_id: str = paper_id) -> None:
+        if code_availability_tasks.get(task_paper_id) is completed:
+            code_availability_tasks.pop(task_paper_id, None)
+        if completed.cancelled():
+            return
+        try:
+            completed.result()
+        except Exception:
+            logger.warning(
+                "Background code metadata task failed for %s",
+                task_paper_id,
+                exc_info=True,
+            )
+
+    task.add_done_callback(finish)
 
 
 async def run_presence_snapshots():
@@ -840,6 +873,7 @@ async def lifespan(app: FastAPI):
         typesense_index_task,
         *hf_daily_analysis_tasks,
         *zotero_sync_tasks.values(),
+        *code_availability_tasks.values(),
     ):
         if not task:
             continue
@@ -3126,10 +3160,6 @@ async def create_arxiv_paper(req: ArxivPaperRequest, request: Request):
 @app.get("/paper/{paper_id}")
 async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
     async def generate():
-        if not llm.is_configured():
-            yield {"event": "error", "data": "config.yaml 未配置有效 LLM API key"}
-            return
-
         # Ensure paper exists in database
         yield {"event": "status", "data": "正在获取论文信息..."}
         try:
@@ -3149,17 +3179,32 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
         except DatabaseError:
             yield {"event": "error", "data": "数据库暂时不可用，请稍后重试"}
             return
+        except Exception:
+            logger.warning("Could not fetch paper analysis metadata for %s", paper_id, exc_info=True)
+            yield {"event": "error", "data": "论文信息读取失败，请稍后重试"}
+            return
 
         # Check if we can return cached analysis
         if not reanalyze and paper_info.get("llm_response"):
             normalized_response = normalize_llm_markdown(paper_info["llm_response"], analysis_mode=True)
             if normalized_response != paper_info["llm_response"]:
-                await asyncio.to_thread(update_llm_response, paper_id, normalized_response)
+                try:
+                    await asyncio.to_thread(update_llm_response, paper_id, normalized_response)
+                except Exception:
+                    # A cached report is still useful even if its best-effort
+                    # normalization cannot be written back right now.
+                    logger.warning(
+                        "Could not save normalized cached paper %s", paper_id, exc_info=True
+                    )
                 paper_info["llm_response"] = normalized_response
             if not paper_info.get("code_checked_at"):
-                await background_analyzer.update_code_availability(paper_info, normalized_response)
+                schedule_code_availability(paper_info, normalized_response)
             yield {"data": normalized_response}
             yield {"event": "done", "data": ""}
+            return
+
+        if not llm.is_configured():
+            yield {"event": "error", "data": "当前 LLM 供应商、模型或 API Key 未配置"}
             return
 
         # Perform AI analysis
@@ -3305,9 +3350,19 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             }
             return
 
-        await asyncio.to_thread(update_llm_response, paper_id, normalized_response)
+        analysis_saved = True
+        try:
+            await asyncio.to_thread(update_llm_response, paper_id, normalized_response)
+        except Exception:
+            analysis_saved = False
+            logger.warning("Could not save generated paper analysis %s", paper_id, exc_info=True)
+            yield {
+                "event": "status",
+                "data": "报告已生成，但暂未保存；请在刷新页面前保留当前内容后稍后重试",
+            }
         paper_info["llm_response"] = normalized_response
-        await background_analyzer.update_code_availability(paper_info, normalized_response)
+        if analysis_saved:
+            schedule_code_availability(paper_info, normalized_response)
         yield {"event": "final", "data": normalized_response}
         yield {"event": "done", "data": ""}
 
@@ -3395,6 +3450,9 @@ async def chat_with_paper(
             yield {"event": "done", "data": ""}
         except DatabaseError:
             yield {"event": "error", "data": "数据库暂时不可用，请稍后重试"}
+        except Exception:
+            logger.warning("Paper chat failed for session %s", req.session_id, exc_info=True)
+            yield {"event": "error", "data": "模型连接中断或对话生成失败，请稍后重试"}
 
     return EventSourceResponse(generate())
 
@@ -3509,6 +3567,9 @@ async def regenerate_chat(
             yield {"event": "done", "data": ""}
         except DatabaseError:
             yield {"event": "error", "data": "数据库暂时不可用，请稍后重试"}
+        except Exception:
+            logger.warning("Paper chat regeneration failed for session %s", req.session_id, exc_info=True)
+            yield {"event": "error", "data": "模型连接中断或对话生成失败，请稍后重试"}
 
     return EventSourceResponse(generate())
 
@@ -3526,6 +3587,8 @@ async def get_conference_papers_endpoint(
     read_status: str = "all",
     code_status: str = "all",
 ):
+    page = max(page, 1)
+    limit = min(max(limit, 1), 100)
     venue_name = CONFERENCE_VENUE_MAP.get(venue)
     if not venue_name:
         raise HTTPException(status_code=404, detail="Conference not found")
@@ -3703,6 +3766,8 @@ async def search_all_papers_endpoint(
     read_status: str = "all",
     code_status: str = "all",
 ):
+    page = max(page, 1)
+    limit = min(max(limit, 1), 100)
     validated_read_status = validate_read_status(read_status)
     validated_code_filter = validate_code_filter(code_status)
     user = get_current_user_optional(request)

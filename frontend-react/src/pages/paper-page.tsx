@@ -199,7 +199,9 @@ export function PaperPage({ paperId }: PaperPageProps) {
               setAnalysisStreaming(false);
               setAnalysisReasoning('');
               setAnalysisStatus('');
-              void fetchPaperInfo(paperId).then(setPaper).catch(() => {
+              void fetchPaperInfo(paperId).then((nextPaper) => {
+                if (!controller.signal.aborted && analysisRequestIdRef.current === requestId) setPaper(nextPaper);
+              }).catch(() => {
                 // The analysis result is already available; keep the existing metadata if refresh fails.
               });
             }
