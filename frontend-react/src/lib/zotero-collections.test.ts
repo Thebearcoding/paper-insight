@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { flattenZoteroCollections } from './zotero-collections';
+import {
+  flattenZoteroCollections,
+  getVisibleZoteroCollections,
+  getZoteroCollectionKeysWithChildren,
+} from './zotero-collections';
 
 
 describe('flattenZoteroCollections', () => {
@@ -26,5 +30,34 @@ describe('flattenZoteroCollections', () => {
     ]);
 
     expect(result[0]).toMatchObject({ collection_key: 'orphan', depth: 0, path: '待整理' });
+  });
+
+  it('identifies only the rendered nodes with children', () => {
+    const collections = [
+      { collection_key: 'root', collection_version: 1, name: '01_研究路线' },
+      { collection_key: 'branch', collection_version: 1, name: '01_视觉', parent_collection: 'root' },
+      { collection_key: 'leaf', collection_version: 1, name: '01_方法', parent_collection: 'branch' },
+      { collection_key: 'sibling', collection_version: 1, name: '02_机器人', parent_collection: 'root' },
+      { collection_key: 'archive', collection_version: 1, name: '99_归档' },
+    ];
+
+    expect([...getZoteroCollectionKeysWithChildren(collections)]).toEqual(['root', 'branch']);
+  });
+
+  it('hides only descendants of collapsed collections', () => {
+    const collections = [
+      { collection_key: 'root', collection_version: 1, name: '01_研究路线' },
+      { collection_key: 'branch', collection_version: 1, name: '01_视觉', parent_collection: 'root' },
+      { collection_key: 'leaf', collection_version: 1, name: '01_方法', parent_collection: 'branch' },
+      { collection_key: 'sibling', collection_version: 1, name: '02_机器人', parent_collection: 'root' },
+      { collection_key: 'archive', collection_version: 1, name: '99_归档' },
+    ];
+
+    expect(getVisibleZoteroCollections(collections, new Set(['root']))
+      .map((collection) => collection.collection_key))
+      .toEqual(['root', 'archive']);
+    expect(getVisibleZoteroCollections(collections, new Set(['branch']))
+      .map((collection) => collection.collection_key))
+      .toEqual(['root', 'branch', 'sibling', 'archive']);
   });
 });

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   BookOpen,
+  ChevronDown,
+  ChevronRight,
   CheckCircle2,
   ExternalLink,
   FolderClosed,
@@ -27,7 +29,10 @@ import {
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { navigate } from '@/lib/router';
-import { flattenZoteroCollections } from '@/lib/zotero-collections';
+import {
+  getVisibleZoteroCollections,
+  getZoteroCollectionKeysWithChildren,
+} from '@/lib/zotero-collections';
 import type { ZoteroCollection, ZoteroConnection, ZoteroItem } from '@/types';
 
 
@@ -47,6 +52,8 @@ export function ZoteroPage() {
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [collectionKey, setCollectionKey] = useState<string | null>(null);
+  const [isLibraryCollapsed, setIsLibraryCollapsed] = useState(false);
+  const [collapsedCollectionKeys, setCollapsedCollectionKeys] = useState<Set<string>>(() => new Set());
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [total, setTotal] = useState(0);
@@ -57,7 +64,26 @@ export function ZoteroPage() {
   const [reloadVersion, setReloadVersion] = useState(0);
   const libraryRequestRef = useRef(0);
   const connectionRequestRef = useRef(0);
-  const collectionTree = useMemo(() => flattenZoteroCollections(collections), [collections]);
+  const collectionTree = useMemo(
+    () => getVisibleZoteroCollections(collections, collapsedCollectionKeys),
+    [collections, collapsedCollectionKeys],
+  );
+  const collectionKeysWithChildren = useMemo(
+    () => getZoteroCollectionKeysWithChildren(collections),
+    [collections],
+  );
+
+  const toggleCollectionCollapsed = (key: string) => {
+    setCollapsedCollectionKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
 
   const loadLibrary = useCallback(async (isCurrent: () => boolean = () => true) => {
     const requestId = ++libraryRequestRef.current;
@@ -344,20 +370,65 @@ export function ZoteroPage() {
         <Card className="h-fit border-white/80 bg-white/82">
           <CardHeader><CardTitle className="text-base">分类</CardTitle></CardHeader>
           <CardContent className="space-y-1">
-            <Button variant={collectionKey === null ? 'secondary' : 'ghost'} className="w-full justify-start" onClick={() => { setCollectionKey(null); setPage(1); }}>全部条目</Button>
-            {collectionTree.map((collection) => (
+            <div className="flex min-w-0 items-center">
               <Button
-                key={collection.collection_key}
-                variant={collectionKey === collection.collection_key ? 'secondary' : 'ghost'}
-                className="w-full justify-start overflow-hidden"
-                style={{ paddingLeft: `${12 + collection.depth * 16}px` }}
-                title={collection.path}
-                onClick={() => { setCollectionKey(collection.collection_key); setPage(1); }}
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0"
+                aria-label={`${isLibraryCollapsed ? '展开' : '收起'}私人文库`}
+                aria-expanded={!isLibraryCollapsed}
+                onClick={() => setIsLibraryCollapsed((current) => !current)}
               >
-                <FolderClosed className="mr-2 h-4 w-4 shrink-0 text-slate-400" />
-                <span className="truncate">{collection.name}</span>
+                {isLibraryCollapsed ? <ChevronRight /> : <ChevronDown />}
               </Button>
-            ))}
+              <Button
+                type="button"
+                variant={collectionKey === null ? 'secondary' : 'ghost'}
+                className="min-w-0 flex-1 justify-start overflow-hidden"
+                title="显示私人文库内的全部条目"
+                onClick={() => { setCollectionKey(null); setPage(1); }}
+              >
+                <Library className="mr-2 h-4 w-4 shrink-0 text-slate-400" />
+                <span className="truncate">私人文库</span>
+              </Button>
+            </div>
+            {!isLibraryCollapsed ? collectionTree.map((collection) => {
+              const hasChildren = collectionKeysWithChildren.has(collection.collection_key);
+              const isCollapsed = collapsedCollectionKeys.has(collection.collection_key);
+              const indent = collection.depth * 16;
+
+              return (
+                <div key={collection.collection_key} className="flex min-w-0 items-center">
+                  {hasChildren ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="shrink-0"
+                      style={{ marginLeft: `${indent}px` }}
+                      aria-label={`${isCollapsed ? '展开' : '收起'} ${collection.name}`}
+                      aria-expanded={!isCollapsed}
+                      onClick={() => toggleCollectionCollapsed(collection.collection_key)}
+                    >
+                      {isCollapsed ? <ChevronRight /> : <ChevronDown />}
+                    </Button>
+                  ) : (
+                    <span className="h-8 w-8 shrink-0" style={{ marginLeft: `${indent}px` }} aria-hidden="true" />
+                  )}
+                  <Button
+                    type="button"
+                    variant={collectionKey === collection.collection_key ? 'secondary' : 'ghost'}
+                    className="min-w-0 flex-1 justify-start overflow-hidden"
+                    title={collection.path}
+                    onClick={() => { setCollectionKey(collection.collection_key); setPage(1); }}
+                  >
+                    <FolderClosed className="mr-2 h-4 w-4 shrink-0 text-slate-400" />
+                    <span className="truncate">{collection.name}</span>
+                  </Button>
+                </div>
+              );
+            }) : null}
           </CardContent>
         </Card>
 
