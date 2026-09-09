@@ -13,6 +13,9 @@ MAX_TAGS = 12
 MAX_NOTE_CHARS = 8_000
 PAPER_INSIGHT_NOTE_MARKER = "paper-insight-ai-note:v1"
 PAPER_INSIGHT_NOTE_TAG = "来源/Paper Insight"
+COMPACT_QUERY_KEY_TOKEN_PATTERN = re.compile(
+    r"(?<![$\\{A-Za-z0-9_])([AN])_q([AN])_?k(?![A-Za-z0-9_])"
+)
 
 
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -58,12 +61,38 @@ def normalize_suggested_tags(raw_tags: object, existing_tags: list[str] | None =
     return normalized
 
 
+def normalize_note_math_notation(note_markdown: str) -> str:
+    """Restore the omitted `_` in compact normal/anomaly query-key symbols."""
+    return COMPACT_QUERY_KEY_TOKEN_PATTERN.sub(
+        lambda match: f"{match.group(1)}_q{match.group(2)}_k",
+        note_markdown,
+    )
+
+
+def render_zotero_note_inline_text(text: str) -> str:
+    """Escape note text while preserving query/key subscripts in Zotero HTML."""
+    fragments: list[str] = []
+    cursor = 0
+    for match in COMPACT_QUERY_KEY_TOKEN_PATTERN.finditer(text):
+        fragments.append(html.escape(text[cursor:match.start()]))
+        query_class, key_class = match.groups()
+        fragments.append(
+            f"{html.escape(query_class)}<sub>q</sub>"
+            f"{html.escape(key_class)}<sub>k</sub>"
+        )
+        cursor = match.end()
+    fragments.append(html.escape(text[cursor:]))
+    return "".join(fragments)
+
+
 def normalize_zotero_enrichment(
     raw_result: dict[str, Any],
     *,
     existing_tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    note_markdown = str(raw_result.get("note_markdown") or "").strip()[:MAX_NOTE_CHARS]
+    note_markdown = normalize_note_math_notation(
+        str(raw_result.get("note_markdown") or "").strip()
+    )[:MAX_NOTE_CHARS]
     if not note_markdown:
         raise ValueError("Claude 没有生成 Zotero 笔记")
     tags = normalize_suggested_tags(raw_result.get("tags"), existing_tags)
@@ -157,17 +186,17 @@ def markdown_to_zotero_note_html(markdown: str, title: str) -> str:
                 blocks.append("</ul>")
                 in_list = False
             level = min(len(heading.group(1)) + 1, 4)
-            blocks.append(f"<h{level}>{html.escape(heading.group(2))}</h{level}>")
+            blocks.append(f"<h{level}>{render_zotero_note_inline_text(heading.group(2))}</h{level}>")
         elif bullet:
             if not in_list:
                 blocks.append("<ul>")
                 in_list = True
-            blocks.append(f"<li>{html.escape(bullet.group(1))}</li>")
+            blocks.append(f"<li>{render_zotero_note_inline_text(bullet.group(1))}</li>")
         else:
             if in_list:
                 blocks.append("</ul>")
                 in_list = False
-            blocks.append(f"<p>{html.escape(line)}</p>")
+            blocks.append(f"<p>{render_zotero_note_inline_text(line)}</p>")
     if in_list:
         blocks.append("</ul>")
     blocks.append("<p><em>由 Paper Insight AI 分析生成；请结合原论文核对。</em></p>")

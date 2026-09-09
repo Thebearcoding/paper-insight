@@ -26,6 +26,15 @@ describe('normalizeMarkdownContent', () => {
     expect(normalized).toBe("```python\nvalue = '$x$'\n```");
   });
 
+  it('repairs compact query/key notation missing a subscript marker', () => {
+    const content = '动机：A_qAk > N_qAk 且 N_qN_k > A_qN_k。';
+    const normalized = normalizeMarkdownContent(content);
+
+    expect(normalized).toContain('$\\mathrm{A}_q\\mathrm{A}_k$ > $\\mathrm{N}_q\\mathrm{A}_k$');
+    expect(normalized).toContain('$\\mathrm{N}_q\\mathrm{N}_k$ > $\\mathrm{A}_q\\mathrm{N}_k$');
+    expect(normalizeMarkdownContent(normalized)).toBe(normalized);
+  });
+
   it('keeps a leading bold marker instead of turning it into a list item', () => {
     const content = '**手算示例（图像级）**：设 4 张测试图。';
 
@@ -93,6 +102,18 @@ describe('RichContent', () => {
 
     expect(html).toContain('katex');
     expect(html).toContain('The rate is');
+  });
+
+  it('renders repaired query/key notation through KaTeX', () => {
+    const html = renderToStaticMarkup(
+      <RichContent
+        content={'A_qAk > N_qAk 且 N_qN_k > A_qN_k'}
+        className="markdown-body"
+      />,
+    );
+
+    expect(html).toContain('katex');
+    expect(html).not.toContain('A_qAk');
   });
 
   it('renders repaired production block math as display math', () => {

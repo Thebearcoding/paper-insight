@@ -9,6 +9,7 @@ interface StreamingMarkdownSplit {
 
 const CODE_SEGMENT_PATTERN = /```[\s\S]*?(?:```|$)|`[^`\n]*`/g;
 const SAME_LINE_BLOCK_MATH_PATTERN = /^([ \t]*)\$\$[ \t]*(\S(?:.*?\S)?)[ \t]*\$\$[ \t]*$/gm;
+const COMPACT_QUERY_KEY_TOKEN_PATTERN = /(?<![$\\{A-Za-z0-9_])([AN])_q([AN])_?k(?![A-Za-z0-9_])/g;
 
 function maskCodeSegments(content: string): { masked: string; segments: string[] } {
   const segments: string[] = [];
@@ -73,6 +74,20 @@ function normalizeSameLineBlockMath(content: string): string {
     SAME_LINE_BLOCK_MATH_PATTERN,
     (_, indentation: string, expression: string) => (
       `${indentation}$$\n${indentation}${expression.trim()}\n${indentation}$$`
+    ),
+  );
+}
+
+/**
+ * Older Zotero note suggestions occasionally used shorthand such as `A_qAk`.
+ * It loses the second subscript and is rendered as ordinary text. Preserve the
+ * paper's query/key notation and hand it to remark-math as inline LaTex.
+ */
+function normalizeCompactQueryKeyNotation(content: string): string {
+  return content.replace(
+    COMPACT_QUERY_KEY_TOKEN_PATTERN,
+    (_, queryClass: string, keyClass: string) => (
+      `$\\mathrm{${queryClass}}_q\\mathrm{${keyClass}}_k$`
     ),
   );
 }
@@ -306,7 +321,7 @@ export function normalizeMathContent(content: string): string {
     ),
   );
 
-  return unmaskCodeSegments(normalized, segments);
+  return unmaskCodeSegments(normalizeCompactQueryKeyNotation(normalized), segments);
 }
 
 function normalizeMarkdownSyntax(content: string, options: MarkdownNormalizationOptions = {}): string {

@@ -13,6 +13,7 @@ import zotero
 from zotero_enrichment import (
     generate_zotero_enrichment,
     markdown_to_zotero_note_html,
+    normalize_zotero_enrichment,
     normalize_suggested_tags,
 )
 
@@ -46,6 +47,17 @@ def test_normalize_suggested_tags_groups_and_deduplicates():
         {"group": "主题", "value": "异常检测", "tag": "主题/异常检测"},
         {"group": "数据集", "value": "MVTec-AD", "tag": "数据集/MVTec-AD"},
     ]
+
+
+def test_normalize_zotero_enrichment_repairs_compact_query_key_subscripts():
+    result = normalize_zotero_enrichment(
+        {
+            "note_markdown": "关键证据：A_qAk > N_qAk 且 N_qN_k > A_qN_k。",
+            "tags": [],
+        }
+    )
+
+    assert result["note_markdown"] == "关键证据：A_qA_k > N_qA_k 且 N_qN_k > A_qN_k。"
 
 
 @pytest.mark.asyncio
@@ -141,6 +153,16 @@ def test_markdown_to_zotero_note_html_marks_and_escapes_content():
     assert "<h3>核心问题</h3>" in result
     assert "&lt;script&gt;" in result
     assert "<script>" not in result
+
+
+def test_markdown_to_zotero_note_html_preserves_query_key_subscripts():
+    result = markdown_to_zotero_note_html(
+        "关键证据：A_qAk > N_qAk",
+        "AI 精读：测试论文",
+    )
+
+    assert "A<sub>q</sub>A<sub>k</sub>" in result
+    assert "N<sub>q</sub>A<sub>k</sub>" in result
 
 
 def test_create_note_accepts_zotero_single_write_success_shape(monkeypatch):
