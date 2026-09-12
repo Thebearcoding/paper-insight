@@ -50,6 +50,7 @@ export function PaperPage({ paperId }: PaperPageProps) {
   const [analysisLoading, setAnalysisLoading] = useState(true);
   const [analysisStreaming, setAnalysisStreaming] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisWarning, setAnalysisWarning] = useState<string | null>(null);
   const [openInAiPrompt, setOpenInAiPrompt] = useState('');
   const [openInAiPromptError, setOpenInAiPromptError] = useState<string | null>(null);
   const [marks, setMarks] = useState(EMPTY_MARKS);
@@ -149,6 +150,7 @@ export function PaperPage({ paperId }: PaperPageProps) {
   }, [paperId]);
 
   const loadAnalysis = useCallback(async (reanalyze = false) => {
+    if (reanalyze && analysisAbortRef.current) return;
     analysisAbortRef.current?.abort();
     const controller = new AbortController();
     analysisAbortRef.current = controller;
@@ -158,6 +160,7 @@ export function PaperPage({ paperId }: PaperPageProps) {
     setAnalysisText('');
     setAnalysisReasoning('');
     setAnalysisError(null);
+    setAnalysisWarning(null);
     setAnalysisLoading(true);
     setAnalysisStreaming(true);
     setAnalysisStatus(reanalyze ? '正在重新分析论文...' : '正在获取论文信息...');
@@ -181,6 +184,9 @@ export function PaperPage({ paperId }: PaperPageProps) {
             if (event === 'status') {
               setAnalysisStatus(data);
             }
+            if (event === 'warning') {
+              setAnalysisWarning((current) => [current, data].filter(Boolean).join('；'));
+            }
             if (event === 'reasoning') {
               setAnalysisLoading(false);
               setAnalysisReasoning((current) => current + data);
@@ -193,6 +199,7 @@ export function PaperPage({ paperId }: PaperPageProps) {
               setAnalysisStreaming(false);
               setAnalysisReasoning('');
               setAnalysisError(data || '分析失败');
+              setAnalysisStatus('');
             }
             if (event === 'done') {
               setAnalysisLoading(false);
@@ -216,6 +223,7 @@ export function PaperPage({ paperId }: PaperPageProps) {
       setAnalysisStreaming(false);
       setAnalysisReasoning('');
       setAnalysisError(error instanceof Error ? error.message : '分析失败');
+      setAnalysisStatus('');
     } finally {
       if (analysisAbortRef.current === controller) {
         analysisAbortRef.current = null;
@@ -502,20 +510,23 @@ export function PaperPage({ paperId }: PaperPageProps) {
                 <Button
                   variant="outline"
                   className="rounded-full"
+                  disabled={analysisStreaming}
                   onClick={() => void loadAnalysis(true)}
                 >
-                  重新分析
+                  {analysisStreaming ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  {analysisStreaming ? '分析中…' : '重新分析'}
                 </Button>
               </div>
             </div>
 
+            {analysisWarning ? <p role="status" className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">{analysisWarning}</p> : null}
             {analysisLoading ? (
               <div className="mt-6 flex items-center gap-2 text-[#728095]">
                 <Loader2 className="h-5 w-5 animate-spin" />
                 {analysisStatus || '正在分析论文...'}
               </div>
             ) : analysisError ? (
-              <div className="mt-6 rounded-2xl bg-[#fff1f2] p-4 text-[#b91c1c]">{analysisError}</div>
+              <div role="alert" className="mt-6 rounded-2xl bg-[#fff1f2] p-4 text-[#b91c1c]">{analysisError}</div>
             ) : (
               <div className="mt-6 space-y-4">
                 <ReasoningStreamPanel reasoning={analysisStreaming ? analysisReasoning : ''} />

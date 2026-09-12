@@ -2,33 +2,43 @@ import re
 import unicodedata
 
 
-CODE_SEGMENT_PATTERN = re.compile(r"```[\s\S]*?(?:```|$)|`[^`\n]*`")
+CODE_SEGMENT_PATTERN = re.compile(
+    r"(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\1[ \t]*(?=\n|$)|$)|(`+)[^\n]*?\2"
+)
+MATH_SEGMENT_PATTERN = re.compile(
+    r"(?<!\\)\$\$[\s\S]*?(?:\$\$|$)|(?<![\\$])\$(?!\$)(?:\\.|[^$\n])*(?:\$|$)",
+)
 SAME_LINE_BLOCK_MATH_PATTERN = re.compile(r"^([ \t]*)\$\$[ \t]*(\S(?:.*?\S)?)[ \t]*\$\$[ \t]*$", re.MULTILINE)
 ZOTERO_DEEP_REPORT_TITLES = (
     "方法链路与训练/推理过程",
+    "核心公式与符号说明",
     "方法变体与组件区别",
     "提升指标的本质原因",
     "SOTA 对比实验",
 )
 
 
-def _mask_code_segments(content: str) -> tuple[str, list[str]]:
-    segments: list[str] = []
+def _mask_code_segments(content: str, *, include_math: bool = False) -> tuple[str, list[tuple[str, str]]]:
+    segments: list[tuple[str, str]] = []
+    prefix = "\uE000segment"
+    while prefix in content:
+        prefix += "x"
 
     def _replace(match: re.Match[str]) -> str:
-        token = f"__CODE_SEGMENT_{len(segments)}__"
-        segments.append(match.group(0))
+        token = f"{prefix}{len(segments)}\uE001"
+        segments.append((token, match.group(0)))
         return token
 
-    return CODE_SEGMENT_PATTERN.sub(_replace, content), segments
+    masked = CODE_SEGMENT_PATTERN.sub(_replace, content)
+    if include_math:
+        masked = MATH_SEGMENT_PATTERN.sub(_replace, masked)
+    return masked, segments
 
 
-def _unmask_code_segments(content: str, segments: list[str]) -> str:
-    def _replace(match: re.Match[str]) -> str:
-        index = int(match.group(1))
-        return segments[index] if index < len(segments) else ""
-
-    return re.sub(r"__CODE_SEGMENT_(\d+)__", _replace, content)
+def _unmask_code_segments(content: str, segments: list[tuple[str, str]]) -> str:
+    for token, segment in reversed(segments):
+        content = content.replace(token, segment)
+    return content
 
 
 def _looks_like_inline_math(expression: str) -> bool:
@@ -199,6 +209,7 @@ def normalize_llm_markdown(content: str | None, analysis_mode: bool = False) -> 
         )
     )
 
+    normalized, math_segments = _mask_code_segments(normalized, include_math=True)
     normalized = _normalize_attached_bold_boundaries(_normalize_bold_autolinks(normalized))
     lines = [
         _normalize_markdown_line(expanded_line)
@@ -223,33 +234,26 @@ def normalize_llm_markdown(content: str | None, analysis_mode: bool = False) -> 
 
     normalized = "\n".join(normalized_lines)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).rstrip()
-    return _unmask_code_segments(normalized, segments)
+    return _unmask_code_segments(_unmask_code_segments(normalized, math_segments), segments)
 
 
 def normalize_zotero_report(content: str | None) -> str:
-    normalized = normalize_llm_markdown(content, analysis_mode=True)
+    normalized, segments = _mask_code_segments(
+        normalize_llm_markdown(content, analysis_mode=True), include_math=True,
+    )
     lines: list[str] = []
-    in_fence = False
     for line in normalized.splitlines():
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
-            lines.append(line)
-            continue
-        if not in_fence:
-            deep_subsection = re.match(r"^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$", line)
-            subsection = re.match(r"^[ \t]*#{1,6}[ \t]+(\d+\.\d+(?:\.\d+)*\s+.+)$", line)
-            section = re.match(r"^[ \t]*#{1,6}[ \t]+([1-7]\.\s+.+)$", line)
-            if (
-                deep_subsection
-                and deep_subsection.group(1).strip() in ZOTERO_DEEP_REPORT_TITLES
-            ):
-                line = f"### {deep_subsection.group(1).strip()}"
-            elif subsection:
-                line = f"### {subsection.group(1).strip()}"
-            elif section:
-                line = f"## {section.group(1).strip()}"
+        deep_subsection = re.match(r"^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$", line)
+        subsection = re.match(r"^[ \t]*#{1,6}[ \t]+(\d+\.\d+(?:\.\d+)*\s+.+)$", line)
+        section = re.match(r"^[ \t]*#{1,6}[ \t]+([1-7]\.\s+.+)$", line)
+        if deep_subsection and deep_subsection.group(1).strip() in ZOTERO_DEEP_REPORT_TITLES:
+            line = f"### {deep_subsection.group(1).strip()}"
+        elif subsection:
+            line = f"### {subsection.group(1).strip()}"
+        elif section:
+            line = f"## {section.group(1).strip()}"
         lines.append(line)
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip()
+    return _unmask_code_segments(re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip(), segments)
 
 
 ZOTERO_REPORT_HEADINGS = (
@@ -260,7 +264,7 @@ ZOTERO_REPORT_HEADINGS = (
 ZOTERO_DEEP_REPORT_SUBHEADINGS = tuple(
     f"### {title}"
     for title in ZOTERO_DEEP_REPORT_TITLES
-    if title != "方法变体与组件区别"
+    if title not in {"方法变体与组件区别", "核心公式与符号说明"}
 )
 
 

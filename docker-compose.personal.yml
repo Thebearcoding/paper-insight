@@ -27,6 +27,11 @@ services:
     pids_limit: 256
 
   caddy:
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     image: ${CADDY_IMAGE:-caddy:2-alpine}
     restart: unless-stopped
     depends_on:

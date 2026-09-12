@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import re
 from typing import Any
 
+from llm import LLMOutputTruncatedError, is_glm_proxy_config
+from markdown_utils import normalize_zotero_report
 from prompt import ZOTERO_NOTE_AND_TAG_PROMPT
 
 
@@ -15,6 +18,13 @@ PAPER_INSIGHT_NOTE_MARKER = "paper-insight-ai-note:v1"
 PAPER_INSIGHT_NOTE_TAG = "来源/Paper Insight"
 COMPACT_QUERY_KEY_TOKEN_PATTERN = re.compile(
     r"(?<![$\\{A-Za-z0-9_])([AN])_q([AN])_?k(?![A-Za-z0-9_])"
+)
+PROTECTED_NOTE_SEGMENT_PATTERN = re.compile(
+    r"(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\1[ \t]*(?=\n|$)|$)"
+    r"|(`+)[^\n]*?\2"
+    r"|!?\[[^\]\n]*\]\([^\n]*?\)|https?://[^\s<>]+"
+    r"|(?<!\\)\$\$[\s\S]*?(?:\$\$|$)"
+    r"|(?<![\\$])\$(?!\$)(?:\\.|[^$\n])*(?:\$|$)",
 )
 
 
@@ -63,14 +73,36 @@ def normalize_suggested_tags(raw_tags: object, existing_tags: list[str] | None =
 
 def normalize_note_math_notation(note_markdown: str) -> str:
     """Restore the omitted `_` in compact normal/anomaly query-key symbols."""
-    return COMPACT_QUERY_KEY_TOKEN_PATTERN.sub(
-        lambda match: f"{match.group(1)}_q{match.group(2)}_k",
-        note_markdown,
-    )
+    fragments: list[str] = []
+    cursor = 0
+    for match in PROTECTED_NOTE_SEGMENT_PATTERN.finditer(note_markdown):
+        fragments.append(COMPACT_QUERY_KEY_TOKEN_PATTERN.sub(
+            lambda token: f"{token.group(1)}_q{token.group(2)}_k", note_markdown[cursor:match.start()]
+        ))
+        fragments.append(match.group())
+        cursor = match.end()
+    fragments.append(COMPACT_QUERY_KEY_TOKEN_PATTERN.sub(
+        lambda token: f"{token.group(1)}_q{token.group(2)}_k", note_markdown[cursor:]
+    ))
+    return "".join(fragments)
 
 
 def render_zotero_note_inline_text(text: str) -> str:
     """Escape note text while preserving query/key subscripts in Zotero HTML."""
+    if PROTECTED_NOTE_SEGMENT_PATTERN.search(text):
+        fragments: list[str] = []
+        cursor = 0
+        for match in PROTECTED_NOTE_SEGMENT_PATTERN.finditer(text):
+            fragments.append(render_zotero_note_inline_text(text[cursor:match.start()]))
+            protected = match.group()
+            if protected.startswith("$") and not protected.startswith("$$") and protected.endswith("$") and len(protected) > 2:
+                # Zotero's note-editor schema recognizes span.math with $...$.
+                fragments.append(f'<span class="math">{html.escape(protected)}</span>')
+            else:
+                fragments.append(html.escape(protected))
+            cursor = match.end()
+        fragments.append(render_zotero_note_inline_text(text[cursor:]))
+        return "".join(fragments)
     fragments: list[str] = []
     cursor = 0
     for match in COMPACT_QUERY_KEY_TOKEN_PATTERN.finditer(text):
@@ -89,17 +121,24 @@ def normalize_zotero_enrichment(
     raw_result: dict[str, Any],
     *,
     existing_tags: list[str] | None = None,
+    previous_enrichment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     note_markdown = normalize_note_math_notation(
         str(raw_result.get("note_markdown") or "").strip()
-    )[:MAX_NOTE_CHARS]
+    )
     if not note_markdown:
-        raise ValueError("Claude 没有生成 Zotero 笔记")
+        raise ValueError("模型没有生成 Zotero 笔记")
+    if len(note_markdown) > MAX_NOTE_CHARS:
+        raise ValueError("笔记过长，请压缩后返回完整 JSON，不得截断公式或句子")
     tags = normalize_suggested_tags(raw_result.get("tags"), existing_tags)
+    previous_writeback = (previous_enrichment or {}).get("writeback") or {}
     return {
         "note_markdown": note_markdown,
         "tags": tags,
-        "writeback": {"status": "pending", "note_item_key": None},
+        "writeback": {
+            "status": "pending",
+            "note_item_key": previous_writeback.get("note_item_key"),
+        },
     }
 
 
@@ -127,10 +166,7 @@ async def generate_zotero_enrichment(
         public_config = llm.public_config()
     except (AttributeError, RuntimeError):
         public_config = {}
-    if (
-        str(public_config.get("provider_key") or "").casefold() == "sub2api"
-        and str(public_config.get("model_name") or "").casefold() == "glm-5.3"
-    ):
+    if is_glm_proxy_config(public_config):
         chat_options.update(
             {
                 "max_tokens": 8192,
@@ -146,24 +182,43 @@ async def generate_zotero_enrichment(
                 "\n\n上一次输出未形成完整 JSON。此次务必压缩笔记到 900 个汉字以内，"
                 "保证 JSON 完整闭合后再结束输出。"
             )
-        raw_response = await llm.chat(
-            [
-                {"role": "system", "content": ZOTERO_NOTE_AND_TAG_PROMPT},
-                {"role": "user", "content": prompt + retry_instruction},
-            ],
-            _usage_context=(
-                "zotero_note_and_tags"
-                if attempt == 1
-                else "zotero_note_and_tags_retry"
-            ),
-            **chat_options,
-        )
         try:
+            raw_response = await llm.chat(
+                [
+                    {"role": "system", "content": ZOTERO_NOTE_AND_TAG_PROMPT},
+                    {"role": "user", "content": prompt + retry_instruction},
+                ],
+                _usage_context=(
+                    "zotero_note_and_tags"
+                    if attempt == 1
+                    else "zotero_note_and_tags_retry"
+                ),
+                **chat_options,
+            )
             parsed = _extract_json_object(raw_response or "")
-            return normalize_zotero_enrichment(parsed, existing_tags=existing_tags)
-        except (json.JSONDecodeError, ValueError) as exc:
+            enrichment = normalize_zotero_enrichment(
+                parsed,
+                existing_tags=existing_tags,
+                previous_enrichment=item.get("analysis_enrichment"),
+            )
+            enrichment["source_report_hash"] = report_fingerprint(report)
+            enrichment["report_status"] = "current"
+            return enrichment
+        except (json.JSONDecodeError, ValueError, LLMOutputTruncatedError) as exc:
             last_error = exc
-    raise ValueError("Claude 未返回完整的 Zotero 笔记与标签 JSON") from last_error
+    raise ValueError("模型未返回完整的 Zotero 笔记与标签 JSON") from last_error
+
+
+def report_fingerprint(report: str) -> str:
+    return hashlib.sha256(normalize_zotero_report(report).encode()).hexdigest()
+
+
+def enrichment_matches_report(enrichment: dict[str, Any], report: str) -> bool:
+    if enrichment.get("report_status") in {"stale", "pending"}:
+        return False
+    source_hash = enrichment.get("source_report_hash")
+    # Legacy notes predate provenance hashes and remain compatible.
+    return not source_hash or source_hash == report_fingerprint(report)
 
 
 def markdown_to_zotero_note_html(markdown: str, title: str) -> str:
@@ -172,8 +227,30 @@ def markdown_to_zotero_note_html(markdown: str, title: str) -> str:
         f"<h1>{html.escape(title or 'AI 精读笔记')}</h1>",
     ]
     in_list = False
+    literal_lines: list[str] | None = None
+    literal_marker: str | None = None
     for raw_line in markdown.splitlines():
         line = raw_line.strip()
+        if literal_lines is not None:
+            if line == literal_marker:
+                value = "\n".join(literal_lines)
+                blocks.append(
+                    f'<pre class="math">$${html.escape(value)}$$</pre>'
+                    if literal_marker == "$$" else f"<pre>{html.escape(value)}</pre>"
+                )
+                literal_lines = None
+                literal_marker = None
+            else:
+                literal_lines.append(raw_line)
+            continue
+        fence = re.match(r"^(`{3,}|~{3,})", line)
+        if line == "$$" or fence:
+            if in_list:
+                blocks.append("</ul>")
+                in_list = False
+            literal_marker = "$$" if line == "$$" else fence.group(1)
+            literal_lines = []
+            continue
         if not line:
             if in_list:
                 blocks.append("</ul>")
@@ -197,6 +274,9 @@ def markdown_to_zotero_note_html(markdown: str, title: str) -> str:
                 blocks.append("</ul>")
                 in_list = False
             blocks.append(f"<p>{render_zotero_note_inline_text(line)}</p>")
+    if literal_lines is not None:
+        # Keep incomplete source visible, without pretending it is valid math.
+        blocks.append("<pre>" + html.escape((literal_marker or "") + "\n" + "\n".join(literal_lines)) + "</pre>")
     if in_list:
         blocks.append("</ul>")
     blocks.append("<p><em>由 Paper Insight AI 分析生成；请结合原论文核对。</em></p>")

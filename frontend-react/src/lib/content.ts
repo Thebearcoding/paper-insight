@@ -7,23 +7,37 @@ interface StreamingMarkdownSplit {
   unstableContent: string;
 }
 
-const CODE_SEGMENT_PATTERN = /```[\s\S]*?(?:```|$)|`[^`\n]*`/g;
+const CODE_SEGMENT_PATTERN = /(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\1[ \t]*(?=\n|$)|$)|(`+)[^\n]*?\2/g;
+const MATH_SEGMENT_PATTERN = /(?<!\\)\$\$[\s\S]*?(?:\$\$|$)|(?<![\\$])\$(?!\$)(?:\\.|[^$\n])*(?:\$|$)/g;
+const LINK_SEGMENT_PATTERN = /!?\[[^\]\n]*\]\([^\n]*?\)|!?\[[^\]\n]*\]\[[^\]\n]*\]|^[ \t]{0,3}\[[^\]\n]+\]:[^\n]*|https?:\/\/[^\s<>]+/gm;
 const SAME_LINE_BLOCK_MATH_PATTERN = /^([ \t]*)\$\$[ \t]*(\S(?:.*?\S)?)[ \t]*\$\$[ \t]*$/gm;
 const COMPACT_QUERY_KEY_TOKEN_PATTERN = /(?<![$\\{A-Za-z0-9_])([AN])_q([AN])_?k(?![A-Za-z0-9_])/g;
 
-function maskCodeSegments(content: string): { masked: string; segments: string[] } {
-  const segments: string[] = [];
-  const masked = content.replace(CODE_SEGMENT_PATTERN, (segment) => {
-    const token = `__CODE_SEGMENT_${segments.length}__`;
-    segments.push(segment);
-    return token;
-  });
+interface ProtectedSegment { token: string; content: string }
+
+function maskCodeSegments(content: string, patterns: RegExp[] = []): { masked: string; segments: ProtectedSegment[] } {
+  const segments: ProtectedSegment[] = [];
+  let prefix = '\uE000segment';
+  while (content.includes(prefix)) prefix += 'x';
+  let masked = content;
+  for (const pattern of [CODE_SEGMENT_PATTERN, ...patterns]) {
+    masked = masked.replace(pattern, (segment) => {
+      const token = `${prefix}${segments.length}\uE001`;
+      segments.push({ token, content: segment });
+      return token;
+    });
+  }
 
   return { masked, segments };
 }
 
-function unmaskCodeSegments(content: string, segments: string[]): string {
-  return content.replace(/__CODE_SEGMENT_(\d+)__/g, (_, index) => segments[Number(index)] ?? '');
+function unmaskCodeSegments(content: string, segments: ProtectedSegment[]): string {
+  // Later masks can contain earlier masks (e.g. math inside a link label).
+  let restored = content;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    restored = restored.replaceAll(segments[index].token, () => segments[index].content);
+  }
+  return restored;
 }
 
 function normalizeLineEndings(content: string): string {
@@ -84,12 +98,13 @@ function normalizeSameLineBlockMath(content: string): string {
  * paper's query/key notation and hand it to remark-math as inline LaTex.
  */
 function normalizeCompactQueryKeyNotation(content: string): string {
-  return content.replace(
+  const { masked, segments } = maskCodeSegments(content, [LINK_SEGMENT_PATTERN, MATH_SEGMENT_PATTERN]);
+  return unmaskCodeSegments(masked.replace(
     COMPACT_QUERY_KEY_TOKEN_PATTERN,
     (_, queryClass: string, keyClass: string) => (
       `$\\mathrm{${queryClass}}_q\\mathrm{${keyClass}}_k$`
     ),
-  );
+  ), segments);
 }
 
 function normalizeHeadingMarkerPrefix(line: string): string {
@@ -329,7 +344,7 @@ function normalizeMarkdownSyntax(content: string, options: MarkdownNormalization
     return '';
   }
 
-  const { masked, segments } = maskCodeSegments(content);
+  const { masked, segments } = maskCodeSegments(content, [MATH_SEGMENT_PATTERN]);
   const lines = normalizeAttachedBoldBoundaries(
     masked.replace(/\*\*(https?:\/\/[^\s*<>]+)\*\*/g, '**<$1>**'),
   )

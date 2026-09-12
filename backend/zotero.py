@@ -30,7 +30,6 @@ DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "zotero_cache"
 ZOTERO_FULLTEXT_TOKEN_LIMIT = 160_000
 ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT = 16_000
 ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT = 8_000
-ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT = 32_768
 EXPERIMENT_SECTION_PATTERN = re.compile(
     r"(?im)^(?:\d+(?:\.\d+)*[.)]?\s+)?"
     r"(?:experiments?|experimental (?:setup|results)|evaluation|empirical (?:evaluation|results)|results)"

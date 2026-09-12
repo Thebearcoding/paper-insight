@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
@@ -27,6 +28,18 @@ def test_normalize_llm_markdown_keeps_code_blocks_literal():
     content = "```python\nvalue = '$x$'\n```"
 
     assert normalize_llm_markdown(content) == content
+
+
+@pytest.mark.parametrize("content", [
+    "~~~text\n## 1. literal heading\n# # A_qAk\n~~~",
+    "``example `code` ``",
+    "__CODE_SEGMENT_0__",
+    "`code` and $x_i$",
+    "$$\n# not a heading\n$$",
+])
+def test_both_normalizers_preserve_protected_math_and_code(content):
+    assert normalize_llm_markdown(content, analysis_mode=True) == content
+    assert normalize_zotero_report(content) == content
 
 
 def test_normalize_llm_markdown_keeps_leading_bold_marker():

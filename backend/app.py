@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from sse_starlette.sse import EventSourceResponse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from auth import (
     generate_session_token,
@@ -27,7 +27,7 @@ from auth import (
     verify_password,
 )
 from config import settings, write_background_analysis_config, write_api_search_config
-from llm import ManagedLLM, fetch_openai_compatible_model_names
+from llm import LLMOutputTruncatedError, ManagedLLM, fetch_openai_compatible_model_names, is_glm_proxy_config
 from migrations import apply_migrations
 from api_search import (
     api_rate_limiter,
@@ -191,12 +191,12 @@ from paper_figures import (
     zotero_figure_path,
 )
 from zotero_enrichment import (
+    enrichment_matches_report,
     generate_zotero_enrichment,
     markdown_to_zotero_note_html,
 )
 from zotero import (
     ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT,
-    ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
     ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT,
     ZoteroAuthError,
     ZoteroClient,
@@ -970,6 +970,7 @@ class LlmProviderUpdateRequest(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     is_enabled: bool | None = None
+    analysis_max_tokens: int | None = Field(default=None, ge=1, le=1_000_000, strict=True)
 
 
 class LlmModelCreateRequest(BaseModel):
@@ -1955,7 +1956,10 @@ async def analyze_my_zotero_item(
             if not reanalyze and item.get("llm_response"):
                 normalized = normalize_zotero_report(item["llm_response"])
                 if normalized != item["llm_response"]:
-                    await asyncio.to_thread(update_zotero_analysis, user_id, item_key, normalized)
+                    try:
+                        await asyncio.to_thread(update_zotero_analysis, user_id, item_key, normalized)
+                    except Exception:
+                        logger.warning("Could not normalize cached Zotero report %s", item_key, exc_info=True)
                 yield {"data": normalized}
                 yield {"event": "done", "data": ""}
                 return
@@ -1973,11 +1977,7 @@ async def analyze_my_zotero_item(
             yield {"event": "status", "data": "正在读取 Zotero 全文、笔记和批注..."}
             context, source, warning = await load_zotero_reading_context(user_id, item)
             analysis_context = context
-            analysis_stream_options: dict[str, Any] = {}
-            is_glm_proxy_analysis = (
-                str(selected_config.get("provider_key") or "").casefold() == "sub2api"
-                and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
-            )
+            is_glm_proxy_analysis = is_glm_proxy_config(selected_config)
             glm_context_limit: int | None = None
             if is_glm_proxy_analysis:
                 glm_context_limit = (
@@ -1989,18 +1989,10 @@ async def analyze_my_zotero_item(
                     context,
                     max_tokens=glm_context_limit,
                 )
-                analysis_stream_options.update(
-                    {
-                        "max_tokens": ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
-                        "thinking": {"type": "disabled"},
-                        "output_config": {"effort": "low"},
-                    }
-                )
                 if analysis_context != context:
                     proxy_warning = (
-                        f"GLM 长文输入已使用 {glm_context_limit:,} token 保留 PDF 核心主文，"
-                        "并省略超长参考文献或补充材料；"
-                        f"同时压低思考开销并预留 {ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT:,} token 输出额度"
+                        f"GLM 长文输入已按约 {glm_context_limit:,} token 预算选取 PDF 主文片段，"
+                        "部分正文、参考文献或补充材料可能未进入模型；输出额度遵循供应商配置"
                     )
                     warning = f"{warning}；{proxy_warning}" if warning else proxy_warning
             if warning:
@@ -2092,7 +2084,7 @@ async def analyze_my_zotero_item(
                     )
 
             normalized = ""
-            accepted_stream_error: RuntimeError | None = None
+            accepted_stream_error: Exception | None = None
             used_fallback_limit: int | None = None
             last_failure_message = "论文分析没有返回内容"
             for attempt_index, (attempt_context, fallback_limit) in enumerate(analysis_attempts):
@@ -2106,7 +2098,7 @@ async def analyze_my_zotero_item(
                         ),
                     }
                 chunks: list[str] = []
-                stream_error: RuntimeError | None = None
+                stream_error: Exception | None = None
                 try:
                     async for stream_chunk in selected_llm.get_response_stream_events(
                         attempt_context,
@@ -2116,14 +2108,13 @@ async def analyze_my_zotero_item(
                             if attempt_index
                             else "zotero_analysis_stream"
                         ),
-                        **analysis_stream_options,
                     ):
                         if stream_chunk.kind == "reasoning":
                             yield {"event": "reasoning", "data": stream_chunk.content}
                             continue
                         chunks.append(stream_chunk.content)
                         yield {"data": stream_chunk.content}
-                except RuntimeError as exc:
+                except Exception as exc:
                     stream_error = exc
                     logger.warning(
                         "Zotero analysis upstream stream ended with an error for %s/%s after %s characters%s: %s",
@@ -2138,7 +2129,7 @@ async def analyze_my_zotero_item(
                 if not candidate:
                     last_failure_message = "论文分析没有返回正式正文"
                     continue
-                completion_error = (
+                completion_error = str(stream_error) if isinstance(stream_error, LLMOutputTruncatedError) else (
                     zotero_stream_recovery_error(
                         candidate,
                         require_framework_figure=bool(prompt_figure),
@@ -2177,7 +2168,7 @@ async def analyze_my_zotero_item(
                 metadata_changed = True
                 yield {"event": "status", "data": fallback_warning}
             if accepted_stream_error:
-                recovery_warning = "上游流在收尾阶段中断，完整报告已通过严格校验并保存"
+                recovery_warning = "上游流在收尾阶段中断，报告结构与结束标记检查通过；此检查不代表事实或公式已经验证"
                 warning = f"{warning}；{recovery_warning}" if warning else recovery_warning
                 analysis_metadata["warning"] = warning
                 metadata_changed = True
@@ -2188,6 +2179,23 @@ async def analyze_my_zotero_item(
                     "data": json.dumps(analysis_metadata, ensure_ascii=False),
                 }
             analysis_enrichment = dict(item.get("analysis_enrichment") or {})
+            analysis_enrichment["report_status"] = "stale" if analysis_enrichment.get("note_markdown") else "pending"
+            # The primary artifact must be durable before any optional model
+            # call. Disconnecting during tag generation must not lose a report.
+            try:
+                await asyncio.to_thread(
+                    update_zotero_analysis,
+                    user_id, item_key, normalized, analysis_figures,
+                    analysis_enrichment, analysis_metadata,
+                )
+            except Exception:
+                logger.warning("Could not save Zotero report %s", item_key, exc_info=True)
+                yield {"event": "warning", "data": "报告已生成但暂未保存，请在刷新页面前复制保留；未覆盖已有报告"}
+                yield {"event": "final", "data": normalized}
+                yield {"event": "done", "data": ""}
+                return
+            yield {"event": "final", "data": normalized}
+            yield {"event": "enrichment", "data": json.dumps(analysis_enrichment, ensure_ascii=False)}
             yield {"event": "status", "data": "正在生成 Zotero 精读笔记和分层标签..."}
             try:
                 analysis_enrichment = await generate_zotero_enrichment(
@@ -2195,22 +2203,24 @@ async def analyze_my_zotero_item(
                     item,
                     normalized,
                 )
+                enrichment_saved = await asyncio.to_thread(
+                    update_zotero_analysis_enrichment, user_id, item_key, analysis_enrichment,
+                    expected_report=normalized,
+                )
+                if not enrichment_saved:
+                    yield {
+                        "event": "enrichment-error",
+                        "data": "报告已被其他操作更新，本次旧报告的笔记与标签未保存；请刷新页面后重新生成建议",
+                    }
+                    yield {"event": "done", "data": ""}
+                    return
                 yield {
                     "event": "enrichment",
                     "data": json.dumps(analysis_enrichment, ensure_ascii=False),
                 }
             except Exception as exc:
                 logger.info("Unable to generate Zotero note and tags %s: %s", item_key, exc)
-                yield {"event": "status", "data": "笔记与标签生成失败，已保留文字报告"}
-            await asyncio.to_thread(
-                update_zotero_analysis,
-                user_id,
-                item_key,
-                normalized,
-                analysis_figures,
-                analysis_enrichment,
-                analysis_metadata,
-            )
+                yield {"event": "enrichment-error", "data": "报告已保存；笔记或标签生成/保存失败，请使用“重新生成建议”重试"}
             yield {"event": "final", "data": normalized}
             yield {"event": "done", "data": ""}
         except (ZoteroError, DatabaseError) as exc:
@@ -2239,16 +2249,23 @@ async def generate_my_zotero_item_enrichment(
         item = await asyncio.to_thread(get_zotero_item, user["id"], item_key)
         if not item:
             raise HTTPException(status_code=404, detail="Zotero 条目不存在")
-        report = str(item.get("llm_response") or "").strip()
+        stored_report = str(item.get("llm_response") or "")
+        report = stored_report.strip()
         if not report:
             raise HTTPException(status_code=409, detail="请先完成论文 AI 分析")
         enrichment = await generate_zotero_enrichment(selected_llm, item, report)
-        await asyncio.to_thread(
+        enrichment_saved = await asyncio.to_thread(
             update_zotero_analysis_enrichment,
             user["id"],
             item_key,
             enrichment,
+            expected_report=stored_report,
         )
+        if not enrichment_saved:
+            raise HTTPException(
+                status_code=409,
+                detail="报告已被其他操作更新，本次旧报告的笔记与标签未保存；请刷新页面后重新生成建议",
+            )
         return enrichment
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
@@ -2280,6 +2297,8 @@ async def writeback_my_zotero_item_enrichment(
         ]
         if not note_markdown:
             raise HTTPException(status_code=409, detail="请先生成 Zotero 精读笔记和标签")
+        if not enrichment_matches_report(enrichment, str(item.get("llm_response") or "")):
+            raise HTTPException(status_code=409, detail="报告已更新，请重新生成笔记与标签后再写回 Zotero")
         previous_writeback = enrichment.get("writeback") or {}
         note_item_key = str(previous_writeback.get("note_item_key") or "").strip() or None
         client = ZoteroClient(connection["api_key"])
@@ -2778,6 +2797,8 @@ async def admin_update_llm_provider(
             api_key=req.api_key,
             api_key_provided="api_key" in fields_set,
             is_enabled=req.is_enabled,
+            analysis_max_tokens=req.analysis_max_tokens,
+            analysis_max_tokens_provided="analysis_max_tokens" in fields_set,
         )
         if not provider:
             raise HTTPException(status_code=404, detail="供应商不存在")
@@ -3233,11 +3254,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             yield {"event": "error", "data": "当前 LLM 配置读取失败，请稍后重试"}
             return
 
-        is_glm_proxy_analysis = (
-            str(selected_config.get("provider_key") or "").casefold() == "sub2api"
-            and str(selected_config.get("model_name") or "").casefold() == "glm-5.3"
-        )
-        analysis_stream_options: dict[str, Any] = {}
+        is_glm_proxy_analysis = is_glm_proxy_config(selected_config)
         analysis_attempts: list[tuple[str | None, int | None]] = [(paper_content, None)]
         if is_glm_proxy_analysis:
             primary_content = (
@@ -3259,13 +3276,6 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                 (primary_content, ZOTERO_ANALYSIS_PROXY_TOKEN_LIMIT),
                 (fallback_content, ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT),
             ]
-            analysis_stream_options.update(
-                {
-                    "max_tokens": ZOTERO_ANALYSIS_PROXY_OUTPUT_TOKEN_LIMIT,
-                    "thinking": {"type": "disabled"},
-                    "output_config": {"effort": "low"},
-                }
-            )
             if paper_content and primary_content != paper_content:
                 yield {
                     "event": "status",
@@ -3303,7 +3313,6 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                         if attempt_index
                         else "paper_analysis_stream"
                     ),
-                    **analysis_stream_options,
                 ):
                     if stream_chunk.kind == "reasoning":
                         yield {"event": "reasoning", "data": stream_chunk.content}
@@ -3322,7 +3331,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                 )
 
             candidate = normalize_zotero_report("".join(full_response))
-            completion_error = (
+            completion_error = str(stream_error) if isinstance(stream_error, LLMOutputTruncatedError) else (
                 zotero_stream_recovery_error(candidate)
                 if stream_error
                 else zotero_report_completion_error(candidate)
@@ -3357,7 +3366,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             analysis_saved = False
             logger.warning("Could not save generated paper analysis %s", paper_id, exc_info=True)
             yield {
-                "event": "status",
+                "event": "warning",
                 "data": "报告已生成，但暂未保存；请在刷新页面前保留当前内容后稍后重试",
             }
         paper_info["llm_response"] = normalized_response

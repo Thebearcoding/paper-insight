@@ -105,6 +105,16 @@ function buildSearchRequestParams(
   return params;
 }
 
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   if (response.ok) {
     return (await response.json()) as T;
@@ -112,12 +122,12 @@ async function readJson<T>(response: Response): Promise<T> {
 
   let detail = 'Request failed';
   try {
-    const parsed = (await response.json()) as { detail?: string };
-    detail = parsed.detail ?? detail;
+    const parsed = (await response.json()) as { detail?: unknown };
+    detail = typeof parsed.detail === 'string' ? parsed.detail : detail;
   } catch {
     detail = response.statusText || detail;
   }
-  throw new Error(detail);
+  throw new ApiError(detail, response.status);
 }
 
 async function apiRequest(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
@@ -559,6 +569,7 @@ export async function updateAdminLlmProvider(
     base_url?: string;
     api_key?: string | null;
     is_enabled?: boolean;
+    analysis_max_tokens?: number | null;
   },
 ): Promise<AdminLlmProvider> {
   return apiFetch<AdminLlmProvider>(`/admin/llm/providers/${providerId}`, {

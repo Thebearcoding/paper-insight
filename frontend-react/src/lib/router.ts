@@ -18,6 +18,15 @@ function notifyNavigation(): void {
   window.dispatchEvent(new Event('app:navigate'));
 }
 
+export function decodeRouteSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    // A malformed shared URL should result in a missing item, not a blank app.
+    return segment;
+  }
+}
+
 export function navigate(to: string, options?: { replace?: boolean }): void {
   if (options?.replace) {
     window.history.replaceState(null, '', to);

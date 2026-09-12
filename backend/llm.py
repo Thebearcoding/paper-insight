@@ -6,6 +6,7 @@ import logging
 import secrets
 import uuid
 from dataclasses import dataclass
+from contextlib import aclosing
 from typing import Any
 import httpx
 from config import settings
@@ -13,6 +14,7 @@ from prompt import PAPER_ANALYSIS_PROMPT
 
 MISSING_API_KEY_PLACEHOLDER = "missing-api-key"
 DEFAULT_ANALYSIS_TEMPERATURE = 0.3
+DEFAULT_REQUIRED_ANALYSIS_TOKENS = 32_768
 ANTHROPIC_CLAUDE_CODE_PROTOCOL = "anthropic_claude_code"
 CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude."
 CLAUDE_CODE_BETA_HEADER = (
@@ -32,6 +34,13 @@ class LLMStreamChunk:
 
 class LLMOutputTruncatedError(RuntimeError):
     """Raised when the provider ends a response at its output-token limit."""
+
+
+def is_glm_proxy_config(config: dict) -> bool:
+    return (
+        str(config.get("provider_key") or "").casefold() == "sub2api"
+        and str(config.get("model_name") or "").casefold() == "glm-5.3"
+    )
 
 
 @dataclass(frozen=True)
@@ -396,6 +405,10 @@ def iter_llm_stream_chunks(chunk):
     content = _extract_delta_text(delta, "content")
     if content:
         yield LLMStreamChunk(kind="content", content=content)
+    if getattr(chunk.choices[0], "finish_reason", None) == "length":
+        raise LLMOutputTruncatedError(
+            "模型达到输出或上下文 token 上限；请提高供应商的分析输出额度或更换模型"
+        )
 
 async def retry_on_error(func, max_retries=3, delay=1.0):
     """Simple retry wrapper for async functions"""
@@ -721,14 +734,104 @@ class ManagedLLM:
             raise RuntimeError("LLM base URL is not configured")
         return config
 
-    def _parameters(self, config: dict, overrides: dict) -> dict:
+    def _parameters(self, config: dict, overrides: dict, *, analysis: bool = False) -> dict:
         params = self._default_parameters(config)
+        token_keys = ("max_tokens", "max_completion_tokens")
+        # Both aliases in one request are rejected by many gateways. An explicit
+        # override, including null (= provider default), replaces the whole pair.
+        if any(key in overrides for key in token_keys):
+            for key in token_keys:
+                params.pop(key, None)
         params.update(overrides)
+        if analysis:
+            raw_defaults = config.get("default_parameters") or {}
+            if "_analysis_max_tokens" in raw_defaults:
+                limit = raw_defaults["_analysis_max_tokens"]
+                token_key = "max_completion_tokens" if "max_completion_tokens" in params else "max_tokens"
+                for key in token_keys:
+                    params.pop(key, None)
+                if limit is not None:
+                    params[token_key] = limit
+            elif not any(key in params for key in token_keys) and (
+                self._uses_anthropic_claude_code(config)
+                or is_glm_proxy_config(config)
+            ):
+                params["max_tokens"] = DEFAULT_REQUIRED_ANALYSIS_TOKENS
+            if is_glm_proxy_config(config):
+                # Gateway compatibility defaults must not override user choices.
+                params.setdefault("thinking", {"type": "disabled"})
+                params.setdefault("output_config", {"effort": "low"})
+        for key in token_keys:
+            if params.get(key) is None:
+                params.pop(key, None)
+        if "max_completion_tokens" in params:
+            params.pop("max_tokens", None)
+        if analysis and self._uses_anthropic_claude_code(config) and not any(
+            key in params for key in token_keys
+        ):
+            # Anthropic Messages requires max_tokens even in application-auto
+            # mode. Never pretend omission means an unlimited model response.
+            params["max_tokens"] = DEFAULT_REQUIRED_ANALYSIS_TOKENS
         return params
+
+    async def _openai_text_response(self, config: dict, messages: list, params: dict, request_type: str):
+        client = self._client_for_config(config)
+
+        async def call():
+            response = await client.chat.completions.create(
+                model=config["model_name"], messages=messages, **params,
+            )
+            _record_llm_usage(
+                _response_usage(response),
+                provider_id=str(config.get("id")) if config.get("id") else None,
+                provider_key=config.get("provider_key"),
+                provider_name=config.get("name"),
+                model_name=_response_model(response, config["model_name"]),
+                request_type=request_type,
+            )
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                raise LLMOutputTruncatedError("模型达到 token 上限，未返回完整回答")
+            return response.choices[0].message.content
+
+        try:
+            return await retry_on_error(call)
+        finally:
+            if hasattr(client, "close"):
+                await client.close()
+
+    async def _openai_stream_events(self, config: dict, messages: list, params: dict, request_type: str):
+        client = self._client_for_config(config)
+        response = None
+        usage = None
+        model_name = config["model_name"]
+        try:
+            response = await _create_streaming_completion(client, {
+                "model": model_name, "stream": True, "messages": messages, **params,
+            })
+            async for chunk in response:
+                usage = _response_usage(chunk) or usage
+                model_name = _response_model(chunk, model_name)
+                for stream_chunk in iter_llm_stream_chunks(chunk):
+                    yield stream_chunk
+        finally:
+            _record_llm_usage(
+                usage,
+                provider_id=str(config.get("id")) if config.get("id") else None,
+                provider_key=config.get("provider_key"),
+                provider_name=config.get("name"),
+                model_name=model_name,
+                request_type=request_type,
+            )
+            try:
+                if response is not None and hasattr(response, "close"):
+                    await response.close()
+            finally:
+                if hasattr(client, "close"):
+                    await client.close()
 
     async def get_response(self, prompt: str, **kwargs) -> str:
         config = self._require_config()
-        params = self._parameters(config, kwargs)
+        params = self._parameters(config, kwargs, analysis=True)
         request_type = _pop_usage_context(params, "analysis")
         analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
@@ -749,29 +852,11 @@ class ManagedLLM:
                     chunks.append(chunk.content)
             return "".join(chunks)
 
-        client = self._client_for_config(config)
-
-        async def _call():
-            response = await client.chat.completions.create(
-                model=config["model_name"],
-                messages=messages,
-                **params,
-            )
-            _record_llm_usage(
-                _response_usage(response),
-                provider_id=str(config.get("id")) if config.get("id") else None,
-                provider_key=config.get("provider_key"),
-                provider_name=config.get("name"),
-                model_name=_response_model(response, config["model_name"]),
-                request_type=request_type,
-            )
-            return response.choices[0].message.content
-
-        return await retry_on_error(_call)
+        return await self._openai_text_response(config, messages, params, request_type)
 
     async def get_response_stream_events(self, prompt: str, **kwargs):
         config = self._require_config()
-        params = self._parameters(config, kwargs)
+        params = self._parameters(config, kwargs, analysis=True)
         request_type = _pop_usage_context(params, "analysis_stream")
         analysis_instruction = _pop_analysis_instruction(params)
         params.setdefault("temperature", DEFAULT_ANALYSIS_TEMPERATURE)
@@ -790,31 +875,9 @@ class ManagedLLM:
                 yield chunk
             return
 
-        client = self._client_for_config(config)
-        response = await _create_streaming_completion(
-            client,
-            {
-                "model": config["model_name"],
-                "stream": True,
-                "messages": messages,
-                **params,
-            },
-        )
-        usage = None
-        model_name = config["model_name"]
-        async for chunk in response:
-            usage = _response_usage(chunk) or usage
-            model_name = _response_model(chunk, model_name)
-            for stream_chunk in iter_llm_stream_chunks(chunk):
+        async with aclosing(self._openai_stream_events(config, messages, params, request_type)) as events:
+            async for stream_chunk in events:
                 yield stream_chunk
-        _record_llm_usage(
-            usage,
-            provider_id=str(config.get("id")) if config.get("id") else None,
-            provider_key=config.get("provider_key"),
-            provider_name=config.get("name"),
-            model_name=model_name,
-            request_type=request_type,
-        )
 
     async def get_response_stream(self, prompt: str, **kwargs):
         async for stream_chunk in self.get_response_stream_events(prompt, **kwargs):
@@ -839,25 +902,7 @@ class ManagedLLM:
                     chunks.append(chunk.content)
             return "".join(chunks)
 
-        client = self._client_for_config(config)
-
-        async def _call():
-            response = await client.chat.completions.create(
-                model=config["model_name"],
-                messages=messages,
-                **params,
-            )
-            _record_llm_usage(
-                _response_usage(response),
-                provider_id=str(config.get("id")) if config.get("id") else None,
-                provider_key=config.get("provider_key"),
-                provider_name=config.get("name"),
-                model_name=_response_model(response, config["model_name"]),
-                request_type=request_type,
-            )
-            return response.choices[0].message.content
-
-        return await retry_on_error(_call)
+        return await self._openai_text_response(config, messages, params, request_type)
 
     async def chat_stream_events(self, messages: list, **kwargs):
         config = self._require_config()
@@ -875,31 +920,9 @@ class ManagedLLM:
                 yield chunk
             return
 
-        client = self._client_for_config(config)
-        response = await _create_streaming_completion(
-            client,
-            {
-                "model": config["model_name"],
-                "stream": True,
-                "messages": messages,
-                **params,
-            },
-        )
-        usage = None
-        model_name = config["model_name"]
-        async for chunk in response:
-            usage = _response_usage(chunk) or usage
-            model_name = _response_model(chunk, model_name)
-            for stream_chunk in iter_llm_stream_chunks(chunk):
+        async with aclosing(self._openai_stream_events(config, messages, params, request_type)) as events:
+            async for stream_chunk in events:
                 yield stream_chunk
-        _record_llm_usage(
-            usage,
-            provider_id=str(config.get("id")) if config.get("id") else None,
-            provider_key=config.get("provider_key"),
-            provider_name=config.get("name"),
-            model_name=model_name,
-            request_type=request_type,
-        )
 
     async def chat_stream(self, messages: list, **kwargs):
         async for stream_chunk in self.chat_stream_events(messages, **kwargs):

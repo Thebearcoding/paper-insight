@@ -195,6 +195,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   const [selectedModel, setSelectedModel] = useState('');
   const abortRef = useRef<AbortController | null>(null);
   const selectedModelRef = useRef('');
+  const analysisInitializedRef = useRef(false);
 
   useEffect(() => {
     if (isAuthLoading) {
@@ -295,12 +296,15 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   }, [selectedModel]);
 
   const loadAnalysis = useCallback(async (reanalyze = false) => {
+    if (reanalyze && abortRef.current) return;
+    analysisInitializedRef.current = true;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setAnalysis('');
     setReasoning('');
     setAnalysisError(null);
+    setEnrichmentError(null);
     setAnalyzing(true);
     if (reanalyze) {
       setAnalysisSource(null);
@@ -333,6 +337,8 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
             if (controller.signal.aborted || abortRef.current !== controller) return;
             if (event === 'status') {
               setAnalysisStatus(data);
+            } else if (event === 'warning') {
+              setAnalysisWarning((current) => [current, data].filter(Boolean).join('；'));
             } else if (event === 'reasoning') {
               setReasoning((current) => current + data);
             } else if (event === 'final') {
@@ -365,9 +371,12 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
               try {
                 const enrichment = JSON.parse(data) as ZoteroAnalysisEnrichment;
                 setAnalysisEnrichment(enrichment ?? {});
+                setEnrichmentError(null);
               } catch {
                 setAnalysisEnrichment({});
               }
+            } else if (event === 'enrichment-error') {
+              setEnrichmentError(data);
             } else if (event === 'error') {
               throw new Error(data || '深度阅读失败');
             } else if (event === 'done') {
@@ -393,27 +402,31 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
   }, [itemKey]);
 
   useEffect(() => {
-    if (!item) {
-      return undefined;
-    }
+    // Hydrate only once. Tag writeback and model-catalog refresh must not replace
+    // a newly generated report with the original item.llm_response snapshot.
+    if (!item || analysisInitializedRef.current) return;
 
     if (item.llm_response?.trim()) {
-      abortRef.current?.abort();
-      abortRef.current = null;
+      analysisInitializedRef.current = true;
       setAnalysis(item.llm_response);
       setReasoning('');
       setAnalysisError(null);
       setAnalyzing(false);
       setAnalysisStatus('');
-      return undefined;
+      return;
     }
 
     if (!modelCatalogReady) {
-      return undefined;
+      return;
     }
     void loadAnalysis(false);
-    return () => abortRef.current?.abort();
   }, [item, loadAnalysis, modelCatalogReady]);
+
+  useEffect(() => () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    analysisInitializedRef.current = false;
+  }, []);
 
   const generateEnrichment = useCallback(async () => {
     setEnrichmentBusy(true);
@@ -508,7 +521,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
                 <Cpu className="h-4 w-4 shrink-0 text-[#f08300]" />
                 <SelectValue placeholder={modelCatalogReady ? '没有可用模型' : '正在读取模型...'} />
               </SelectTrigger>
-              <SelectContent position="popper" align="end" className="max-h-[24rem] min-w-[22rem]">
+              <SelectContent position="popper" align="end" className="max-h-[24rem] max-w-[calc(100vw-2rem)] sm:min-w-[22rem]">
                 {modelCatalog?.providers.map((provider) => (
                   <SelectGroup key={provider.id}>
                     <SelectLabel>
@@ -533,7 +546,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
               onClick={() => void loadAnalysis(true)}
             >
               <RefreshCw className={`mr-2 h-4 w-4 ${analyzing ? 'animate-spin' : ''}`} />
-              重新分析
+              {analyzing ? '分析中…' : '重新分析'}
             </Button>
           </div>
         </div>
@@ -576,7 +589,7 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
             {analysisStatus || '正在分析论文...'}
           </div>
         ) : analysisError ? (
-          <div className="mt-6 rounded-2xl bg-[#fff1f2] p-4 text-[#b91c1c]">{analysisError}</div>
+          <div role="alert" className="mt-6 rounded-2xl bg-[#fff1f2] p-4 text-[#b91c1c]">{analysisError}</div>
         ) : (
           <div className="mt-6 space-y-4">
             <ReasoningStreamPanel reasoning={analyzing ? reasoning : ''} />
@@ -621,12 +634,12 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" disabled={enrichmentBusy || !analysis} onClick={() => void generateEnrichment()}>
+            <Button variant="outline" disabled={analyzing || enrichmentBusy || !analysis} onClick={() => void generateEnrichment()}>
               {enrichmentBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
               {analysisEnrichment.note_markdown ? '重新生成建议' : '生成笔记与标签'}
             </Button>
             <Button
-              disabled={enrichmentBusy || !analysisEnrichment.note_markdown || !connection?.can_write}
+              disabled={analyzing || enrichmentBusy || !analysisEnrichment.note_markdown || !connection?.can_write || analysisEnrichment.report_status === 'stale' || analysisEnrichment.report_status === 'pending'}
               onClick={() => void writebackEnrichment()}
             >
               {enrichmentBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
@@ -640,6 +653,9 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
           </p>
         ) : null}
         {enrichmentError ? <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{enrichmentError}</p> : null}
+        {analysisEnrichment.report_status === 'stale' ? (
+          <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">下面的建议基于旧报告，尚未同步本次解读。请重新生成后再写回 Zotero。</p>
+        ) : null}
         {analysisEnrichment.note_markdown ? (
           <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_18rem]">
             <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">

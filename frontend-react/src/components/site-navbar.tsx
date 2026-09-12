@@ -8,9 +8,9 @@ import { navigate, useAppLocation } from '@/lib/router';
 import { getUserId } from '@/lib/storage';
 
 const navDockButtonClass =
-  'h-9 rounded-full border border-transparent bg-transparent px-2.5 text-[13px] font-semibold text-[#425166] shadow-none transition hover:border-white/80 hover:bg-white/78 hover:text-[#172033] hover:shadow-[0_10px_28px_rgba(15,23,42,0.08)]';
+  'h-9 w-9 gap-0 rounded-full border border-transparent bg-transparent px-0 text-[13px] font-semibold text-[#425166] shadow-none transition hover:border-white/80 hover:bg-white/78 hover:text-[#172033] hover:shadow-[0_10px_28px_rgba(15,23,42,0.08)] xl:w-auto xl:gap-1.5 xl:px-2.5';
 const navDockActiveButtonClass =
-  'h-9 rounded-full border border-white/80 bg-white/82 px-2.5 text-[13px] font-semibold text-[#172033] shadow-[0_10px_28px_rgba(15,23,42,0.08)] transition hover:bg-white hover:text-[#172033]';
+  'h-9 w-9 gap-0 rounded-full border border-white/80 bg-white/82 px-0 text-[13px] font-semibold text-[#172033] shadow-[0_10px_28px_rgba(15,23,42,0.08)] transition hover:bg-white hover:text-[#172033] xl:w-auto xl:gap-1.5 xl:px-2.5';
 const onlinePillClass =
   'h-9 shrink-0 items-center gap-1.5 rounded-full border border-white/80 bg-white/68 px-3 text-[13px] font-medium text-[#526174] shadow-[0_12px_34px_rgba(15,23,42,0.08)] backdrop-blur-xl';
 const feedbackFormUrl = 'https://github.com/Thebearcoding/paper-insight/issues/new';
@@ -77,7 +77,7 @@ export function SiteNavbar() {
 
   return (
     <header
-      className={`fixed left-0 right-0 top-0 z-50 transition-all duration-500 ${
+      className={`fixed left-0 right-0 top-0 z-50 transition-all duration-500 focus-within:translate-y-0 focus-within:bg-white/95 ${
         isScrolled
           ? isVisible
             ? 'translate-y-0 border-b border-white/60 bg-white/75 shadow-sm backdrop-blur-xl'
@@ -85,18 +85,19 @@ export function SiteNavbar() {
           : 'bg-transparent'
       }`}
     >
-      <div className="mx-auto grid max-w-[104rem] grid-cols-[auto_minmax(0,1fr)] items-center gap-4 px-4 py-4 sm:px-6 lg:px-8 2xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+      <div className="mx-auto grid max-w-[104rem] grid-cols-[auto_minmax(0,1fr)] items-center gap-2 px-4 py-4 sm:gap-4 sm:px-6 lg:px-8 2xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
         <button
           type="button"
+          aria-label="Paper Insight 首页"
           onClick={() => navigate('/')}
-          className="group flex items-center gap-3 justify-self-start"
+          className="group flex items-center gap-3 justify-self-start rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ff9900] focus-visible:ring-offset-2"
         >
           <img
             src="/images/logo.svg"
             alt="Paper Insight logo"
             className="h-11 w-11 rounded-2xl object-contain shadow-sm transition-transform duration-300 group-hover:scale-[1.04]"
           />
-          <div className="hidden text-left sm:block">
+          <div className="hidden text-left lg:block">
             <div className="font-semibold tracking-tight text-[#1b2333]">Paper Insight</div>
             <div className="text-xs text-[#728095]">AI-driven paper analysis</div>
           </div>
@@ -107,7 +108,7 @@ export function SiteNavbar() {
           <span>{onlineCount} 人在线</span>
         </div>
 
-        <div className="flex min-w-0 items-center gap-1 justify-self-end rounded-full border border-white/70 bg-white/48 p-1 shadow-[0_18px_55px_rgba(15,23,42,0.08)] backdrop-blur-xl">
+        <nav aria-label="主导航" className="flex min-w-0 items-center gap-1 justify-self-end rounded-full border border-white/70 bg-white/48 p-1 shadow-[0_18px_55px_rgba(15,23,42,0.08)] backdrop-blur-xl">
           <div className={`${onlinePillClass} hidden border-transparent bg-transparent px-2.5 shadow-none backdrop-blur-none md:flex 2xl:hidden`}>
             <Radio className="h-4 w-4 text-[#16a34a]" />
             <span>{onlineCount} 人在线</span>
@@ -116,28 +117,37 @@ export function SiteNavbar() {
             <>
               <Button
                 variant="outline"
+                aria-label="我的论文"
+                title="我的论文"
+                aria-current={location.pathname === '/me' ? 'page' : undefined}
                 className={location.pathname === '/me' ? navDockActiveButtonClass : navDockButtonClass}
                 onClick={() => navigate('/me')}
               >
-                <BookMarked className="mr-1.5 h-4 w-4 text-[#2563eb]" />
-                <span className="hidden sm:inline">我的论文</span>
+                <BookMarked className="h-4 w-4 text-[#2563eb]" />
+                <span className="hidden xl:inline">我的论文</span>
               </Button>
               <Button
                 variant="outline"
+                aria-label="Zotero 私人文库"
+                title="Zotero 私人文库"
+                aria-current={location.pathname.startsWith('/zotero') ? 'page' : undefined}
                 className={location.pathname.startsWith('/zotero') ? navDockActiveButtonClass : navDockButtonClass}
                 onClick={() => navigate('/zotero')}
               >
-                <Library className="mr-1.5 h-4 w-4 text-[#b91c1c]" />
-                <span className="hidden sm:inline">Zotero</span>
+                <Library className="h-4 w-4 text-[#b91c1c]" />
+                <span className="hidden xl:inline">Zotero</span>
               </Button>
               {user.role === 'admin' ? (
                 <Button
                   variant="outline"
+                  aria-label="后台管理"
+                  title="后台管理"
+                  aria-current={location.pathname === '/admin' ? 'page' : undefined}
                   className={location.pathname === '/admin' ? navDockActiveButtonClass : navDockButtonClass}
                   onClick={() => navigate('/admin')}
                 >
-                  <Shield className="mr-1.5 h-4 w-4 text-[#c2410c]" />
-                  <span className="hidden sm:inline">后台管理</span>
+                  <Shield className="h-4 w-4 text-[#c2410c]" />
+                  <span className="hidden xl:inline">后台管理</span>
                 </Button>
               ) : null}
             </>
@@ -145,7 +155,7 @@ export function SiteNavbar() {
             <>
               <Button
                 variant="outline"
-                className={navDockButtonClass}
+                className={`${navDockButtonClass} w-auto px-2.5`}
                 onClick={() => navigate('/login')}
               >
                 登录
@@ -160,39 +170,44 @@ export function SiteNavbar() {
           )}
           <Button
             variant="outline"
+            aria-label="更新日志"
+            title="更新日志"
+            aria-current={location.pathname === '/changelog' ? 'page' : undefined}
             className={location.pathname === '/changelog' ? navDockActiveButtonClass : navDockButtonClass}
             onClick={() => navigate('/changelog')}
           >
-            <ScrollText className="mr-1.5 h-4 w-4 text-[#475569]" />
-            <span className="hidden sm:inline">更新日志</span>
+            <ScrollText className="h-4 w-4 text-[#475569]" />
+            <span className="hidden xl:inline">更新日志</span>
           </Button>
           <Button
             variant="outline"
-            className={`${navDockButtonClass} hidden sm:inline-flex`}
+            className={`${navDockButtonClass} hidden xl:inline-flex`}
             onClick={() => window.open('https://github.com/Thebearcoding/paper-insight', '_blank', 'noopener,noreferrer')}
           >
-            <Github className="mr-1.5 h-4 w-4 text-[#334155]" />
+            <Github className="h-4 w-4 text-[#334155]" />
             GitHub
           </Button>
           <Button
             variant="outline"
-            className={`${navDockButtonClass} hidden sm:inline-flex`}
+            className={`${navDockButtonClass} hidden xl:inline-flex`}
             onClick={() => window.open(feedbackFormUrl, '_blank', 'noopener,noreferrer')}
           >
-            <MessageSquare className="mr-1.5 h-4 w-4 text-[#0891b2]" />
+            <MessageSquare className="h-4 w-4 text-[#0891b2]" />
             反馈
           </Button>
           {user ? (
             <Button
               variant="outline"
+              aria-label="退出登录"
+              title="退出登录"
               className={navDockButtonClass}
               onClick={() => void logout()}
             >
-              <LogOut className="mr-1.5 h-4 w-4 text-[#64748b]" />
-              <span className="hidden sm:inline">退出</span>
+              <LogOut className="h-4 w-4 text-[#64748b]" />
+              <span className="hidden xl:inline">退出</span>
             </Button>
           ) : null}
-        </div>
+        </nav>
       </div>
     </header>
   );

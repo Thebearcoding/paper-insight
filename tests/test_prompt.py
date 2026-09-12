@@ -58,3 +58,34 @@ def test_zotero_analysis_prompt_does_not_invent_missing_figure():
     assert "没有提供可确认的论文架构主图信息" in prompt
     assert "不要编造图号" in prompt
     assert "没有识别到可靠的 SOTA 主结果表" in prompt
+
+
+def test_close_reading_requires_complete_symbol_definitions_and_teaching_examples():
+    assert "4000 至 7000" not in PAPER_ANALYSIS_PROMPT
+    for requirement in ("每个符号", "类型/维度", "来自哪里/如何得到", "索引与乘法",
+                        "教学示例（非论文实验）", "具体改变哪一步", "百分点", "不是全文精读"):
+        assert requirement in PAPER_ANALYSIS_PROMPT
+
+
+def test_table_evidence_includes_cells_and_merged_header_metadata():
+    prompt = build_zotero_analysis_prompt(None, {
+        "label": "Table 4",
+        "table_data": {"rows": [
+            [{"text": "AUROC (%)", "col_span": 2, "header": True}],
+            [{"text": "Baseline"}, {"text": "91.6"}],
+            [{"text": "Ours"}, {"text": "94.2"}],
+        ]},
+    })
+    assert '"col_span": 2' in prompt
+    assert '"text": "91.6"' in prompt
+    assert '"text": "94.2"' in prompt
+    assert "空单元格不等于 0" in prompt
+
+
+def test_table_evidence_truncates_only_at_complete_row_boundaries():
+    prompt = build_zotero_analysis_prompt(None, {
+        "table_data": {"rows": [["Method", "Score"], ["x" * 25000, "123"]]},
+    })
+    assert '["Method", "Score"]' in prompt
+    assert "仅提供了开头的完整行" in prompt
+    assert "x" * 100 not in prompt

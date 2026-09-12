@@ -212,6 +212,8 @@ export interface ZoteroEnrichmentTag {
 
 export interface ZoteroAnalysisEnrichment {
   note_markdown?: string;
+  report_status?: 'current' | 'stale' | 'pending';
+  source_report_hash?: string;
   tags?: ZoteroEnrichmentTag[];
   writeback?: {
     status?: 'pending' | 'applied' | string;

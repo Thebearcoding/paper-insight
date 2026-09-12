@@ -6,6 +6,24 @@ import { RichContent } from '@/components/rich-content';
 import { normalizeMarkdownContent, splitStreamingMarkdown } from './content';
 
 describe('normalizeMarkdownContent', () => {
+  it.each([
+    '$x + A_qA_k > N_qA_k$',
+    '$$\nx + A_qA_k > N_qA_k\n$$',
+    '[source](https://example.test/A_qAk)',
+    'https://example.test/A_qAk',
+    '~~~text\n# # A_qAk\n~~~',
+    '``A_qAk `example` ``',
+    '`A_qAk` and $x + A_qA_k$',
+    '__CODE_SEGMENT_0__',
+  ])('preserves math, code and link destinations: %s', (content) => {
+    expect(normalizeMarkdownContent(content)).toBe(content);
+  });
+
+  it('does not create nested math delimiters inside an existing formula', () => {
+    const html = renderToStaticMarkup(<RichContent content={'$x + A_qA_k > N_qA_k$'} />);
+    expect(html).toContain('katex');
+    expect(html).not.toContain('katex-error');
+  });
   it('normalizes bracket math and markdown markers', () => {
     const normalized = normalizeMarkdownContent(String.raw`\#Heading
 \(x_i\)

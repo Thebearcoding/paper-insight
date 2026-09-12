@@ -43,13 +43,13 @@ export function SearchControls({
 
   const panelClassName = hero
     ? 'rounded-[28px] bg-white/90 p-5 shadow-sm ring-1 ring-black/5 sm:p-6 lg:p-6'
-    : `rounded-2xl bg-white/90 shadow-sm ring-1 ring-black/5 ${compact ? 'p-4' : 'p-8'}`;
+    : `rounded-2xl bg-white/90 shadow-sm ring-1 ring-black/5 ${compact ? 'p-4' : 'p-4 sm:p-8'}`;
   const filtersClassName = hero
     ? 'mb-5 flex flex-wrap items-center justify-center gap-x-7 gap-y-3'
     : `mb-4 flex flex-wrap items-center gap-5 ${compact ? 'justify-start' : 'justify-center'}`;
   const rowClassName = hero
     ? 'flex flex-col items-stretch gap-4 sm:flex-row'
-    : `flex ${compact ? 'flex-col gap-3 sm:flex-row' : 'gap-3'} items-stretch`;
+    : 'flex flex-col items-stretch gap-3 sm:flex-row';
   const inputClassName = hero
     ? 'h-14 rounded-[1.25rem] border-2 border-[#ff9900] bg-[#f6f8fb] pl-14 text-base shadow-none transition hover:border-[#ff7a00] focus-visible:border-[#ff7a00] focus-visible:ring-0'
     : 'h-12 rounded-xl border-2 border-transparent bg-[#f6f8fb] pl-11 text-base shadow-none transition hover:border-[#d7dfe8] focus-visible:border-[#ff9900] focus-visible:ring-0';
@@ -80,8 +80,11 @@ export function SearchControls({
       ) : null}
 
       <div className={rowClassName}>
-        <div className="relative flex-1">
+        <div className="relative min-w-0 flex-1">
           <Input
+            type="search"
+            aria-label="论文搜索关键词"
+            enterKeyHint="search"
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
             onCompositionStart={() => setIsComposing(true)}

@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import llm as llm_module
 from llm import ManagedLLM
 from app import public_active_llm_config, public_selectable_llm_provider
+from app import LlmProviderUpdateRequest
+from pydantic import ValidationError
 
 
 class FakeCompletions:
@@ -69,6 +71,113 @@ def test_public_active_llm_config_exposes_display_fields_only():
     }
     assert "api_key" not in payload
     assert "base_url" not in payload
+
+
+@pytest.mark.parametrize("limit", [None, 60000])
+def test_analysis_budget_override_is_shared_by_routes_and_removes_conflicting_aliases(limit):
+    config = {"provider_key": "sub2api", "model_name": "glm-5.3", "default_parameters": {
+        "_analysis_max_tokens": limit, "max_tokens": 4096, "max_completion_tokens": 8192,
+        "thinking": {"type": "enabled"}, "output_config": {"effort": "high"},
+    }}
+    params = ManagedLLM()._parameters(config, {}, analysis=True)
+    assert params["thinking"] == {"type": "enabled"}
+    assert params["output_config"] == {"effort": "high"}
+    assert "_analysis_max_tokens" not in params
+    assert "max_tokens" not in params
+    if limit is None:
+        assert "max_completion_tokens" not in params
+    else:
+        assert params["max_completion_tokens"] == limit
+
+
+def test_anthropic_auto_analysis_uses_required_budget_without_changing_chat():
+    config = {"default_parameters": {"_api_protocol": "anthropic_claude_code", "_analysis_max_tokens": None}}
+    llm = ManagedLLM()
+    assert llm._parameters(config, {}, analysis=True)["max_tokens"] == 32768
+    assert "max_tokens" not in llm._parameters(config, {})
+
+
+def test_glm_compatibility_defaults_do_not_override_explicit_limits():
+    llm = ManagedLLM()
+    config = {"provider_key": "sub2api", "model_name": "glm-5.3"}
+    assert llm._parameters(config, {}, analysis=True)["max_tokens"] == 32768
+    config["default_parameters"] = {"max_tokens": 60000}
+    assert llm._parameters(config, {}, analysis=True)["max_tokens"] == 60000
+
+
+def test_call_override_replaces_the_other_token_alias():
+    config = {"default_parameters": {"max_completion_tokens": 12000}}
+    llm = ManagedLLM()
+    assert llm._parameters(config, {"max_tokens": 100}) == {"max_tokens": 100}
+    assert llm._parameters(config, {"max_tokens": None}) == {}
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, 1_000_001])
+def test_analysis_output_limit_rejects_invalid_values(value):
+    with pytest.raises(ValidationError):
+        LlmProviderUpdateRequest(analysis_max_tokens=value)
+
+
+def test_analysis_output_limit_distinguishes_omitted_and_auto():
+    assert "analysis_max_tokens" not in LlmProviderUpdateRequest(name="name").model_fields_set
+    assert "analysis_max_tokens" in LlmProviderUpdateRequest(analysis_max_tokens=None).model_fields_set
+
+
+@pytest.mark.asyncio
+async def test_shared_text_completion_closes_client_and_rejects_truncation(monkeypatch):
+    client = FakeClient(FakeCompletions())
+    closed = []
+
+    async def close():
+        closed.append(True)
+
+    async def create(**kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="too short"), finish_reason="length"
+        )])
+
+    client.close = close
+    client.chat.completions.create = create
+    managed = managed_llm_with_fake_client(FakeCompletions())
+    managed._client_for_config = lambda config: client
+    monkeypatch.setattr(llm_module, "_record_llm_usage", lambda *args, **kwargs: None)
+    with pytest.raises(llm_module.LLMOutputTruncatedError):
+        await managed.get_response("paper")
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["get_response_stream_events", "chat_stream_events"])
+async def test_shared_stream_closes_upstream_when_consumer_stops(monkeypatch, method):
+    closed = []
+
+    class Stream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="fragment"))])
+
+        async def close(self):
+            closed.append("stream")
+
+    class Completions:
+        async def create(self, **kwargs):
+            return Stream()
+
+    client = FakeClient(Completions())
+
+    async def close():
+        closed.append("client")
+
+    client.close = close
+    managed = managed_llm_with_fake_client(Completions())
+    managed._client_for_config = lambda config: client
+    monkeypatch.setattr(llm_module, "_record_llm_usage", lambda *args, **kwargs: None)
+    stream = getattr(managed, method)("paper" if method.startswith("get_response") else [])
+    assert (await anext(stream)).content == "fragment"
+    await stream.aclose()
+    assert closed == ["stream", "client"]
 
 
 def test_public_selectable_llm_provider_exposes_models_without_credentials():

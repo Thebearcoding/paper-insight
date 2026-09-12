@@ -13,7 +13,7 @@ from database import (
     update_paper_code_availability,
 )
 from keyword_enrichment import extract_keywords_for_paper
-from markdown_utils import normalize_llm_markdown
+from markdown_utils import normalize_zotero_report, zotero_report_completion_error
 from utils import get_or_cache_paper_content, ReaderError, truncate_content_for_llm
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,10 @@ class BackgroundAnalyzer:
                     logger.info(f"[{paper_id}] 生成分析...")
                     user_prompt = build_analysis_prompt(paper_info, paper_content, content_error)
                     response = await self.llm.get_response(user_prompt)
-                    response = normalize_llm_markdown(response, analysis_mode=True)
+                    response = normalize_zotero_report(response)
+                    completion_error = zotero_report_completion_error(response)
+                    if completion_error:
+                        raise ValueError(f"后台论文分析不完整：{completion_error}")
 
                     await asyncio.to_thread(update_llm_response, paper_id, response)
                     await self.update_code_availability(paper_info, response)

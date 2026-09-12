@@ -1,5 +1,12 @@
+x-service-logging: &service-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
+    logging: *service-logging
     image: postgres:16
     restart: unless-stopped
     environment:
@@ -17,6 +24,7 @@ services:
       retries: 10
 
   typesense:
+    logging: *service-logging
     image: typesense/typesense:30.2
     restart: unless-stopped
     command:
@@ -28,6 +36,7 @@ services:
       - typesense_data:/data
 
   app:
+    logging: *service-logging
     image: ${PAPER_INSIGHT_IMAGE:-paper-insight-app}
     build:
       context: .

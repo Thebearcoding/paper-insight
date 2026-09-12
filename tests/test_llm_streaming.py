@@ -1,10 +1,11 @@
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from llm import _stream_params_with_usage, iter_llm_stream_chunks
+from llm import LLMOutputTruncatedError, _stream_params_with_usage, iter_llm_stream_chunks
 
 
 def make_chunk(delta):
@@ -46,3 +47,12 @@ def test_stream_params_request_usage_without_dropping_existing_options():
 
     assert params["stream_options"] == {"foo": "bar", "include_usage": True}
     assert params["max_tokens"] == 10
+
+
+def test_stream_length_stop_is_not_silently_accepted_as_complete():
+    chunk = make_chunk(SimpleNamespace(content="unfinished"))
+    chunk.choices[0].finish_reason = "length"
+    events = iter_llm_stream_chunks(chunk)
+    assert next(events).content == "unfinished"
+    with pytest.raises(LLMOutputTruncatedError, match="上限"):
+        next(events)

@@ -134,7 +134,7 @@ export function HomePage() {
               </div>
 
               <div className="space-y-5">
-                <h1 className="max-w-5xl text-balance text-4xl font-semibold leading-[1.08] tracking-tight text-[#101827] sm:text-5xl lg:text-5xl xl:text-6xl">
+                <h1 className="max-w-5xl text-3xl font-semibold leading-[1.2] tracking-tight text-[#101827] sm:text-balance sm:text-5xl sm:leading-[1.08] lg:text-5xl xl:text-6xl">
                   <span className="block">AI 帮你快速初筛，</span>
                   <span className="block">把好论文留给自己精读。</span>
                 </h1>

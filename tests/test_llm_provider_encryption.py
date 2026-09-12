@@ -155,3 +155,21 @@ def test_list_llm_providers_decrypts_only_for_runtime_use(monkeypatch):
     )
     assert "pgp_sym_decrypt" in query
     assert params == ("server-encryption-key",)
+
+
+def test_analysis_budget_merges_one_json_setting_without_touching_credentials(monkeypatch):
+    _configure_encryption_key(monkeypatch)
+    cursor = FakeCursor()
+    connection = FakeConnection(cursor)
+
+    @contextmanager
+    def fake_get_connection():
+        yield connection
+
+    monkeypatch.setattr(database, "_get_connection", fake_get_connection)
+    database.update_llm_provider("provider-1", analysis_max_tokens=None, analysis_max_tokens_provided=True)
+    query, params = next(call for call in cursor.calls if "UPDATE llm_providers" in call[0])
+    assert "COALESCE(default_parameters, '{}'::jsonb) || %s" in query
+    assert "encrypted_api_key =" not in query
+    assert params[0].obj == {"_analysis_max_tokens": None}
+    assert connection.committed

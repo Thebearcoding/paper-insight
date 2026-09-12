@@ -107,8 +107,9 @@ async def test_paper_analysis_retries_glm_stream_and_saves_complete_report(monke
     events = [event async for event in response.body_iterator]
 
     assert len(fake_llm.calls) == 2
-    assert fake_llm.calls[0][1]["thinking"] == {"type": "disabled"}
-    assert fake_llm.calls[0][1]["max_tokens"] == 32_768
+    # Transport policy belongs to ManagedLLM, never to individual routes.
+    assert "thinking" not in fake_llm.calls[0][1]
+    assert "max_tokens" not in fake_llm.calls[0][1]
     assert any(
         event.get("event") == "status" and "自动重试" in event.get("data", "")
         for event in events
@@ -192,7 +193,7 @@ async def test_generated_analysis_finishes_when_persistence_fails(monkeypatch):
     response = await app_module.get_paper_analysis('generated-write-failure', reanalyze=True)
     events = [event async for event in response.body_iterator]
 
-    assert any('暂未保存' in event.get('data', '') for event in events)
+    assert any(event.get('event') == 'warning' and '暂未保存' in event.get('data', '') for event in events)
     assert events[-2] == {'event': 'final', 'data': COMPLETE_REPORT}
     assert events[-1] == {'event': 'done', 'data': ''}
 

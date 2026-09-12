@@ -83,7 +83,20 @@ type LlmProviderDraft = {
   base_url: string;
   api_key: string;
   active_model: string;
+  analysis_max_tokens: string;
 };
+
+function analysisTokenDraft(provider: AdminLlmProvider): string {
+  const params = provider.default_parameters ?? {};
+  if (Object.hasOwn(params, '_analysis_max_tokens')) {
+    return params._analysis_max_tokens == null ? '' : String(params._analysis_max_tokens);
+  }
+  // Keep legacy budgets visible until the user explicitly clears the field.
+  const limit = params.max_completion_tokens ?? params.max_tokens;
+  if (limit != null) return String(limit);
+  return params._api_protocol === 'anthropic_claude_code'
+    || (provider.provider_key === 'sub2api' && provider.active_model === 'glm-5.3') ? '32768' : '';
+}
 
 function formatTrendTick(value: string, range: '24h' | '7d') {
   const parsed = new Date(value);
@@ -363,6 +376,7 @@ export function AdminPage() {
             base_url: provider.base_url,
             api_key: '',
             active_model: provider.active_model ?? provider.models[0]?.model_name ?? '',
+            analysis_max_tokens: analysisTokenDraft(provider),
           },
         ]),
       ));
@@ -444,6 +458,7 @@ export function AdminPage() {
       base_url: selectedProvider.base_url,
       api_key: '',
       active_model: selectedProvider.active_model ?? selectedProvider.models[0]?.model_name ?? '',
+      analysis_max_tokens: analysisTokenDraft(selectedProvider),
     })
     : null;
   const paperAnalysisTask = useMemo(
@@ -541,9 +556,14 @@ export function AdminPage() {
     setLlmMessage(null);
     setUpdatingProviderId(provider.id);
     try {
+      const tokenLimit = draft.analysis_max_tokens.trim() ? Number(draft.analysis_max_tokens) : null;
+      if (tokenLimit !== null && (!Number.isSafeInteger(tokenLimit) || tokenLimit < 1 || tokenLimit > 1_000_000)) {
+        throw new Error('输出额度应为正整数，或留空使用自动模式');
+      }
       const payload: Parameters<typeof updateAdminLlmProvider>[1] = {
         name: draft.name,
         base_url: draft.base_url,
+        analysis_max_tokens: tokenLimit,
       };
       if (draft.api_key.trim()) {
         payload.api_key = draft.api_key.trim();
@@ -1276,6 +1296,28 @@ export function AdminPage() {
                     </div>
                   </div>
                 </div>
+
+                <label className="block space-y-2">
+                  <span className="text-sm font-medium text-[#475569]">深入解读输出额度（tokens）</span>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1000000}
+                    step={1}
+                    value={selectedProviderDraft.analysis_max_tokens}
+                    onChange={(event) => setProviderDrafts((drafts) => ({
+                      ...drafts,
+                      [selectedProvider.id]: { ...selectedProviderDraft, analysis_max_tokens: event.target.value },
+                    }))}
+                    placeholder="自动：不额外限制输出"
+                    className="h-11 rounded-2xl bg-[#f8fafc]"
+                  />
+                  <p className="text-xs leading-5 text-[#728095]">
+                    留空时 OpenAI 兼容接口不额外传输出上限；模型自身仍有限制。
+                    Anthropic Messages 必须填写 max_tokens，自动模式使用 32,768。
+                    本设置只影响深入解读，不修改聊天和笔记额度；更长输出可能增加耗时和费用。
+                  </p>
+                </label>
 
                 <div className="border-t border-[#edf2f7] pt-5">
                   <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">

@@ -966,28 +966,8 @@ def count_missing_keywords() -> int:
 
 
 def count_unchecked_keyword_enrichment() -> int:
-    if not DATABASE_URL:
-        return 0
-
-    def operation() -> int:
-        with _get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT COUNT(*) AS total
-                    FROM papers p
-                    WHERE p.keywords_checked_at IS NULL
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM keywords k
-                        WHERE k.paper_id = p.id
-                      )
-                    """
-                )
-                row = cur.fetchone()
-                return int(row["total"] or 0)
-
-    return _run_with_retry(operation, "count_unchecked_keyword_enrichment")
+    """Compatibility name for the same pending-keyword query."""
+    return count_pending_keyword_enrichment()
 
 
 def create_user(
@@ -1811,6 +1791,8 @@ def update_llm_provider(
     api_key: str | None = None,
     api_key_provided: bool = False,
     is_enabled: bool | None = None,
+    analysis_max_tokens: int | None = None,
+    analysis_max_tokens_provided: bool = False,
 ) -> dict | None:
     def operation() -> dict | None:
         encryption_key = _llm_encryption_key()
@@ -1835,6 +1817,10 @@ def update_llm_provider(
         if is_enabled is not None:
             updates.append("is_enabled = %s")
             params.append(is_enabled)
+        if analysis_max_tokens_provided:
+            # Merge only this setting, preserving transport and gateway options.
+            updates.append("default_parameters = COALESCE(default_parameters, '{}'::jsonb) || %s")
+            params.append(Jsonb({"_analysis_max_tokens": analysis_max_tokens}))
 
         if not updates:
             return get_llm_provider(provider_id)
@@ -3723,24 +3709,34 @@ def update_zotero_enrichment_writeback(
     _run_with_retry(operation, f"update_zotero_enrichment_writeback:{user_id}:{item_key}")
 
 
-def update_zotero_analysis_enrichment(user_id: str, item_key: str, enrichment: dict) -> None:
+def update_zotero_analysis_enrichment(
+    user_id: str,
+    item_key: str,
+    enrichment: dict,
+    *,
+    expected_report: str,
+) -> bool:
+    """Save suggestions only while the report used to generate them is current."""
     if not DATABASE_URL:
-        return
+        return False
 
-    def operation() -> None:
+    def operation() -> bool:
         with _get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE zotero_items
                     SET analysis_enrichment = %s, updated_at = NOW()
-                    WHERE user_id = %s AND item_key = %s
+                    WHERE user_id = %s AND item_key = %s AND llm_response = %s
+                    RETURNING item_key
                     """,
-                    (Jsonb(enrichment), user_id, item_key),
+                    (Jsonb(enrichment), user_id, item_key, expected_report),
                 )
+                saved = cur.fetchone() is not None
             conn.commit()
+            return saved
 
-    _run_with_retry(operation, f"update_zotero_analysis_enrichment:{user_id}:{item_key}")
+    return _run_with_retry(operation, f"update_zotero_analysis_enrichment:{user_id}:{item_key}")
 
 
 def get_zotero_chat_sessions(user_id: str, item_key: str) -> list[dict]:

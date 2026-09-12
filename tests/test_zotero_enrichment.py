@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from zotero_enrichment import (
     markdown_to_zotero_note_html,
     normalize_zotero_enrichment,
     normalize_suggested_tags,
+    normalize_note_math_notation,
+    enrichment_matches_report,
+    report_fingerprint,
 )
 
 
@@ -58,6 +62,49 @@ def test_normalize_zotero_enrichment_repairs_compact_query_key_subscripts():
     )
 
     assert result["note_markdown"] == "关键证据：A_qA_k > N_qA_k 且 N_qN_k > A_qN_k。"
+
+
+def test_regenerating_enrichment_preserves_existing_note_writeback_target():
+    result = normalize_zotero_enrichment({"note_markdown": "新笔记。"}, previous_enrichment={
+        "writeback": {"status": "applied", "note_item_key": "NOTE1"},
+    })
+    assert result["writeback"] == {"status": "pending", "note_item_key": "NOTE1"}
+
+
+def test_note_length_guard_does_not_cut_formulas_or_json_silently():
+    with pytest.raises(ValueError, match="过长"):
+        normalize_zotero_enrichment({"note_markdown": "符号" * 4500})
+
+
+@pytest.mark.parametrize("text", [
+    "$x + A_qA_k > N_qA_k$", "`A_qAk`", "~~~text\nA_qAk\n~~~",
+    "[data](https://example.test/A_qAk)",
+])
+def test_note_legacy_repairs_leave_correct_math_code_and_links_untouched(text):
+    assert normalize_note_math_notation(text) == text
+
+
+def test_note_writeback_uses_zotero_native_math_nodes_and_preserves_code():
+    result = markdown_to_zotero_note_html(
+        "相似度 $A_qA_k > N_qA_k$。\n\n$$\nx_i = \\sum_j a_j\n$$\n\n~~~text\nA_qAk <script>\n~~~",
+        "Paper",
+    )
+    assert '<span class="math">$A_qA_k &gt; N_qA_k$</span>' in result
+    assert '<pre class="math">$$x_i = \\sum_j a_j$$</pre>' in result
+    assert '<pre>A_qAk &lt;script&gt;</pre>' in result
+    assert '<script>' not in result
+
+
+def test_enrichment_report_hash_rejects_late_results_from_an_older_analysis():
+    enrichment = {"report_status": "current", "source_report_hash": hashlib.sha256(b"old").hexdigest()}
+    assert enrichment_matches_report(enrichment, "old")
+    assert not enrichment_matches_report(enrichment, "new")
+    assert enrichment_matches_report({"note_markdown": "legacy note"}, "report")
+    assert not enrichment_matches_report({"report_status": "stale"}, "report")
+
+
+def test_report_hash_survives_cached_markdown_normalization():
+    assert report_fingerprint("# # 1. 论文解决的任务\n正文。") == report_fingerprint("## 1. 论文解决的任务\n\n正文。")
 
 
 @pytest.mark.asyncio
