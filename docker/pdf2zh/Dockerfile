@@ -20,14 +20,28 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # redis-server：celery 的 broker/result backend 跑在同一容器内（redis 包只是客户端）
+#
+# libgl1 / libglib2.0-0 / libxext6 / libsm6 / libxrender1：opencv 的动态链接依赖
+# （libxext6 会带出 libxcb1）。pdf2zh 的 doclayout 和 babeldoc 的 docvision 都要
+# `import cv2`，缺 libxcb.so.1 时 build 阶段的模型预下载就直接 ImportError；
+# 这份清单与上游 PDFMathTranslate 的 Dockerfile 一致（不需要 LibreOffice，我们的
+# 服务只收 PDF，translate_stream 也不做 PDF/A 转换）。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends redis-server \
+    && apt-get install -y --no-install-recommends \
+        redis-server \
+        libgl1 \
+        libglib2.0-0 \
+        libxext6 \
+        libsm6 \
+        libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
     "pdf2zh[backend]==1.9.4" \
     "tencentcloud-sdk-python-tmt==3.1.121" \
-    "numpy>=2.0.2,<3"
+    "numpy>=2.0.2,<3" \
+    "opencv-python==4.14.0.94" \
+    "opencv-python-headless==4.14.0.94"
 # 注意一：pdf2zh 1.9.4 对 tencentcloud-sdk-python-tmt 没有上界约束，而 3.1.129 起
 # v20180321.models 里已经没有 TextTranslateRequest，import pdf2zh 会直接失败。
 # 3.1.121 是最后一个仍包含该类的版本，必须显式钉住。
@@ -37,6 +51,10 @@ RUN pip install --no-cache-dir \
 # 根本构建不出来）。但 pdf2zh 1.9.4 的 translate_patch 和 babeldoc 的 docvision
 # 仍在用被 NumPy 2 移除的二进制模式 np.fromstring（每页都会 ValueError），所以由
 # sitecustomize.py 在运行时补一个 frombuffer + copy 的等价实现（见下）
+#
+# 注意三：pdf2zh 要 opencv-python-headless，babeldoc 要 opencv-python（带 GUI），
+# 两个发行版装进的是同一个 cv2/ 目录，谁后装谁覆盖对方——所以钉成同一个版本，
+# 避免出现两套版本文件混在一起；不钉的话 headless 会跟着上 OpenCV 5（alpha）。
 
 # 预下载 doclayout onnx 模型（~80MB）和中文衬线字体：运行时不再依赖外网，
 # 也不需要在容器可写层里缓存这些资源（容器没有挂持久卷，见 docker-compose.yml）。
