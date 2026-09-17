@@ -366,6 +366,70 @@ curl -sS "https://paper.athebear.me/conference/iclr_2026/papers?limit=1"
 
 不要把应用端口、数据库端口或 Typesense 的 `8108` 端口暴露到公网。
 
+## PDF 翻译（pdf2zh）
+
+`docker-compose.yml` 里的 `pdf2zh` 服务（`docker/pdf2zh/`）提供 PDF 中文翻译，容器内自带 Redis、Celery worker 和 Flask API（`11008`），不对外映射端口。
+
+### 产物只落在用户本机
+
+翻译结果（mono 纯中文 / dual 中英对照）保存在 **容器内 Redis** 里，用户点击下载时由 app 侧 `StreamingResponse` 直接转发到浏览器（`Content-Disposition: attachment`），文件存在用户自己的机器上。服务器磁盘上不留翻译产物：
+
+- `paper_translations` 表只存任务指针（`remote_task_id`）与状态，不存正文
+- Redis 关闭 RDB/AOF 持久化（`--save '' --appendonly no --dir /tmp`），只占内存；`--maxmemory-policy volatile-lru` 控制上限（只淘汰带 TTL 的结果 key，broker 队列 key 不会被挤掉），Celery 默认 `result_expires` 让结果最多留 24 小时
+- pdf2zh/babeldoc 会把每句原文+译文写进 `~/.cache/{pdf2zh,babeldoc}/cache.v1.db`（sqlite 翻译记忆，会随翻译篇数无限增长），`entrypoint.sh` 启动时清理一次、之后每 30 分钟清理一次
+- 容器**不挂持久卷**：doclayout onnx 模型和中文衬线字体在镜像构建时烤进镜像层，避免运行时反复下载或积累文件
+
+pdf2zh 容器重启、Redis 淘汰或结果过期后，历史翻译会被标记成 `expired`，前端提示重新翻译。
+
+### 配置
+
+`config.yaml`（非密部分）：
+
+```yaml
+pdf_translation:
+  enabled: true
+  service: openai:deepseek-v4-flash   # 不调 LLM 的话可用 bing（会限流）；google 基本被限流
+  lang_in: en
+  lang_out: zh
+  openai_base_url: https://agentrouter.org/v1
+  openai_model: deepseek-v4-flash
+```
+
+`.env`（只有 API Key 放这里）：
+
+```bash
+PDF_TRANSLATION_OPENAI_API_KEY=sk-...
+```
+
+- `service: openai:<模型名>` 走 OpenAI 兼容网关，`docker-compose.yml` 会把 `PDF_TRANSLATION_OPENAI_*` 注入 app，再由 app 随每次请求转给 pdf2zh
+- agentrouter 会按客户端 UA 拒绝请求（不带伪装 UA 直接 `401 unauthorized client detected`），容器内 `docker/pdf2zh/sitecustomize.py` 已通过自定义 httpx transport 改写 `User-Agent`，不要再给 pdf2zh 传 `OPENAI_BASE_URL` 之类的环境变量绕过它
+- pdf2zh 容器需要能访问该网关；`.env` 里的 `OUTBOUND_PROXY_URL` 会同时注入 app 和 pdf2zh
+- 内存：`PDF2ZH_REDIS_MAXMEMORY`（个人 overlay 默认 `256mb`，base 默认 `512mb`）、`PDF2ZH_CELERY_CONCURRENCY`（默认 `1`）；容器上限见 `docker-compose.personal.yml` 的 `mem_limit: 900m`
+- Redis 用 `maxmemory-policy volatile-lru`：只淘汰带 TTL 的结果 key，broker 的队列 key 没有 TTL 因此不会被挤掉。译文（尤其 dual）不小——一篇 20MB 的论文 dual 产物约 40MB，所以 256MB 缓存只留得住最近一两篇，更早的会被标成 `expired` 让用户重翻
+- 该 Key 已用 `POST /v1/chat/completions` 实测：带伪装 UA 能正常返回补全，不带则 `401 unauthorized client detected`，说明网关与 UA patch 都按预期工作
+- 本机没有 Docker/Postgres，pdf2zh 的 Flask 契约（`/v1/translate` 收 form 字段 `data`，JSON 里的 `envs` 由 `translate_stream` 透传给 `OpenAITranslator`；产物由 `send_file` 从 Celery 的 Redis 结果后端读出）是通过读 1.9.4 的 `backend.py` / `translator.py` 核对的，不是跑出来的
+
+### 容器内的两个启动脚本
+
+上游 `pdf2zh` 1.9.4 的 CLI 直接用不了，`docker/pdf2zh/` 里用两个小脚本代替：
+
+- `worker.py`：pdf2zh 的 argparse 会拒绝 Celery 自己的 `--loglevel` / `--concurrency`（`unrecognized arguments`），worker 根本起不来；而直接跑 `celery -A pdf2zh.backend:celery_app worker` 又会让 `ModelInstance.value` 为空，`translate_stream` 每页都会 `NoneType.predict` 崩。所以脚本先加载 doclayout 模型，再以 `argv=["worker", ...]` 交给 Celery
+- `server.py`：`pdf2zh --flask` 调用的是 `flask_app.run(port=11008)`，Flask 默认只绑 `127.0.0.1`，别的容器连不上，所以显式绑 `0.0.0.0`
+
+`entrypoint.sh` 会同时启动 worker 与 server，任一进程退出就让容器退出（交给 `restart: unless-stopped` 重启），避免 worker 死了但容器还健康、任务永远停在 `pending`。`healthcheck.sh` 检查 Redis 应答、Flask 端口可连、worker 进程存活；CI 部署用 `docker compose up --wait`，所以 pdf2zh 不健康会导致部署回滚。
+
+### 首次构建
+
+部署脚本只构建 `app` 镜像（`compose build app`），pdf2zh 镜像需要在服务器上手动构建一次，否则 `up --wait` 会因为缺镜像失败：
+
+```bash
+cd /opt/paper-insight/current
+docker compose --env-file /opt/paper-insight/.env --project-name paper-insight \
+  -f docker-compose.yml -f docker-compose.personal.yml build pdf2zh
+```
+
+镜像包含 `redis-server`、`pdf2zh[backend]==1.9.4`、doclayout 模型和中文字体（约 2GB），构建比较慢；依赖层与模型层的缓存让后续只改脚本时几秒钟就能重建。
+
 ## 项目结构
 
 ```text
@@ -380,11 +444,14 @@ paper-insight/
 │   ├── hf_daily.py         # Hugging Face Daily Papers 同步逻辑
 │   ├── llm.py              # LLM 调用封装
 │   ├── migrations.py       # SQL migration 执行器
+│   ├── pdf_translation.py  # pdf2zh 翻译客户端（提交/轮询/流式转发）
 │   ├── prompt.py           # 系统提示词
 │   └── utils.py            # 工具函数
 ├── db/
 │   ├── migrations/         # PostgreSQL schema、索引和搜索函数
 │   └── seeds/              # 本地开发小样本数据
+├── docker/
+│   └── pdf2zh/             # 翻译服务镜像：Dockerfile / entrypoint / worker / server / healthcheck / UA patch
 ├── frontend-react/
 │   ├── src/                # React 前端源码
 │   ├── dist/               # 前端构建产物

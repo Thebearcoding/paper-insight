@@ -26,6 +26,19 @@ services:
     cpus: 1.25
     pids_limit: 256
 
+  pdf2zh:
+    # 2GB 小机器：doclayout ONNX 模型常驻 ~300MB，PyMuPDF 逐页渲染图像另占
+    # 一部分，Redis 结果缓存由 PDF2ZH_REDIS_MAXMEMORY 限制。上限设太高会把
+    # app/postgres 挤到 OOM，设太低翻译会被杀掉——翻译被 OOM 时优先调小
+    # PDF2ZH_REDIS_MAXMEMORY。
+    mem_limit: 900m
+    cpus: 0.75
+    pids_limit: 256
+    stop_grace_period: 30s
+    environment:
+      # 结果缓存在内存里，小机器按 256MB 起步（base compose 的默认值是 512mb）
+      PDF2ZH_REDIS_MAXMEMORY: ${PDF2ZH_REDIS_MAXMEMORY:-256mb}
+
   caddy:
     logging:
       driver: json-file

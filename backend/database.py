@@ -5682,3 +5682,163 @@ def api_search_papers(
         return papers, total
 
     return _run_with_retry(operation, f"api_search_papers:{search}")
+
+
+# ---------------------------------------------------------------------------
+# Paper translations (pdf2zh)
+# ---------------------------------------------------------------------------
+
+TRANSLATION_ACTIVE_STATUSES = {"pending", "progress"}
+# "expired" means the pdf2zh service no longer holds the result (it keeps
+# translations in Redis only), so the user has to translate again.
+TRANSLATION_TERMINAL_STATUSES = {"success", "error", "expired"}
+
+_TRANSLATION_COLUMNS = """
+    id, paper_id, pdf_url, lang_out, service, status, progress,
+    remote_task_id, error, created_at, updated_at
+"""
+
+
+def _normalize_translation_row(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    normalized = dict(row)
+    normalized["id"] = str(normalized["id"])
+    normalized["progress"] = int(normalized.get("progress") or 0)
+    return normalized
+
+
+def get_paper_translation(
+    paper_id: str,
+    pdf_url: str,
+    lang_out: str,
+    service: str,
+) -> dict | None:
+    """Return the cached translation row for a paper (unique on paper/pdf/lang/service)."""
+
+    def operation() -> dict | None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_TRANSLATION_COLUMNS}
+                    FROM paper_translations
+                    WHERE paper_id = %s AND pdf_url = %s
+                      AND lang_out = %s AND service = %s
+                    """,
+                    (paper_id, pdf_url, lang_out, service),
+                )
+                return _normalize_translation_row(cur.fetchone())
+
+    return _run_with_retry(operation, f"get_paper_translation:{paper_id}")
+
+
+def get_latest_paper_translation(paper_id: str) -> dict | None:
+    """Return the most recently updated translation row for a paper, ignoring the cache key.
+
+    Used as a fallback when the paper's current PDF URL no longer matches the
+    stored one (e.g. the link was refreshed upstream).
+    """
+
+    def operation() -> dict | None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {_TRANSLATION_COLUMNS}
+                    FROM paper_translations
+                    WHERE paper_id = %s
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (paper_id,),
+                )
+                return _normalize_translation_row(cur.fetchone())
+
+    return _run_with_retry(operation, f"get_latest_paper_translation:{paper_id}")
+
+
+def create_paper_translation(
+    paper_id: str,
+    pdf_url: str,
+    lang_out: str,
+    service: str,
+) -> dict:
+    """Insert (or restart) a translation row for the given cache key."""
+
+    def operation() -> dict:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO paper_translations (paper_id, pdf_url, lang_out, service)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (paper_id, pdf_url, lang_out, service) DO UPDATE
+                        SET status = 'pending',
+                            progress = 0,
+                            remote_task_id = NULL,
+                            error = NULL,
+                            updated_at = now()
+                    RETURNING {_TRANSLATION_COLUMNS}
+                    """,
+                    (paper_id, pdf_url, lang_out, service),
+                )
+                return _normalize_translation_row(cur.fetchone())
+
+    return _run_with_retry(operation, f"create_paper_translation:{paper_id}")
+
+
+def update_paper_translation(
+    translation_id: str,
+    *,
+    status: str | None = None,
+    progress: int | None = None,
+    remote_task_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    """Update mutable fields of a translation row."""
+
+    assignments = ["updated_at = now()"]
+    params: list[object] = []
+    if status is not None:
+        assignments.append("status = %s")
+        params.append(status)
+    if progress is not None:
+        assignments.append("progress = %s")
+        params.append(max(0, min(int(progress), 100)))
+    if remote_task_id is not None:
+        assignments.append("remote_task_id = %s")
+        params.append(remote_task_id)
+    if error is not None:
+        assignments.append("error = %s")
+        params.append(error)
+    params.append(int(translation_id))
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE paper_translations SET {', '.join(assignments)} WHERE id = %s",
+                    tuple(params),
+                )
+
+    _run_with_retry(operation, f"update_paper_translation:{translation_id}")
+
+
+def reset_stale_paper_translations() -> None:
+    """Mark translations stuck in pending/progress after a restart as errored."""
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE paper_translations
+                    SET status = 'error',
+                        error = COALESCE(error, '服务重启导致翻译中断，请重试'),
+                        updated_at = now()
+                    WHERE status IN ('pending', 'progress')
+                    """,
+                )
+
+    _run_with_retry(operation, "reset_stale_paper_translations")

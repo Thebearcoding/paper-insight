@@ -151,6 +151,26 @@ export async function fetchPaperInfo(paperId: string): Promise<Paper> {
   return apiFetch<Paper>(paperApiPath(paperId, '/info'));
 }
 
+export interface PaperTranslationStatus {
+  paper_id: string;
+  // "expired"：翻译结果原本已生成，但 pdf2zh 侧缓存已失效（服务重启/内存淘汰），需要重新翻译。
+  status: 'idle' | 'pending' | 'progress' | 'success' | 'expired' | 'error';
+  progress: number;
+  mono_url: string | null;
+  dual_url: string | null;
+  error: string | null;
+}
+
+export async function startPaperTranslation(paperId: string): Promise<PaperTranslationStatus> {
+  return apiFetch<PaperTranslationStatus>(paperApiPath(paperId, '/translation'), {
+    method: 'POST',
+  });
+}
+
+export async function fetchPaperTranslationStatus(paperId: string): Promise<PaperTranslationStatus> {
+  return apiFetch<PaperTranslationStatus>(paperApiPath(paperId, '/translation'));
+}
+
 export async function fetchOpenInAiPrompt(paperId: string): Promise<string> {
   const payload = await apiFetch<{ prompt: string }>(paperApiPath(paperId, '/open-in-ai-prompt'));
   return payload.prompt;

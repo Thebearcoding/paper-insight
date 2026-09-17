@@ -3,6 +3,13 @@ services:
     mem_limit: 768m
     cpus: 0.75
 
+  pdf2zh:
+    # doclayout ONNX 模型在 Flask 与 Celery worker 各驻留一份，Redis 另占
+    # PDF2ZH_REDIS_MAXMEMORY（默认 512mb）；上限调低容易 OOM 杀容器。
+    mem_limit: 1536m
+    cpus: 1.25
+    stop_grace_period: 30s
+
   app:
     mem_limit: 2g
     cpus: 1.5

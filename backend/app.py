@@ -7,13 +7,18 @@ from typing import Any
 from pathlib import Path
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from contextlib import asynccontextmanager
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from sse_starlette.sse import EventSourceResponse
 
 from pydantic import BaseModel, Field
@@ -175,6 +180,7 @@ from database import (
     apply_zotero_sync,
     create_zotero_chat_session,
     reset_running_zotero_syncs,
+    reset_stale_paper_translations,
     set_zotero_sync_status,
 )
 from chat import ChatSession
@@ -189,6 +195,18 @@ from prompt import build_open_in_ai_prompt, build_zotero_analysis_prompt
 from paper_figures import (
     extract_and_save_zotero_analysis_assets,
     zotero_figure_path,
+)
+from pdf_translation import (
+    EXPIRED_ERROR_MESSAGE,
+    TRANSLATION_KINDS,
+    get_translation_status,
+    mark_translation_expired,
+    remote_result_state,
+    start_translation_task,
+    stream_translation_result,
+    translation_enabled,
+    translation_service_config,
+    translation_task_running,
 )
 from zotero_enrichment import (
     enrichment_matches_report,
@@ -845,6 +863,14 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(reset_running_zotero_syncs)
     except DatabaseError as exc:
         logger.warning("Zotero 同步状态恢复失败: %s", exc)
+
+    if translation_enabled():
+        # 重启后内存中的翻译任务已丢失，把残留的 pending/progress 标为 error，
+        # 否则前端会一直轮询一个永远不会推进的状态。
+        try:
+            await asyncio.to_thread(reset_stale_paper_translations)
+        except DatabaseError as exc:
+            logger.warning("PDF 翻译状态恢复失败: %s", exc)
 
     if background_analysis_enabled:
         start_background_analysis_task()
@@ -3176,6 +3202,139 @@ async def create_arxiv_paper(req: ArxivPaperRequest, request: Request):
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from e
 
     return {"paper": paper}
+
+
+# ---------------------------------------------------------------------------
+# Paper PDF translation (pdf2zh)
+# ---------------------------------------------------------------------------
+
+
+def _paper_pdf_url_for_translation(paper_info: dict) -> str:
+    return str(paper_info.get("pdf") or "").strip()
+
+
+def _safe_paper_id(paper_id: str) -> str:
+    return "".join(c if c.isalnum() or c in {"-", "_", "."} else "_" for c in paper_id)
+
+
+def _translation_download_headers(paper_id: str, kind: str) -> dict[str, str]:
+    """Attachment headers with a Chinese name plus an ASCII fallback."""
+
+    safe_paper_id = _safe_paper_id(paper_id)
+    is_mono = kind == "mono"
+    ascii_name = f"{safe_paper_id}-{'zh' if is_mono else 'bilingual'}.pdf"
+    utf8_name = f"{safe_paper_id}-{'中文' if is_mono else '中英双语'}.pdf"
+    return {
+        "Content-Disposition": (
+            f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(utf8_name)}'
+        ),
+        # Results are produced on demand from the pdf2zh service; never cache them.
+        "Cache-Control": "no-store",
+    }
+
+
+def _translation_public_payload(row: dict | None, paper_id: str) -> dict:
+    if not row:
+        return {
+            "paper_id": paper_id,
+            "status": "idle",
+            "progress": 0,
+            "mono_url": None,
+            "dual_url": None,
+            "error": None,
+        }
+    status = str(row.get("status") or "idle")
+    payload = {
+        "paper_id": paper_id,
+        "status": status,
+        "progress": int(row.get("progress") or 0),
+        "mono_url": f"/paper/{paper_id}/translation/mono" if status == "success" else None,
+        "dual_url": f"/paper/{paper_id}/translation/dual" if status == "success" else None,
+        "error": row.get("error"),
+    }
+    return payload
+
+
+@app.post("/paper/{paper_id}/translation")
+async def start_paper_translation(paper_id: str):
+    if not translation_enabled():
+        raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
+    try:
+        paper_info = await asyncio.to_thread(get_or_fetch_paper_info, paper_id)
+    except ArxivInvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ArxivNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ArxivError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except OpenReviewError as e:
+        raise HTTPException(status_code=_openreview_error_status(e), detail=str(e))
+    except DatabaseError as e:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from e
+
+    pdf_url = _paper_pdf_url_for_translation(paper_info)
+    if not pdf_url:
+        raise HTTPException(status_code=404, detail="该论文没有可用的 PDF 地址")
+
+    try:
+        row = await asyncio.to_thread(get_translation_status, paper_id)
+    except DatabaseError as e:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from e
+
+    if row and row.get("status") == "success":
+        return _translation_public_payload(row, paper_id)
+    if row and row.get("status") in {"pending", "progress"}:
+        if not translation_task_running(paper_id):
+            start_translation_task(paper_id, pdf_url)
+        return _translation_public_payload(row, paper_id)
+
+    start_translation_task(paper_id, pdf_url)
+    return _translation_public_payload({"status": "pending", "progress": 0}, paper_id)
+
+
+@app.get("/paper/{paper_id}/translation")
+async def get_paper_translation_status(paper_id: str):
+    if not translation_enabled():
+        raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
+    try:
+        row = await asyncio.to_thread(get_translation_status, paper_id)
+    except DatabaseError as e:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from e
+    return _translation_public_payload(row, paper_id)
+
+
+@app.get("/paper/{paper_id}/translation/{kind}")
+async def download_paper_translation(paper_id: str, kind: str):
+    if not translation_enabled():
+        raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
+    if kind not in TRANSLATION_KINDS:
+        raise HTTPException(status_code=404, detail="未知的翻译产物类型")
+    try:
+        row = await asyncio.to_thread(get_translation_status, paper_id)
+    except DatabaseError as e:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from e
+    if not row or row.get("status") != "success":
+        raise HTTPException(status_code=404, detail="翻译结果尚未就绪")
+
+    task_id = str(row.get("remote_task_id") or "")
+    if not task_id:
+        raise HTTPException(status_code=404, detail="翻译任务信息缺失，请重新翻译")
+
+    # The PDFs live in the pdf2zh service, not on our disk, so verify it still
+    # holds the result before starting a response body.
+    cfg = translation_service_config()
+    state = await asyncio.to_thread(remote_result_state, cfg, task_id)
+    if state == "gone":
+        await asyncio.to_thread(mark_translation_expired, str(row["id"]))
+        raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE)
+    if state != "success":
+        raise HTTPException(status_code=503, detail="pdf2zh 服务暂时不可用，请稍后重试")
+
+    return StreamingResponse(
+        stream_translation_result(cfg, task_id, kind),
+        media_type="application/pdf",
+        headers=_translation_download_headers(paper_id, kind),
+    )
 
 
 @app.get("/paper/{paper_id}")

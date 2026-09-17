@@ -113,6 +113,20 @@ class PathsConfig:
 
 
 @dataclass(frozen=True)
+class PdfTranslationConfig:
+    enabled: bool = False
+    service_base_url: str = "http://pdf2zh:11008"
+    service: str = "google"
+    lang_in: str = "en"
+    lang_out: str = "zh"
+    openai_base_url: str | None = None
+    openai_api_key: str | None = None
+    openai_model: str | None = None
+    max_concurrent_tasks: int = 1
+    task_timeout_seconds: int = 1800
+
+
+@dataclass(frozen=True)
 class ZoteroConfig:
     credential_encryption_key: str | None = None
     api_base_url: str = "https://api.zotero.org"
@@ -149,6 +163,7 @@ class AppConfig:
     feishu_notifications: FeishuNotificationsConfig
     api_search: ApiSearchConfig
     cors: CorsConfig
+    pdf_translation: PdfTranslationConfig
 
 
 def _read_yaml_config() -> dict[str, Any]:
@@ -217,6 +232,7 @@ def load_app_config() -> AppConfig:
     raw_zotero = raw.get("zotero") if isinstance(raw.get("zotero"), dict) else {}
     raw_server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
     raw_admin = raw.get("admin") if isinstance(raw.get("admin"), dict) else {}
+    raw_pdf_translation = raw.get("pdf_translation") if isinstance(raw.get("pdf_translation"), dict) else {}
 
     default_auth = AuthConfig()
     auth = AuthConfig(
@@ -438,6 +454,56 @@ def load_app_config() -> AppConfig:
         ),
     )
 
+    default_pdf_translation = PdfTranslationConfig()
+    pdf_translation = PdfTranslationConfig(
+        enabled=_as_bool(
+            raw_pdf_translation.get("enabled"),
+            default_pdf_translation.enabled,
+        ),
+        service_base_url=_as_str(
+            raw_pdf_translation.get("service_base_url"),
+            default_pdf_translation.service_base_url,
+        ).rstrip("/"),
+        service=_as_str(
+            raw_pdf_translation.get("service"),
+            default_pdf_translation.service,
+        ),
+        lang_in=_as_str(
+            raw_pdf_translation.get("lang_in"),
+            default_pdf_translation.lang_in,
+        ),
+        lang_out=_as_str(
+            raw_pdf_translation.get("lang_out"),
+            default_pdf_translation.lang_out,
+        ),
+        openai_base_url=(
+            os.getenv("PDF_TRANSLATION_OPENAI_BASE_URL")
+            or raw_pdf_translation.get("openai_base_url")
+        ),
+        openai_api_key=(
+            os.getenv("PDF_TRANSLATION_OPENAI_API_KEY")
+            or raw_pdf_translation.get("openai_api_key")
+        ),
+        openai_model=(
+            os.getenv("PDF_TRANSLATION_OPENAI_MODEL")
+            or raw_pdf_translation.get("openai_model")
+        ),
+        max_concurrent_tasks=max(
+            _as_int(
+                raw_pdf_translation.get("max_concurrent_tasks"),
+                default_pdf_translation.max_concurrent_tasks,
+            ),
+            1,
+        ),
+        task_timeout_seconds=max(
+            _as_int(
+                raw_pdf_translation.get("task_timeout_seconds"),
+                default_pdf_translation.task_timeout_seconds,
+            ),
+            60,
+        ),
+    )
+
     return AppConfig(
         database=DatabaseConfig(url=raw_database.get("url")),
         typesense=typesense,
@@ -486,6 +552,7 @@ def load_app_config() -> AppConfig:
         feishu_notifications=feishu_notifications,
         api_search=api_search,
         cors=cors,
+        pdf_translation=pdf_translation,
     )
 
 

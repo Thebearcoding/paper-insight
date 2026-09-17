@@ -57,6 +57,30 @@ paths:
   paper_content_cache_dir: data/paper_cache
   zotero_content_cache_dir: data/zotero_cache
 
+pdf_translation:
+  # PDF 中文翻译（pdf2zh 独立容器，见 docker-compose.yml 的 pdf2zh 服务）。
+  # 产物不落服务器磁盘：pdf2zh 把 mono（纯中文）/dual（中英对照）PDF 放在
+  # 容器内 Redis 里（内存，LRU 淘汰，Celery 默认 24 小时后过期），用户点击
+  # 下载时由 app 流式转发，文件落在用户本机。
+  enabled: false
+  # pdf2zh HTTP 后端地址（compose 网络内）
+  service_base_url: http://pdf2zh:11008
+  # 翻译服务：openai:<模型名> 走 OpenAI 兼容网关（推荐，质量最好）；
+  # bing 不需要 Key（免费服务会限流，适合先试跑）；google 在国内/数据
+  # 中心 IP 上基本被限流（429），不建议。
+  service: openai:deepseek-v4-flash
+  lang_in: en
+  lang_out: zh
+  # service 为 openai:* 时生效。API Key 不要写在这里，放 .env 的
+  # PDF_TRANSLATION_OPENAI_API_KEY（也可以用环境变量覆盖下面两项）。
+  openai_base_url: https://agentrouter.org/v1
+  openai_api_key:
+  openai_model: deepseek-v4-flash
+  # 同时最多进行几篇翻译（小服务器建议 1）
+  max_concurrent_tasks: 1
+  # 单篇翻译超时（秒）
+  task_timeout_seconds: 1800
+
 zotero:
   # Required before a user can connect Zotero. Generate with:
   # openssl rand -hex 32

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Bookmark, ChevronDown, ChevronLeft, ExternalLink, Eye, FileText, Heart, Loader2, Sparkles } from 'lucide-react';
+import { Bookmark, ChevronDown, ChevronLeft, ExternalLink, Eye, FileText, Heart, Languages, Loader2, Sparkles } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { ReasoningStreamPanel } from '@/components/reasoning-stream-panel';
 import { RichContent } from '@/components/rich-content';
-import { fetchOpenInAiPrompt, fetchPaperInfo, fetchPaperMarks, paperApiPath, streamSse, updatePaperMark } from '@/lib/api';
+import { fetchOpenInAiPrompt, fetchPaperInfo, fetchPaperMarks, fetchPaperTranslationStatus, apiUrl, paperApiPath, startPaperTranslation, streamSse, updatePaperMark, type PaperTranslationStatus } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { buildPaperKeywordSearchPath } from '@/lib/constants';
 import { getVenueParts, normalizeKeywords } from '@/lib/content';
@@ -56,11 +56,81 @@ export function PaperPage({ paperId }: PaperPageProps) {
   const [marks, setMarks] = useState(EMPTY_MARKS);
   const [isLikeAnimating, setIsLikeAnimating] = useState(false);
   const [backButtonProgress, setBackButtonProgress] = useState(0);
+  const [translation, setTranslation] = useState<PaperTranslationStatus | null>(null);
+  const [translationBusy, setTranslationBusy] = useState(false);
+  const translationPollRef = useRef<number | null>(null);
   const analysisRequestIdRef = useRef(0);
   const analysisAbortRef = useRef<AbortController | null>(null);
   const zoteroMetadataPaper = paper?.id === paperId ? paper : null;
 
   useZoteroPaperMetadata(zoteroMetadataPaper);
+
+  // ---- PDF 翻译（pdf2zh）----
+  const stopTranslationPolling = useCallback(() => {
+    if (translationPollRef.current !== null) {
+      window.clearInterval(translationPollRef.current);
+      translationPollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setTranslation(null);
+    setTranslationBusy(false);
+    stopTranslationPolling();
+    void fetchPaperTranslationStatus(paperId)
+      .then((status) => {
+        if (active) {
+          setTranslation(status);
+        }
+      })
+      .catch(() => {
+        // 翻译功能不可用时保持 idle，不打扰页面
+      });
+    return () => {
+      active = false;
+      stopTranslationPolling();
+    };
+  }, [paperId, stopTranslationPolling]);
+
+  // 进行中则自动轮询
+  useEffect(() => {
+    if (!translation || (translation.status !== 'pending' && translation.status !== 'progress')) {
+      stopTranslationPolling();
+      return;
+    }
+    if (translationPollRef.current !== null) {
+      return;
+    }
+    translationPollRef.current = window.setInterval(() => {
+      void fetchPaperTranslationStatus(paperId)
+        .then((status) => setTranslation(status))
+        .catch(() => {
+          // 网络抖动时继续轮询，等下一个周期
+        });
+    }, 3000);
+    return stopTranslationPolling;
+  }, [translation, paperId, stopTranslationPolling]);
+
+  const handleStartTranslation = useCallback(() => {
+    if (translationBusy) {
+      return;
+    }
+    setTranslationBusy(true);
+    void startPaperTranslation(paperId)
+      .then((status) => setTranslation(status))
+      .catch((error: unknown) => {
+        setTranslation({
+          paper_id: paperId,
+          status: 'error',
+          progress: 0,
+          mono_url: null,
+          dual_url: null,
+          error: error instanceof Error ? error.message : '翻译任务提交失败',
+        });
+      })
+      .finally(() => setTranslationBusy(false));
+  }, [paperId, translationBusy]);
 
   useEffect(() => {
     let active = true;
@@ -404,6 +474,81 @@ export function PaperPage({ paperId }: PaperPageProps) {
                       PDF
                     </Button>
                   </a>
+                  {translation?.status === 'success' ? (
+                    <>
+                      <a
+                        href={apiUrl(translation.dual_url ?? '#')}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="下载中英双语 PDF 到本机（服务端只做临时缓存，服务重启后需重新翻译）"
+                      >
+                        <Button variant="outline" className="rounded-full border-[#bbf7d0] bg-[#f0fdf4] text-[#16a34a]">
+                          <Languages className="mr-1.5 h-4 w-4" />
+                          双语 PDF
+                        </Button>
+                      </a>
+                      <a
+                        href={apiUrl(translation.mono_url ?? '#')}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="下载纯中文 PDF 到本机（服务端只做临时缓存，服务重启后需重新翻译）"
+                      >
+                        <Button variant="outline" className="rounded-full border-[#bbf7d0] bg-[#f0fdf4] text-[#16a34a]">
+                          <Languages className="mr-1.5 h-4 w-4" />
+                          中文 PDF
+                        </Button>
+                      </a>
+                    </>
+                  ) : translation?.status === 'expired' ? (
+                    <Button
+                      variant="outline"
+                      className="rounded-full border-[#fde68a] bg-[#fffbeb] text-[#d97706]"
+                      disabled={translationBusy}
+                      title={translation.error ?? '翻译结果已过期，请重新翻译'}
+                      onClick={handleStartTranslation}
+                    >
+                      <Languages className="mr-1.5 h-4 w-4" />
+                      翻译结果已失效，点击重新翻译
+                    </Button>
+                  ) : translation?.status === 'error' ? (
+                    <Button
+                      variant="outline"
+                      className="rounded-full border-[#fecaca] bg-[#fff1f2] text-[#e11d48]"
+                      disabled={translationBusy}
+                      title={translation.error ?? '翻译失败'}
+                      onClick={handleStartTranslation}
+                    >
+                      <Languages className="mr-1.5 h-4 w-4" />
+                      翻译失败，点击重试
+                    </Button>
+                  ) : translation && (translation.status === 'pending' || translation.status === 'progress') ? (
+                    <Button
+                      variant="outline"
+                      className="rounded-full border-[#fde68a] bg-[#fffbeb] text-[#d97706]"
+                      disabled
+                      title="正在翻译，通常需要 1~5 分钟"
+                    >
+                      <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                      {translation.status === 'progress' && translation.progress > 0
+                        ? `翻译中 ${translation.progress}%`
+                        : '排队翻译中…'}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      className="rounded-full border-[#d8b4fe] bg-[#faf5ff] text-[#9333ea]"
+                      disabled={translationBusy}
+                      title="使用 pdf2zh 翻译为中文（保留原始排版）"
+                      onClick={handleStartTranslation}
+                    >
+                      {translationBusy ? (
+                        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Languages className="mr-1.5 h-4 w-4" />
+                      )}
+                      翻译 PDF
+                    </Button>
+                  )}
 	                <DropdownMenu>
 	                  <DropdownMenuTrigger asChild>
 	                      <Button

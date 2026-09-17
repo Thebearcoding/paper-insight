@@ -35,6 +35,36 @@ services:
     volumes:
       - typesense_data:/data
 
+  pdf2zh:
+    build:
+      context: .
+      dockerfile: docker/pdf2zh/Dockerfile
+    restart: unless-stopped
+    environment:
+      # 与 app 一致：网关/模型站可能需要走本机代理才能访问
+      HTTP_PROXY: ${OUTBOUND_PROXY_URL:-}
+      HTTPS_PROXY: ${OUTBOUND_PROXY_URL:-}
+      ALL_PROXY: ${OUTBOUND_PROXY_URL:-}
+      NO_PROXY: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api,pdf2zh}
+      http_proxy: ${OUTBOUND_PROXY_URL:-}
+      https_proxy: ${OUTBOUND_PROXY_URL:-}
+      all_proxy: ${OUTBOUND_PROXY_URL:-}
+      no_proxy: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api,pdf2zh}
+      # Redis 只做结果缓存：内存上限 + LRU 淘汰；超过就由 app 侧标记成 expired
+      PDF2ZH_REDIS_MAXMEMORY: ${PDF2ZH_REDIS_MAXMEMORY:-512mb}
+      # celery worker 并发，单篇翻译内部已按 thread 并行调 LLM
+      PDF2ZH_CELERY_CONCURRENCY: ${PDF2ZH_CELERY_CONCURRENCY:-1}
+    # 不给 pdf2zh 挂持久卷：翻译产物只放内存里的 Redis，模型与字体在镜像构建
+    # 时就烤进镜像层，翻译记忆（sqlite）由 entrypoint 定期清理，这样服务器磁盘
+    # 上不会随翻译篇数增长。
+    healthcheck:
+      # 检查 Redis 应答 + Flask 可连 + celery worker 进程存活，见 healthcheck.sh
+      test: ["CMD", "pdf2zh-healthcheck"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 120s
+
   app:
     logging: *service-logging
     image: ${PAPER_INSIGHT_IMAGE:-paper-insight-app}
@@ -46,6 +76,8 @@ services:
         condition: service_healthy
       typesense:
         condition: service_started
+      pdf2zh:
+        condition: service_started
     environment:
       TYPESENSE_ENABLED: "true"
       TYPESENSE_HOST: typesense
@@ -55,14 +87,19 @@ services:
       TYPESENSE_SEMANTIC_SEARCH_ENABLED: ${TYPESENSE_SEMANTIC_SEARCH_ENABLED:-true}
       TYPESENSE_TIMEOUT_SECONDS: ${TYPESENSE_TIMEOUT_SECONDS:-10}
       OPENALEX_API_KEY: ${OPENALEX_API_KEY:-}
+      # PDF 翻译（pdf2zh）走 OpenAI 兼容网关时的凭据；config.yaml 里
+      # service 设为 openai:<模型名> 时由 app 随每次请求转给 pdf2zh 容器
+      PDF_TRANSLATION_OPENAI_BASE_URL: ${PDF_TRANSLATION_OPENAI_BASE_URL:-}
+      PDF_TRANSLATION_OPENAI_API_KEY: ${PDF_TRANSLATION_OPENAI_API_KEY:-}
+      PDF_TRANSLATION_OPENAI_MODEL: ${PDF_TRANSLATION_OPENAI_MODEL:-}
       HTTP_PROXY: ${OUTBOUND_PROXY_URL:-}
       HTTPS_PROXY: ${OUTBOUND_PROXY_URL:-}
       ALL_PROXY: ${OUTBOUND_PROXY_URL:-}
-      NO_PROXY: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api}
+      NO_PROXY: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api,pdf2zh}
       http_proxy: ${OUTBOUND_PROXY_URL:-}
       https_proxy: ${OUTBOUND_PROXY_URL:-}
       all_proxy: ${OUTBOUND_PROXY_URL:-}
-      no_proxy: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api}
+      no_proxy: ${OUTBOUND_NO_PROXY:-localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api,pdf2zh}
     ports:
       - "127.0.0.1:${PORT:-8000}:8000"
     volumes:
