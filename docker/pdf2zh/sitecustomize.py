@@ -1,20 +1,34 @@
-"""Patch the openai SDK User-Agent for gateways that do client detection.
+"""Container-wide runtime patches for pdf2zh: openai User-Agent and NumPy 2.
 
-Some OpenAI-compatible gateways (e.g. agentrouter.org) answer requests whose
-User-Agent looks like the plain openai SDK / httpx default with
-401 "unauthorized client detected". The openai SDK forces its own User-Agent at
-the transport layer, so `default_headers` cannot override it — we wrap
-`openai.OpenAI` / `openai.AsyncOpenAI` with a custom httpx transport that
-rewrites the User-Agent (and `x-app`) header on every request.
+Two unrelated upstream quirks are fixed here, both of which have to be applied
+inside every Python process of this image (Flask server and Celery worker, plus
+the worker's forked children):
 
-pdf2zh's translators build `openai.OpenAI(...)` (sync) while babeldoc builds the
-sync client too, so both classes are patched.
+1. Some OpenAI-compatible gateways (e.g. agentrouter.org) answer requests whose
+   User-Agent looks like the plain openai SDK / httpx default with
+   401 "unauthorized client detected". The openai SDK forces its own User-Agent
+   at the transport layer, so `default_headers` cannot override it — we wrap
+   `openai.OpenAI` / `openai.AsyncOpenAI` with a custom httpx transport that
+   rewrites the User-Agent (and `x-app`) header on every request.
+   pdf2zh's translators build `openai.OpenAI(...)` (sync) while babeldoc builds
+   the sync client too, so both classes are patched.
+
+2. pdf2zh 1.9.4 calls the binary mode of `np.fromstring` (removed in NumPy 2) in
+   `translate_patch`, and babeldoc's `docvision` does the same, so every page
+   would fail with `ValueError: The binary mode of fromstring is removed` — while
+   NumPy 1.x cannot be installed at all, because babeldoc 0.1.x requires
+   numpy>=2.0.2. `np.fromstring` is therefore reimplemented on top of
+   `np.frombuffer`: the upstream calls are `np.fromstring(pix.samples, np.uint8)`
+   on a `bytes` buffer, which is exactly `np.frombuffer`, except that the numpy 1.x
+   original copies the data and `np.frombuffer` returns a read-only view — hence
+   the `.copy()`.
 
 Loaded automatically via PYTHONPATH (sitecustomize.py is imported by `site` at
 interpreter startup).
 """
 
 import httpx
+import numpy as np
 import openai
 
 _SPOOFED_USER_AGENT = "claude-cli/2.0.14 (external, cli)"
@@ -72,3 +86,17 @@ def _patched_async_init(self, *args, **kwargs):
 
 openai.OpenAI.__init__ = _patched_sync_init
 openai.AsyncOpenAI.__init__ = _patched_async_init
+
+
+_original_fromstring = np.fromstring
+
+
+def _fromstring(string, dtype=float, count=-1, *, sep="", like=None):
+    if sep != "":
+        return _original_fromstring(string, dtype=dtype, count=count, sep=sep, like=like)
+    # 上游只按二进制模式调用（bytes + dtype），等价于 frombuffer，但要像 numpy 1.x
+    # 的 fromstring 一样返回可写副本，否则后续原地改写会报 read-only。
+    return np.frombuffer(string, dtype=dtype, count=count).copy()
+
+
+np.fromstring = _fromstring

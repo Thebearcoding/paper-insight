@@ -24,12 +24,19 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends redis-server \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir "pdf2zh[backend]==1.9.4" "tencentcloud-sdk-python-tmt==3.1.121" "numpy<2"
-# 注意：pdf2zh 1.9.4 对 tencentcloud-sdk-python-tmt 没有上界约束，而 3.1.129 起
+RUN pip install --no-cache-dir \
+    "pdf2zh[backend]==1.9.4" \
+    "tencentcloud-sdk-python-tmt==3.1.121" \
+    "numpy>=2.0.2,<3"
+# 注意一：pdf2zh 1.9.4 对 tencentcloud-sdk-python-tmt 没有上界约束，而 3.1.129 起
 # v20180321.models 里已经没有 TextTranslateRequest，import pdf2zh 会直接失败。
 # 3.1.121 是最后一个仍包含该类的版本，必须显式钉住。
-# 同理 numpy 2.x 移除了 np.fromstring，而 pdf2zh 1.9.4 的 translate_patch 仍在用，
-# 不钉 numpy<2 会在翻译第一页时 ValueError。
+#
+# 注意二：numpy 不能用 1.x。pdf2zh 依赖 babeldoc>=0.1.22，而 babeldoc 的全部 0.1.x
+# 都声明 numpy>=2.0.2，钉 numpy<2 会让 pip 解析失败（ResolutionImpossible，镜像
+# 根本构建不出来）。但 pdf2zh 1.9.4 的 translate_patch 和 babeldoc 的 docvision
+# 仍在用被 NumPy 2 移除的二进制模式 np.fromstring（每页都会 ValueError），所以由
+# sitecustomize.py 在运行时补一个 frombuffer + copy 的等价实现（见下）
 
 # 预下载 doclayout onnx 模型（~80MB）和中文衬线字体：运行时不再依赖外网，
 # 也不需要在容器可写层里缓存这些资源（容器没有挂持久卷，见 docker-compose.yml）。

@@ -402,7 +402,9 @@ PDF_TRANSLATION_OPENAI_API_KEY=sk-...
 ```
 
 - `service: openai:<模型名>` 走 OpenAI 兼容网关，`docker-compose.yml` 会把 `PDF_TRANSLATION_OPENAI_*` 注入 app，再由 app 随每次请求转给 pdf2zh
-- agentrouter 会按客户端 UA 拒绝请求（不带伪装 UA 直接 `401 unauthorized client detected`），容器内 `docker/pdf2zh/sitecustomize.py` 已通过自定义 httpx transport 改写 `User-Agent`，不要再给 pdf2zh 传 `OPENAI_BASE_URL` 之类的环境变量绕过它
+- 依赖钉版本：`pdf2zh[backend]==1.9.4` + `tencentcloud-sdk-python-tmt==3.1.121`（3.1.129 起 `import pdf2zh` 直接失败）+ `numpy>=2.0.2,<3`。numpy 不能用 1.x——pdf2zh 依赖的 babeldoc 0.1.x 全部要求 `numpy>=2.0.2`，钉 `numpy<2` 会让 pip 解析失败、镜像根本构建不出来（pdf2zh 首次上线的部署失败根因之一）
+- NumPy 2 移除了 `np.fromstring` 的二进制模式，而 pdf2zh 的 `translate_patch` 和 babeldoc 的 `docvision` 仍在用（每页都会 ValueError），所以 `docker/pdf2zh/sitecustomize.py` 用 `np.frombuffer(...).copy()` 补了一个等价实现，`docker-images.yml` 的冒烟测试会在容器里实跑一次 `np.fromstring` 和 `import pdf2zh`
+- agentrouter 会按客户端 UA 拒绝请求（不带伪装 UA 直接 `401 unauthorized client detected`），同一个 `sitecustomize.py` 已通过自定义 httpx transport 改写 `User-Agent`，不要再给 pdf2zh 传 `OPENAI_BASE_URL` 之类的环境变量绕过它
 - pdf2zh 容器需要能访问该网关；`.env` 里的 `OUTBOUND_PROXY_URL` 会同时注入 app 和 pdf2zh
 - 内存：`PDF2ZH_REDIS_MAXMEMORY`（个人 overlay 默认 `256mb`，base 默认 `512mb`）、`PDF2ZH_CELERY_CONCURRENCY`（默认 `1`）；容器上限见 `docker-compose.personal.yml` 的 `mem_limit: 900m`
 - 2GB 机器的内存是超配的：postgres 384m + app 1152m + pdf2zh 900m + caddy 128m ≈ 2.5GB，`mem_limit` 只是上限不是预留，靠各容器不会同时吃满才跑得动。深度分析和翻译并发时如果容器被 OOM 杀掉，先降 `PDF2ZH_REDIS_MAXMEMORY` 或 `PDF2ZH_CELERY_CONCURRENCY`，再考虑调低 app 的 `mem_limit`
