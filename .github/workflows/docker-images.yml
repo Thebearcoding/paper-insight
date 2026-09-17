@@ -104,14 +104,9 @@ jobs:
               # 依赖钉版本坏掉时镜像还是能起来，只有真正 import 才看得出来：
               # tencentcloud-sdk 钉错版本会让 import pdf2zh 失败，numpy 1.x/2.x
               # 选错会让 np.fromstring 在翻译每页时抛错（sitecustomize 里补了
-              # frombuffer 实现，这里实跑确认 patch 生效）。
-              docker exec pdf2zh-smoke python -c "
-              import numpy as np
-              import pdf2zh
-              from pdf2zh.high_level import translate_patch
-              print('numpy', np.__version__)
-              print('fromstring shim ->', np.fromstring(b'\x01\x02\x03\x04', np.uint8).tolist())
-              "
+              # frombuffer 实现，这里实跑确认 patch 生效）。写成单行，避免
+              # YAML 块缩进被带进 python 源码。
+              docker exec pdf2zh-smoke python -c "import numpy as np; import pdf2zh; from pdf2zh.high_level import translate_patch; print('numpy', np.__version__); print('fromstring shim ->', np.fromstring(b'\x01\x02\x03\x04', np.uint8).tolist())"
               docker logs pdf2zh-smoke 2>&1 | tail -n 20
               docker rm -f pdf2zh-smoke
               exit 0
