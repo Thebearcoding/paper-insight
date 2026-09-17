@@ -36,6 +36,7 @@ services:
       - typesense_data:/data
 
   pdf2zh:
+    logging: *service-logging
     build:
       context: .
       dockerfile: docker/pdf2zh/Dockerfile

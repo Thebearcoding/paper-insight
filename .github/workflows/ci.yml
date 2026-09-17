@@ -81,7 +81,9 @@ jobs:
       - backend
       - frontend
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 服务器上首次构建 pdf2zh 镜像（pdf2zh[backend] 依赖 + doclayout 模型 + 中文字体）
+    # 需要十几分钟，缓存命中后只要几十秒；留足余量避免首次部署被 job 超时打断。
+    timeout-minutes: 60
     environment:
       name: production
     steps:

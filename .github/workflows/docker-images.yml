@@ -1,0 +1,112 @@
+name: Docker images
+
+# 部署时会执行 `docker compose build`（app + pdf2zh），CI 里没有任何地方真正
+# 构建过 Dockerfile，所以 docker/pdf2zh 的改动只能在生产部署时才暴露问题
+# （pdf2zh 首次上线即因为缺镜像导致激活失败并回滚）。这里补上构建校验。
+#
+# 只在构建输入变化时触发：pdf2zh 镜像要下 pdf2zh[backend] 依赖和 doclayout
+# 模型，冷启动十几分钟，不能挂在每次 push 上。
+on:
+  push:
+    branches:
+      - master
+      - "codex/**"
+    paths:
+      - "Dockerfile"
+      - "docker-compose*.yml"
+      - "docker/**"
+      - ".github/workflows/docker-images.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "docker-compose*.yml"
+      - "docker/**"
+      - ".github/workflows/docker-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-config:
+    name: Compose configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Create Compose inputs
+        run: |
+          cp config.yaml.example config.yaml
+          cat > .env <<'EOF'
+          POSTGRES_PASSWORD=ci-postgres-password
+          TYPESENSE_API_KEY=ci-typesense-key
+          PAPER_DOMAIN=ci.example.com
+          EOF
+
+      - name: Validate personal deployment Compose files
+        run: |
+          docker compose \
+            --env-file .env \
+            -f docker-compose.yml \
+            -f docker-compose.personal.yml \
+            config --quiet
+
+      - name: Validate server deployment Compose files
+        run: |
+          docker compose \
+            --env-file .env \
+            -f docker-compose.yml \
+            -f docker-compose.server.yml \
+            config --quiet
+
+  pdf2zh-image:
+    name: Build pdf2zh image
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build pdf2zh image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/pdf2zh/Dockerfile
+          push: false
+          load: true
+          tags: paper-insight-pdf2zh:ci
+          cache-from: type=gha,scope=pdf2zh
+          cache-to: type=gha,scope=pdf2zh,mode=max
+
+      - name: Smoke test the built image
+        run: |
+          # 用镜像自带的 healthcheck 验证：它检查 Redis 应答、Flask 端口可连、
+          # celery worker 进程存活——和 compose 里判定 pdf2zh 健康的条件一致，
+          # 也就是部署时 up --wait 会等的那个条件。worker 要先把 doclayout 模型
+          # 载入内存，所以最多轮询 5 分钟。
+          docker run --rm -d --name pdf2zh-smoke paper-insight-pdf2zh:ci
+          for attempt in $(seq 1 60); do
+            if [ "$(docker inspect -f '{{.State.Running}}' pdf2zh-smoke 2>/dev/null)" != "true" ]; then
+              echo "pdf2zh container exited during startup" >&2
+              docker logs pdf2zh-smoke 2>&1 | tail -n 100
+              exit 1
+            fi
+            if docker exec pdf2zh-smoke pdf2zh-healthcheck >/dev/null 2>&1; then
+              echo "pdf2zh healthcheck passed after $((attempt * 5))s"
+              docker logs pdf2zh-smoke 2>&1 | tail -n 20
+              docker rm -f pdf2zh-smoke
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "pdf2zh healthcheck never passed" >&2
+          docker logs pdf2zh-smoke 2>&1 | tail -n 100
+          exit 1

@@ -31,6 +31,12 @@ services:
     # 一部分，Redis 结果缓存由 PDF2ZH_REDIS_MAXMEMORY 限制。上限设太高会把
     # app/postgres 挤到 OOM，设太低翻译会被杀掉——翻译被 OOM 时优先调小
     # PDF2ZH_REDIS_MAXMEMORY。
+    #
+    # 注意 mem_limit 之和（postgres 384m + app 1152m + pdf2zh 900m + caddy 128m
+    # ≈ 2.5GB）超过机器实际内存，属于超配：mem_limit 是上限而不是预留，平时
+    # 靠各容器不会同时吃满才跑得动。如果深度分析和翻译并发时出现容器被 OOM
+    # 杀掉，先降 PDF2ZH_REDIS_MAXMEMORY 或 PDF2ZH_CELERY_CONCURRENCY，再考虑
+    # 调低 app 的 mem_limit。
     mem_limit: 900m
     cpus: 0.75
     pids_limit: 256

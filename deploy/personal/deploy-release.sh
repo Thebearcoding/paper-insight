@@ -108,8 +108,10 @@ case "${1:-}" in
         log "Validating Compose configuration"
         compose_for "$release_dir" config --quiet
 
-        log "Building $PAPER_INSIGHT_IMAGE while the current release stays online"
-        compose_for "$release_dir" build app
+        log "Building release images while the current release stays online"
+        # 不带服务名：构建所有声明了 build: 的服务（app 和 pdf2zh）。写死服务名
+        # 会让新增的 build-only 服务在激活时才暴露缺镜像（pdf2zh 就是这样挂的）。
+        compose_for "$release_dir" build
 
         log "Activating commit $commit_sha"
         if compose_for "$release_dir" up -d --no-build --wait --wait-timeout 300; then

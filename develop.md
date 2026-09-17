@@ -405,6 +405,7 @@ PDF_TRANSLATION_OPENAI_API_KEY=sk-...
 - agentrouter 会按客户端 UA 拒绝请求（不带伪装 UA 直接 `401 unauthorized client detected`），容器内 `docker/pdf2zh/sitecustomize.py` 已通过自定义 httpx transport 改写 `User-Agent`，不要再给 pdf2zh 传 `OPENAI_BASE_URL` 之类的环境变量绕过它
 - pdf2zh 容器需要能访问该网关；`.env` 里的 `OUTBOUND_PROXY_URL` 会同时注入 app 和 pdf2zh
 - 内存：`PDF2ZH_REDIS_MAXMEMORY`（个人 overlay 默认 `256mb`，base 默认 `512mb`）、`PDF2ZH_CELERY_CONCURRENCY`（默认 `1`）；容器上限见 `docker-compose.personal.yml` 的 `mem_limit: 900m`
+- 2GB 机器的内存是超配的：postgres 384m + app 1152m + pdf2zh 900m + caddy 128m ≈ 2.5GB，`mem_limit` 只是上限不是预留，靠各容器不会同时吃满才跑得动。深度分析和翻译并发时如果容器被 OOM 杀掉，先降 `PDF2ZH_REDIS_MAXMEMORY` 或 `PDF2ZH_CELERY_CONCURRENCY`，再考虑调低 app 的 `mem_limit`
 - Redis 用 `maxmemory-policy volatile-lru`：只淘汰带 TTL 的结果 key，broker 的队列 key 没有 TTL 因此不会被挤掉。译文（尤其 dual）不小——一篇 20MB 的论文 dual 产物约 40MB，所以 256MB 缓存只留得住最近一两篇，更早的会被标成 `expired` 让用户重翻
 - 该 Key 已用 `POST /v1/chat/completions` 实测：带伪装 UA 能正常返回补全，不带则 `401 unauthorized client detected`，说明网关与 UA patch 都按预期工作
 - 本机没有 Docker/Postgres，pdf2zh 的 Flask 契约（`/v1/translate` 收 form 字段 `data`，JSON 里的 `envs` 由 `translate_stream` 透传给 `OpenAITranslator`；产物由 `send_file` 从 Celery 的 Redis 结果后端读出）是通过读 1.9.4 的 `backend.py` / `translator.py` 核对的，不是跑出来的
@@ -418,17 +419,30 @@ PDF_TRANSLATION_OPENAI_API_KEY=sk-...
 
 `entrypoint.sh` 会同时启动 worker 与 server，任一进程退出就让容器退出（交给 `restart: unless-stopped` 重启），避免 worker 死了但容器还健康、任务永远停在 `pending`。`healthcheck.sh` 检查 Redis 应答、Flask 端口可连、worker 进程存活；CI 部署用 `docker compose up --wait`，所以 pdf2zh 不健康会导致部署回滚。
 
-### 首次构建
+### 镜像构建
 
-部署脚本只构建 `app` 镜像（`compose build app`），pdf2zh 镜像需要在服务器上手动构建一次，否则 `up --wait` 会因为缺镜像失败：
+部署脚本激活前会执行不带服务名的 `docker compose build`，也就是说**所有声明了
+`build:` 的服务（`app` 和 `pdf2zh`）都由部署流程自己构建**，不需要在服务器上手动
+准备镜像。首次构建 pdf2zh 要装 `pdf2zh[backend]` 依赖并预下载 doclayout 模型和中文
+字体（镜像约 2GB），在 2GB 小机器上要十几分钟，所以 CI 的 deploy job 超时放宽到
+60 分钟；依赖层和模型层之后都在 Docker 构建缓存里，改 `docker/pdf2zh/` 下的脚本只
+需要几十秒重建。
+
+`tests/test_deploy_compose_wiring.py` 会检查部署脚本是否覆盖了所有 build-only
+服务：新增这类服务时如果脚本又写死了服务名，pytest 会直接失败，避免再出现
+`No such image: paper-insight-pdf2zh:latest` 这种只在生产激活时暴露的问题。
+
+`.github/workflows/docker-images.yml` 在 `docker/**` 或 compose 文件变化时才跑：
+校验两套 Compose 组合的 `config`，构建 pdf2zh 镜像并用镜像自带的 healthcheck 做
+冒烟测试。CI 里不再需要单独构建 `app`（前端 job 已经覆盖构建产物）。
+
+万一需要手动重建（例如构建缓存被清理后想提前预热），在服务器上执行：
 
 ```bash
 cd /opt/paper-insight/current
 docker compose --env-file /opt/paper-insight/.env --project-name paper-insight \
   -f docker-compose.yml -f docker-compose.personal.yml build pdf2zh
 ```
-
-镜像包含 `redis-server`、`pdf2zh[backend]==1.9.4`、doclayout 模型和中文字体（约 2GB），构建比较慢；依赖层与模型层的缓存让后续只改脚本时几秒钟就能重建。
 
 ## 项目结构
 
