@@ -55,6 +55,19 @@ services:
       PDF2ZH_REDIS_MAXMEMORY: ${PDF2ZH_REDIS_MAXMEMORY:-512mb}
       # celery worker 并发，单篇翻译内部已按 thread 并行调 LLM
       PDF2ZH_CELERY_CONCURRENCY: ${PDF2ZH_CELERY_CONCURRENCY:-1}
+      # glibc 的 malloc 默认不把释放掉的堆顶还给内核：上游 ONNX 加载路径会一次性
+      # 分配 ~140MB 的 protobuf 和 ~70MB 的序列化副本，free() 之后这些页仍然留在
+      # 进程里。这两个阈值让 >128KB 的块直接走 mmap、并让堆顶空闲超过 128KB 时
+      # sbrk 收缩；固定阈值同时关掉 glibc 的"动态 mmap 阈值"（它会在内存碎片换
+      # 性能时把阈值一路抬到 32MB，等于让大块的释放又变回不可回收）。实测同一段
+      # 导入从 389MB 降到 283MB，predict 一次后从 489MB 降到 379MB。
+      #
+      # 放在这里而不是 Dockerfile 的 ENV 里：ENV 在 apt / pip / 模型下载那些层
+      # 之上，改它会让这个镜像每次部署都整份重建（这台机器上十几分钟），而重建
+      # 恰好是最吃内存、最容易把 2GB 机器拖进 global OOM 的动作。容器环境变量
+      # 一样会被 entrypoint 起的所有进程继承。
+      MALLOC_TRIM_THRESHOLD_: "131072"
+      MALLOC_MMAP_THRESHOLD_: "131072"
     # 不给 pdf2zh 挂持久卷：翻译产物只放内存里的 Redis，模型与字体在镜像构建
     # 时就烤进镜像层，翻译记忆（sqlite）由 entrypoint 定期清理，这样服务器磁盘
     # 上不会随翻译篇数增长。
