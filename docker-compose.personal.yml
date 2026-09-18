@@ -18,19 +18,31 @@ services:
     pids_limit: 100
 
   typesense:
-    # base compose 里 typesense 没有任何上限，是唯一能无限吃内存的服务。实测它
-    # 随索引重建涨到过约 231MB（匿名 60MB + 换出 171MB）。给上限的意义不是省内存，
-    # 而是把"某个服务失控"的后果限制在它自己：撞上限只会被 cgroup 杀掉并重启
-    # （重建索引），而它在 1.8GB 机器上把整机拖进 global OOM 时，被杀的是随机
-    # 进程——实测那次连杀的就是 pdf2zh 的 python。
+    # base compose 里 typesense 没有任何上限，是唯一能无限吃内存的服务，所以上限
+    # 必须给，而且要贴着它的真实需求给。2026-09-18 实测（48446 篇索引、语义检索
+    # 关闭、schema 里没有 embedding 字段）：常驻 151MB、cgroup 用量 187MB（含索引
+    # 文件的 page cache），512m 是 3 倍余量。
+    #
+    # 也别把上限压到真实需求以下：曾经是 512m 而上限之下它要 614MB（那时集合里还
+    # 带着语义检索用的 embedding 字段，384 维 × 48446 篇，启动还要把 e5 的 ONNX
+    # 模型读进内存），于是每次加载到 500MB 就被 memcg 杀掉重启，反复刷满一个核。
+    # 512m 的另一个后果是"失控"被限制在它自己：它在 1.8GB 机器上把整机拖进 global
+    # OOM 时，被杀的是随机进程（实测那次杀的是 pdf2zh 的 python）。
     mem_limit: 512m
+    # typesense 的 cgroup 默认 swappiness=0：宁可被 memcg 杀掉也不换页。加载索引时
+    # 的 page cache + jemalloc 保留内存会顶到上限，给 10 让它能换出去做完加载，
+    # 代价只是那次冷查询慢一点。
+    mem_swappiness: 10
 
   app:
     build:
       args:
         DOCKERHUB_PREFIX: ${DOCKERHUB_PREFIX:-}
         PYPI_FILES_MIRROR: ${PYPI_FILES_MIRROR:-}
-    mem_limit: 1152m
+    # 实测稳态 137MB、历史峰值 207MB（深度分析/SSE 时）。给 768m 是峰值的 3.7 倍：
+    # 上限的意义是把"app 失控"限制在它自己，因为 1.8GB 机器上的 global OOM 杀的是
+    # 随机进程。再往下调会先杀掉 app 自己，所以调之前先看 app 的 peak。
+    mem_limit: 768m
     cpus: 1.25
     pids_limit: 256
 
@@ -47,12 +59,13 @@ services:
     # app/postgres 挤到 OOM，设太低翻译会被杀掉——翻译被 OOM 时优先调小
     # PDF2ZH_REDIS_MAXMEMORY。
     #
-    # 注意 mem_limit 之和（postgres 384m + typesense 512m + app 1152m + pdf2zh
-    # 900m + caddy 128m ≈ 3.1GB）超过机器实际内存（1.87GB），属于超配：
-    # mem_limit 是上限而不是预留，平时靠各容器不会同时吃满才跑得动。真正的稳态
-    # 占用要小得多（实测全部容器匿名内存合计约 410MB），但超配意味着这里的上限
-    # 只是"单个服务能失控到什么程度"，不是"总和不会超"。如果深度分析和翻译并发
-    # 时出现容器被 OOM 杀掉，先降 PDF2ZH_REDIS_MAXMEMORY 或
+    # 注意 mem_limit 之和（postgres 384m + typesense 512m + app 768m + pdf2zh
+    # 900m + caddy 128m ≈ 2.7GB）超过机器实际内存（1.87GB），属于超配：
+    # mem_limit 是上限而不是预留，平时靠各容器不会同时吃满才跑得动。2026-09-18
+    # 实测稳态：typesense 187MB、app 137MB、postgres 78MB、caddy 11MB，pdf2zh 的
+    # python 进程几乎整份都在 swap 里（cgroup 换出约 600MB），全部容器匿名内存合计
+    # 约 480MB。超配意味着这些上限只是"单个服务能失控到什么程度"，不是"总和不会超"。
+    # 如果深度分析和翻译并发时出现容器被 OOM 杀掉，先降 PDF2ZH_REDIS_MAXMEMORY 或
     # PDF2ZH_CELERY_CONCURRENCY，再考虑调低 app 的 mem_limit。
     mem_limit: 900m
     cpus: 0.75
