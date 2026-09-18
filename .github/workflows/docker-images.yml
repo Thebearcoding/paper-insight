@@ -107,6 +107,11 @@ jobs:
               # frombuffer 实现，这里实跑确认 patch 生效）。写成单行，避免
               # YAML 块缩进被带进 python 源码。
               docker exec pdf2zh-smoke python -c "import numpy as np; import pdf2zh; from pdf2zh.high_level import translate_patch; print('numpy', np.__version__); print('fromstring shim ->', np.fromstring(b'\x01\x02\x03\x04', np.uint8).tolist())"
+              # worker.py 里那份精简的模型加载也要真的跑起来：元数据键名写错只会在
+              # 第一次翻译（而不是容器启动）时才炸，所以这里按 worker 的方式载一次
+              # 模型，再用一页全黑图推一次推理。仍写成单行，避免 YAML 块缩进被带进
+              # python 源码。
+              docker exec pdf2zh-smoke python -c "import importlib.util as u, numpy as np; s = u.spec_from_file_location('patch_worker', '/opt/pdf2zh-patch/worker.py'); m = u.module_from_spec(s); s.loader.exec_module(m); from pdf2zh.doclayout import ModelInstance as M; print('doclayout stride', M.value.stride, 'boxes', len(M.value.predict(np.zeros((512, 512, 3), dtype=np.uint8))))"
               docker logs pdf2zh-smoke 2>&1 | tail -n 20
               docker rm -f pdf2zh-smoke
               exit 0

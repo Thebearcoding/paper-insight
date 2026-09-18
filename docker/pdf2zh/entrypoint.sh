@@ -40,8 +40,12 @@ purge_translation_memory() {
 # init_db 里已生效的 busy_timeout 兜住。表结构留给 pdf2zh 自己建，这里不重复 DDL
 # （重复的 schema 会跟上游漂移）。预建失败不拦启动：那只是退化成改动前的抢锁
 # 行为，多数情况下能自愈。
+#
+# `-E` 只用到 sqlite3，却正好跳过 PYTHONPATH 上的 sitecustomize.py——它会先
+# import httpx + numpy + openai，让这个每 30 分钟跑一次的轻量进程白吃 84MB 和
+# 约 3 秒 CPU（见 healthcheck.sh 里同样的处理）。
 create_translation_memory_db() {
-    python - <<'PY' || echo "警告：翻译记忆库预建失败，worker/server 将自行建库" >&2
+    python -E - <<'PY' || echo "警告：翻译记忆库预建失败，worker/server 将自行建库" >&2
 import os
 import sqlite3
 
