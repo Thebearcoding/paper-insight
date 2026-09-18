@@ -60,7 +60,8 @@ PY
 # 路径是 ~/.config/PDFMathTranslate/config.json。worker/server 同时第一次 import
 # 时，一个在写、另一个在读，读的那个会拿到写了一半的文件并抛
 # json.decoder.JSONDecodeError: Extra data → 进程退出 → 容器退出重启
-# （实测 8 次冷启动里中过 1 次，和上面那个 sqlite 竞争是同一种病）。
+# （和上面那个 sqlite 竞争是同一种病：按 900m 生产内存上限跑 12 次冷启动，
+# 两种竞争一共挂掉 7 次）。
 #
 # 所以启动时先在前台把 pdf2zh 的初始化整套跑一遍，两个进程随后的 import 看到的
 # 都是"已存在"，竞争窗口就没有了。这里不自己拼配置内容，直接调用上游代码，
