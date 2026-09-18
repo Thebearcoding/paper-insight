@@ -5,9 +5,11 @@
 # 到 release 目录、然后把控制权交给 release 自带的
 # deploy/personal/deploy-release.sh。部署逻辑本身属于 release 内容，所以以后改
 # 部署流程只需要正常合入 master，不会再出现"仓库里改了、服务器上跑的还是旧副本"
-# ——pdf2zh 首次上线就是因为 /usr/local/sbin 里的旧副本只构建 app 镜像而回滚的。
+# ——pdf2zh 首次上线就是因为强制命令指向的那份副本只构建 app 镜像而回滚的。
 #
-# 只有在入口点本身的契约变化时（例如新增 verb、改上传协议）才需要重新安装。
+# 只有在入口点本身的契约变化时（例如新增 verb、改上传协议）才需要重新安装；而
+# 强制命令到底指向哪个路径，必须以服务器上 /root/.ssh/authorized_keys 里的
+# command="..." 为准，不能假设就是下面注释里的默认路径。
 set -eu
 set -f
 
@@ -30,6 +32,17 @@ active_release_script() {
     printf '%s\n' "$active_dir/deploy/personal/deploy-release.sh"
 }
 
+this_fingerprint() {
+    # 手工安装的服务器副本很容易变旧，而"仓库里改了、服务器上跑的仍是旧副本"这种
+    # 故障从行为上看不出区别（新旧脚本打的日志几乎一样）。把自身的 sha256 打进每次
+    # 调用的第一行日志，日志就能直接指认跑的是哪一份文件。
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$0" 2>/dev/null | cut -d' ' -f1
+    else
+        printf 'unknown'
+    fi
+}
+
 # 通过 SSH 强制命令调用时（CI 走的路径）动词在 SSH_ORIGINAL_COMMAND 里；直接在
 # 服务器上手工执行时动词就是普通参数（'deploy-paper-insight status'）。这里必须
 # 两种都认：只读环境变量会让手工执行时 $1 为空，直接掉进最后一个分支报
@@ -37,6 +50,8 @@ active_release_script() {
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
     set -- $SSH_ORIGINAL_COMMAND
 fi
+
+log "entrypoint sha256=$(this_fingerprint) verb=${1:-<none>}"
 
 case "${1:-}" in
     status)

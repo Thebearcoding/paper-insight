@@ -119,6 +119,11 @@ def test_installed_entrypoint_accepts_the_verb_from_arguments_too():
     # deploy 从 stdin 读归档，在终端里跑会一直等输入；必须快速失败而不是挂住。
     assert "[ -t 0 ]" in entrypoint
 
+    # 手工安装的副本变旧时行为和新副本几乎一样，所以每次调用都要打印自身指纹，
+    # 让日志能直接指认跑的是哪一份文件。
+    assert 'log "entrypoint sha256=$(this_fingerprint) verb=${1:-<none>}"' in entrypoint
+    assert 'sha256sum "$0"' in entrypoint
+
 
 def test_personal_deployment_services_rotate_logs():
     services = _personal_deployment_services()

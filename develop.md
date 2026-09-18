@@ -351,11 +351,21 @@ docker build -t paper-insight .
 
 入口点的 verb 既可以从 `SSH_ORIGINAL_COMMAND`（CI 的强制命令）取，也可以直接从参数
 取，所以手工检查用 `/usr/local/sbin/deploy-paper-insight status` 就行；`deploy` 从 stdin
-读归档，在终端里会直接报错退出，只应由 CI 驱动。装完/换完入口点要核对是不是想要的那份
-（这正是"服务器上跑旧副本"最早的破绽）：
+读归档，在终端里会直接报错退出，只应由 CI 驱动。
+
+**权威路径只有一个**：部署密钥 `/root/.ssh/authorized_keys` 里 `command="..."` 写的那个
+文件。不要假设它就是文档里的 `/usr/local/sbin/deploy-paper-insight`——副本放在别的路径
+上时，从行为上完全看不出差别（新旧脚本日志几乎一样）。每次调用入口点都会在第一行打印
+自身 sha256，部署日志因此能直接指认跑的是哪一份：
+
+```text
+[paper-insight-deploy] entrypoint sha256=87b33f08bf19… verb=deploy
+```
+
+这个摘要和仓库里的对不上，就说明强制命令指向的文件是旧的。装完/换完入口点要核对：
 
 ```bash
-sha256sum /usr/local/sbin/deploy-paper-insight
+sha256sum "$(grep -o 'command="[^"]*"' /root/.ssh/authorized_keys | sed 's/command="//;s/"$//')"
 curl -fsSL https://raw.githubusercontent.com/Thebearcoding/paper-insight/master/deploy/personal/deploy-entrypoint.sh | sha256sum
 ```
 

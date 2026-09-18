@@ -61,12 +61,26 @@ command CI uses) or from its own arguments, so it is also usable by hand:
 `deploy` reads the release archive from stdin and refuses to run in a terminal; it
 is meant to be driven as `git archive --format=tar.gz HEAD | ssh ... deploy <sha>`.
 
-After installing or replacing it, confirm the installed copy is actually the one you
-intended — this is the check that would have caught the stale-server-script problem
-immediately:
+Exactly one file is authoritative: whichever path the deploy key's forced command
+names. Read it from the server instead of assuming the documented default, because a
+stale copy at some other path looks identical from the outside:
 
 ```bash
-sha256sum /usr/local/sbin/deploy-paper-insight
+grep -o 'command="[^"]*"' /root/.ssh/authorized_keys
+```
+
+Every invocation logs its own digest on the first line, so the deploy log names the
+copy that actually ran:
+
+```text
+[paper-insight-deploy] entrypoint sha256=87b33f08bf19… verb=deploy
+```
+
+A `sha256` that does not match the repository means the file at the forced-command
+path is stale. After installing or replacing it, confirm it is the copy you intended:
+
+```bash
+sha256sum "$(grep -o 'command="[^"]*"' /root/.ssh/authorized_keys | sed 's/command="//;s/"$//')"
 curl -fsSL https://raw.githubusercontent.com/Thebearcoding/paper-insight/master/deploy/personal/deploy-entrypoint.sh | sha256sum
 ```
 
