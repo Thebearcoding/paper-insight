@@ -1,8 +1,10 @@
 #!/bin/sh
 # pdf2zh container health: Redis answers, Flask accepts connections, and the
-# Celery worker process is still alive. The entrypoint exits the container as
-# soon as the worker or the server dies, so a stale worker cannot masquerade as
-# a healthy container while jobs sit in `pending` forever.
+# pdf2zh process tree is still alive. Since 2026-09-18 the entrypoint starts only
+# `worker.py`; that process forks the Flask server and takes itself down (SIGTERM,
+# so Celery stops warm) as soon as the child dies. Both roles therefore end in a
+# container that stops answering, and a stale worker cannot masquerade as a
+# healthy container while jobs sit in `pending` forever.
 #
 # The two Python snippets below run with `-E`, which ignores PYTHONPATH and
 # therefore skips `/opt/pdf2zh-patch/sitecustomize.py`. That matters more than it
@@ -25,7 +27,9 @@ python -E - <<'PY'
 import os
 import sys
 
-# No procps in the image, so scan /proc for the worker launcher ourselves.
+# No procps in the image, so scan /proc for the pdf2zh python process ourselves.
+# `fork()` does not rewrite a child's cmdline, so the Flask server forked by
+# worker.py matches this too — either role counts as "the tree is alive".
 for entry in os.listdir("/proc"):
     if not entry.isdigit():
         continue

@@ -437,20 +437,20 @@ PDF_TRANSLATION_OPENAI_API_KEY=sk-...
 - NumPy 2 移除了 `np.fromstring` 的二进制模式，而 pdf2zh 的 `translate_patch` 和 babeldoc 的 `docvision` 仍在用（每页都会 ValueError），所以 `docker/pdf2zh/sitecustomize.py` 用 `np.frombuffer(...).copy()` 补了一个等价实现，`docker-images.yml` 的冒烟测试会在容器里实跑一次 `np.fromstring` 和 `import pdf2zh`
 - agentrouter 会按客户端 UA 拒绝请求（不带伪装 UA 直接 `401 unauthorized client detected`），同一个 `sitecustomize.py` 已通过自定义 httpx transport 改写 `User-Agent`，不要再给 pdf2zh 传 `OPENAI_BASE_URL` 之类的环境变量绕过它
 - pdf2zh 容器需要能访问该网关；`.env` 里的 `OUTBOUND_PROXY_URL` 会同时注入 app 和 pdf2zh
-- 内存：`PDF2ZH_REDIS_MAXMEMORY`（个人 overlay 默认 `256mb`，base 默认 `512mb`）、`PDF2ZH_CELERY_CONCURRENCY`（默认 `1`）；容器上限见 `docker-compose.personal.yml` 的 `mem_limit: 900m`
-- 2GB 机器的内存是超配的：postgres 384m + app 1152m + pdf2zh 900m + caddy 128m ≈ 2.5GB，`mem_limit` 只是上限不是预留，靠各容器不会同时吃满才跑得动。深度分析和翻译并发时如果容器被 OOM 杀掉，先降 `PDF2ZH_REDIS_MAXMEMORY` 或 `PDF2ZH_CELERY_CONCURRENCY`，再考虑调低 app 的 `mem_limit`
+- 内存：`PDF2ZH_REDIS_MAXMEMORY`（个人 overlay 默认 `128mb`，base 默认 `512mb`）、`PDF2ZH_CELERY_CONCURRENCY`（默认 `1`）；容器上限见 `docker-compose.personal.yml` 的 `mem_limit: 768m`
+- 2GB 机器的内存是超配的：postgres 384m + typesense 512m + app 320m + pdf2zh 768m + caddy 80m ≈ 2.06GB（对比 1.87GB 物理内存 + 4GB swap），`mem_limit` 只是上限不是预留，靠各容器不会同时吃满才跑得动。深度分析和翻译并发时如果容器被 OOM 杀掉，先降 `PDF2ZH_REDIS_MAXMEMORY` 或 `PDF2ZH_CELERY_CONCURRENCY`，再考虑调低 app 的 `mem_limit`
 - Redis 用 `maxmemory-policy volatile-lru`：只淘汰带 TTL 的结果 key，broker 的队列 key 没有 TTL 因此不会被挤掉。译文（尤其 dual）不小——一篇 20MB 的论文 dual 产物约 40MB，所以 256MB 缓存只留得住最近一两篇，更早的会被标成 `expired` 让用户重翻
 - 该 Key 已用 `POST /v1/chat/completions` 实测：带伪装 UA 能正常返回补全，不带则 `401 unauthorized client detected`，说明网关与 UA patch 都按预期工作
 - 本机没有 Docker/Postgres，pdf2zh 的 Flask 契约（`/v1/translate` 收 form 字段 `data`，JSON 里的 `envs` 由 `translate_stream` 透传给 `OpenAITranslator`；产物由 `send_file` 从 Celery 的 Redis 结果后端读出）是通过读 1.9.4 的 `backend.py` / `translator.py` 核对的，不是跑出来的
 
-### 容器内的两个启动脚本
+### 容器内的启动脚本
 
 上游 `pdf2zh` 1.9.4 的 CLI 直接用不了，`docker/pdf2zh/` 里用两个小脚本代替：
 
-- `worker.py`：pdf2zh 的 argparse 会拒绝 Celery 自己的 `--loglevel` / `--concurrency`（`unrecognized arguments`），worker 根本起不来；而直接跑 `celery -A pdf2zh.backend:celery_app worker` 又会让 `ModelInstance.value` 为空，`translate_stream` 每页都会 `NoneType.predict` 崩。所以脚本先加载 doclayout 模型，再以 `argv=["worker", ...]` 交给 Celery
-- `server.py`：`pdf2zh --flask` 调用的是 `flask_app.run(port=11008)`，Flask 默认只绑 `127.0.0.1`，别的容器连不上，所以显式绑 `0.0.0.0`
+- `worker.py`：容器里唯一的 Python 入口。pdf2zh 的 argparse 会拒绝 Celery 自己的 `--loglevel` / `--concurrency`（`unrecognized arguments`），worker 根本起不来；而直接跑 `celery -A pdf2zh.backend:celery_app worker` 又会让 `ModelInstance.value` 为空，`translate_stream` 每页都会 `NoneType.predict` 崩。所以这里以 `argv=["worker", ...]` 交给 Celery，并在 `pdf2zh.doclayout.ModelInstance.value` 上装一个惰性描述符：第一次读它才建 doclayout session（~80MB 匿名内存）。唯一读它的是上游 `pdf2zh/backend.py` 里 `translate_task` 的 `model=ModelInstance.value`，也就是 celery 的 task 子进程，配合 `--max-tasks-per-child=1` 让这份内存在子进程退出时还给内核
+- `server.py`：`pdf2zh --flask` 调用的是 `flask_app.run(port=11008)`，Flask 默认只绑 `127.0.0.1`，别的容器连不上，所以显式绑 `0.0.0.0`。它不再是独立进程：`worker.py` import 完整套依赖后用 `os.fork()` 把它 fork 出来，父子共享那份 ~128MB 的 import 堆（独立起一遍就是第二份拷贝，实测 Flask 进程私有匿名 128MB、容器空转时 cgroup 用量 381MB）
 
-`entrypoint.sh` 会同时启动 worker 与 server，任一进程退出就让容器退出（交给 `restart: unless-stopped` 重启），避免 worker 死了但容器还健康、任务永远停在 `pending`。`healthcheck.sh` 检查 Redis 应答、Flask 端口可连、worker 进程存活；CI 部署用 `docker compose up --wait`，所以 pdf2zh 不健康会导致部署回滚。
+`entrypoint.sh` 只启动 `worker.py` 一个进程，由 `worker.py` 自己盯着 fork 出来的 Flask 子进程：任一角色退出就让容器退出（交给 `restart: unless-stopped` 重启），避免 worker 死了但容器还健康、任务永远停在 `pending`。`healthcheck.sh` 检查 Redis 应答、Flask 端口可连、pdf2zh 进程存活；CI 部署用 `docker compose up --wait`，所以 pdf2zh 不健康会导致部署回滚。
 
 ### 镜像构建
 

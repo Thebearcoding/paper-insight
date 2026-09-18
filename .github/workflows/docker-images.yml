@@ -89,9 +89,10 @@ jobs:
       - name: Smoke test the built image
         run: |
           # 用镜像自带的 healthcheck 验证：它检查 Redis 应答、Flask 端口可连、
-          # celery worker 进程存活——和 compose 里判定 pdf2zh 健康的条件一致，
-          # 也就是部署时 up --wait 会等的那个条件。worker 要先把 doclayout 模型
-          # 载入内存，所以最多轮询 5 分钟。
+          # pdf2zh 进程树存活——和 compose 里判定 pdf2zh 健康的条件一致，也就是
+          # 部署时 up --wait 会等的那个条件。健康之前容器要做的是 import 整套依赖
+          # 再 fork 出 Flask，启动路径上不载 doclayout 模型（惰性加载，见
+          # worker.py），所以只是"启动不再是瓶颈"，5 分钟仍留作宽松上限。
           docker run --rm -d --name pdf2zh-smoke paper-insight-pdf2zh:ci
           for attempt in $(seq 1 60); do
             if [ "$(docker inspect -f '{{.State.Running}}' pdf2zh-smoke 2>/dev/null)" != "true" ]; then
@@ -107,11 +108,19 @@ jobs:
               # frombuffer 实现，这里实跑确认 patch 生效）。写成单行，避免
               # YAML 块缩进被带进 python 源码。
               docker exec pdf2zh-smoke python -c "import numpy as np; import pdf2zh; from pdf2zh.high_level import translate_patch; print('numpy', np.__version__); print('fromstring shim ->', np.fromstring(b'\x01\x02\x03\x04', np.uint8).tolist())"
-              # worker.py 里那份精简的模型加载也要真的跑起来：元数据键名写错只会在
-              # 第一次翻译（而不是容器启动）时才炸，所以这里按 worker 的方式载一次
-              # 模型，再用一页全黑图推一次推理。仍写成单行，避免 YAML 块缩进被带进
-              # python 源码。
+              # worker.py 里那份精简的模型加载也要真的跑起来：元数据键名写错只会
+              # 在第一次翻译（而不是容器启动）时才炸——惰性加载生效后，容器启动
+              # 那条路径根本不碰它——所以这里按 worker 的方式载一次模型，再用一页
+              # 全黑图推一次推理。仍写成单行，避免 YAML 块缩进被带进 python 源码。
               docker exec pdf2zh-smoke python -c "import importlib.util as u, numpy as np; s = u.spec_from_file_location('patch_worker', '/opt/pdf2zh-patch/worker.py'); m = u.module_from_spec(s); s.loader.exec_module(m); from pdf2zh.doclayout import ModelInstance as M; print('doclayout stride', M.value.stride, 'boxes', len(M.value.predict(np.zeros((512, 512, 3), dtype=np.uint8))))"
+              # 启动拓扑：entrypoint 只起 worker.py 一个 pdf2zh 进程，Flask 是它
+              # fork 出来的子进程（这样才能共享那份 import 堆，也就是这次改动的
+              # 全部意义）。健康检查只看端口和进程存活，看不出是不是又退化成两个
+              # 独立进程，所以在这里断言亲缘关系。写成单行、并用 -E 跳过
+              # sitecustomize（这段只用 /proc）。fork 不改写 cmdline，所以 Flask
+              # 子进程的 cmdline 也是 worker.py——因此只认 argv[1] 这个脚本路径，
+              # 否则这条断言自己的 `python -c` 参数里也含有 server.py 这个词。
+              docker exec pdf2zh-smoke python -E -c "import os; a = {p: open('/proc/' + p + '/cmdline', 'rb').read().split(bytes(1)) for p in os.listdir('/proc') if p.isdigit()}; w = {p for p, v in a.items() if len(v) > 1 and v[1] == b'/opt/pdf2zh-patch/worker.py'}; s = {p for p, v in a.items() if len(v) > 1 and v[1] == b'/opt/pdf2zh-patch/server.py'}; pp = {p: open('/proc/' + p + '/stat').read().split(') ', 1)[1].split()[1] for p in w}; roots = {p for p in w if pp[p] == '1'}; kids = {p for p in w if pp[p] in roots}; print('worker roots', sorted(roots), 'forked children', sorted(kids), 'standalone servers', sorted(s)); assert len(roots) == 1 and kids, (roots, kids); assert not s, 'server.py must not run as its own process'; print('process tree ok')"
               docker logs pdf2zh-smoke 2>&1 | tail -n 20
               docker rm -f pdf2zh-smoke
               exit 0

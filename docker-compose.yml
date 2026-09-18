@@ -72,7 +72,8 @@ services:
     # 时就烤进镜像层，翻译记忆（sqlite）由 entrypoint 定期清理，这样服务器磁盘
     # 上不会随翻译篇数增长。
     healthcheck:
-      # 检查 Redis 应答 + Flask 可连 + celery worker 进程存活，见 healthcheck.sh
+      # 检查 Redis 应答 + Flask 可连 + pdf2zh 进程树存活（worker.py 及其 fork 出的
+      # Flask，两者都可能先死，见 healthcheck.sh）
       test: ["CMD", "pdf2zh-healthcheck"]
       interval: 30s
       timeout: 15s

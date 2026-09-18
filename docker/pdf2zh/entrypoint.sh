@@ -1,5 +1,12 @@
 #!/bin/sh
-# pdf2zh 后端：容器内 Redis + Celery worker + Flask API(11008)
+# pdf2zh 后端：容器内 Redis + 一个进程树（worker.py import 完成后 fork 出 Flask API
+# 11008，再起 Celery pool）。
+#
+# 为什么是"一个进程树"而不是两个独立进程：worker/server 都要 import pdf2zh 那一整套
+# 依赖，而这套 import 在镜像里实测占 128MB 匿名内存。各自 import 就是两份（实测
+# Flask 进程私有匿名 128MB，容器空转时 cgroup 用量 381MB）；先 import 再 fork 的话
+# 父子共享同一份物理页（实测 fork 出来的空转子进程 PSS 只有 66MB）。2026-09-18 之前
+# 这里是两个独立进程，那条 128MB 的重复拷贝就是这台 2GB 机器上最大的一块可回收内存。
 set -eu
 
 # 翻译结果只放在 Redis 里，所以关掉 RDB/AOF 持久化（不碰磁盘），并限制内存：
@@ -25,27 +32,24 @@ purge_translation_memory() {
           /root/.cache/babeldoc/cache.v1.db* 2>/dev/null || true
 }
 
-# 翻译记忆库（~/.cache/pdf2zh/cache.v1.db）必须在启动时串行建出来，否则冷启动
-# 必然抢锁：worker 和 server 都会在 import pdf2zh 时执行 pdf2zh.cache.init_db()，
-# 而 init_db 的 pragmas 是 {journal_mode: wal, busy_timeout: 1000}——peewee 按
-# 字典顺序生效，journal_mode 排在 busy_timeout 前面，而 SQLite 对 journal mode
-# 切换在库被别的连接占用时是**立刻**返回 SQLITE_BUSY、根本不走 busy handler 的
-# （所以那个 busy_timeout 那一刻还没生效，等它生效也救不了这一步）。上面刚把库
-# 删掉，两个进程同时起来就会抢着建同一个文件，输的那个 server 进程带着
-# "sqlite3.OperationalError: database is locked" 退出，supervisor 随即退出整个
-# 容器交给 compose 重启（2026-09 上线首启就崩了一次，每次重建容器都会重演）。
+# 翻译记忆库（~/.cache/pdf2zh/cache.v1.db）必须在启动时建出来，否则第一次用它的
+# 进程会去建：pdf2zh.cache.init_db() 的 pragmas 是 {journal_mode: wal,
+# busy_timeout: 1000}——peewee 按字典顺序生效，journal_mode 排在 busy_timeout
+# 前面，而 SQLite 对 journal mode 切换在库被别的连接占用时是**立刻**返回
+# SQLITE_BUSY、根本不走 busy handler 的（所以那个 busy_timeout 那一刻还没生效，
+# 等它生效也救不了这一步）。上面刚把库删掉，下面这些进程随后都会连它，谁先连谁建。
 #
-# 所以删完之后立刻在前台把库建出来并置成 WAL：worker/server 随后连接时看到的
-# 都是「文件已存在且已是 WAL」，journal_mode 变成 no-op；剩下建表那点写锁冲突由
-# init_db 里已生效的 busy_timeout 兜住。表结构留给 pdf2zh 自己建，这里不重复 DDL
-# （重复的 schema 会跟上游漂移）。预建失败不拦启动：那只是退化成改动前的抢锁
-# 行为，多数情况下能自愈。
+# 这里先在前台把库建出来并置成 WAL：worker 和它 fork 出来的 Flask 子进程、以及
+# 之后每个 task 子进程连接时看到的都是「文件已存在且已是 WAL」，journal_mode 变成
+# no-op；剩下建表那点写锁冲突由 init_db 里已生效的 busy_timeout 兜住。表结构留给
+# pdf2zh 自己建，这里不重复 DDL（重复的 schema 会跟上游漂移）。预建失败不拦启动：
+# 那只是退化成改动前的抢锁行为，多数情况下能自愈。
 #
 # `-E` 只用到 sqlite3，却正好跳过 PYTHONPATH 上的 sitecustomize.py——它会先
 # import httpx + numpy + openai，让这个每 30 分钟跑一次的轻量进程白吃 84MB 和
 # 约 3 秒 CPU（见 healthcheck.sh 里同样的处理）。
 create_translation_memory_db() {
-    python -E - <<'PY' || echo "警告：翻译记忆库预建失败，worker/server 将自行建库" >&2
+    python -E - <<'PY' || echo "警告：翻译记忆库预建失败，worker 将自行建库" >&2
 import os
 import sqlite3
 
@@ -59,58 +63,41 @@ connection.close()
 PY
 }
 
-# import 期的共享状态不止 sqlite 库一个：pdf2zh.config.ConfigManager 是单例，
-# __init__ 里做的是"文件不存在就写一份默认配置，存在就 json.load"，
-# 路径是 ~/.config/PDFMathTranslate/config.json。worker/server 同时第一次 import
-# 时，一个在写、另一个在读，读的那个会拿到写了一半的文件并抛
-# json.decoder.JSONDecodeError: Extra data → 进程退出 → 容器退出重启
-# （和上面那个 sqlite 竞争是同一种病：按 900m 生产内存上限跑 12 次冷启动，
-# 两种竞争一共挂掉 7 次）。
-#
-# 所以启动时先在前台把 pdf2zh 的初始化整套跑一遍，两个进程随后的 import 看到的
-# 都是"已存在"，竞争窗口就没有了。这里不自己拼配置内容，直接调用上游代码，
-# 避免跟上游的默认值漂移。
-#
-# 只放在启动路径：定期清理只删 sqlite 库、不删配置文件，那条路径用上面那个廉价
-# 的预建就够了——没必要每 30 分钟在 2GB 机器上再起一个重型进程。
-init_pdf2zh_shared_state() {
-    python - <<'PY' || echo "警告：pdf2zh 共享状态预建失败，worker/server 将自行竞争" >&2
-import pdf2zh.cache  # noqa: F401  —— 模块 import 阶段就会 init_db()
-import pdf2zh.backend  # noqa: F401  —— server.py 走的那条 import 链
-from pdf2zh.config import ConfigManager
-
-# 串行创建配置文件：路径和默认内容都由上游单例决定，这里不重复
-ConfigManager.get_instance()
-PY
-}
-
+# 2026-09-18 起这里少了一个函数：以前还要在前台把 pdf2zh 的 import 期共享状态
+# 整套跑一遍（import pdf2zh.cache 建库 + ConfigManager.get_instance() 建配置文件），
+# 因为 worker 和 server 两个进程会同时第一次 import，一个在写、另一个在读：
+# 读的会拿到写了一半的 config.json 并抛 json.decoder.JSONDecodeError: Extra data，
+# 或者抢 sqlite 库的 journal mode 拿到 database is locked，带着错误退出。
+# 现在 server 不是独立进程了——worker.py import 完之后 fork 出它，全容器只有一个
+# 进程会跑 import 期那段初始化，竞争结构上就不可能发生，所以那个"先串行跑一遍
+# 完整初始化"的重型进程（实测 ~200MB RSS、3s CPU）在启动路径上取消了。库仍然要
+# 预建：启动时的 purge 把它删掉了，而 worker 及其 fork 出来的进程之后都是懒连接。
 purge_translation_memory
 create_translation_memory_db
-init_pdf2zh_shared_state
 (
     while true; do
         sleep 1800
         purge_translation_memory
-        # 定期清理同样会把库删掉，而 worker/server 之后是懒连接（celery 每个任务、
-        # Flask 每个请求都可能新建连接），两个进程同时新建连接就会重演同一个竞争。
+        # 定期清理同样会把库删掉，而 worker 和 Flask 子进程之后都是懒连接
+        # （celery 每个任务、Flask 每个请求都可能新建连接），所以每轮清理后都要
+        # 重新预建，否则会重演同一个竞争。
         create_translation_memory_db
         find /tmp -mindepth 1 -maxdepth 1 -mmin +360 -exec rm -rf {} + 2>/dev/null || true
     done
 ) &
 
-# celery 并发固定 1：单篇翻译内部已按 thread 并行调 LLM，worker 多开会重复占用
-# 内存里那份 doclayout 模型（小服务器容易 OOM）。
+# 只起这一个进程：它 import 完整套依赖后 fork 出 Flask server，再起 Celery pool，
+# 三个角色共享同一份已 import 的堆（见文件头的实测数字）。worker 自己盯着 Flask
+# 子进程，所以这里只管 worker 一个 pid。
 python /opt/pdf2zh-patch/worker.py &
 worker_pid=$!
-python /opt/pdf2zh-patch/server.py &
-server_pid=$!
 
-# 任一进程退出（OOM/崩溃）就让容器一起退出，交给 compose 的 restart 策略拉起，
-# 否则 worker 死了容器还活着，任务会永远停在 pending。
-trap 'kill "$worker_pid" "$server_pid" 2>/dev/null || true; exit 0' TERM INT
-while kill -0 "$worker_pid" 2>/dev/null && kill -0 "$server_pid" 2>/dev/null; do
+# 任一角色退出（OOM/崩溃）就让容器一起退出，交给 compose 的 restart 策略拉起，
+# 否则 API 挂了而 worker 还活着（或者反过来），任务会永远停在 pending。
+trap 'kill "$worker_pid" 2>/dev/null || true; exit 0' TERM INT
+while kill -0 "$worker_pid" 2>/dev/null; do
     sleep 5
 done
 
-echo "pdf2zh worker/server 退出，容器随之退出以便重启" >&2
+echo "pdf2zh worker 退出，容器随之退出以便重启" >&2
 exit 1

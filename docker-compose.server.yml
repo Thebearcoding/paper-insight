@@ -4,8 +4,10 @@ services:
     cpus: 0.75
 
   pdf2zh:
-    # doclayout ONNX 模型在 Flask 与 Celery worker 各驻留一份，Redis 另占
-    # PDF2ZH_REDIS_MAXMEMORY（默认 512mb）；上限调低容易 OOM 杀容器。
+    # doclayout ONNX 模型按需在 task 子进程里建、不常驻，Flask 是 worker fork
+    # 出来的子进程（共享那份 import 堆）；Redis 另占 PDF2ZH_REDIS_MAXMEMORY
+    # （默认 512mb）。翻译进行时 task 子进程峰值最高，上限调低容易 OOM 杀容器
+    # （个人 overlay 用 768m 就是按单页翻译实测 643MB 峰值给的）。
     mem_limit: 1536m
     cpus: 1.25
     stop_grace_period: 30s

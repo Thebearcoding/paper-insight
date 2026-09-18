@@ -57,31 +57,41 @@ services:
         DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
         HF_ENDPOINT: ${HF_ENDPOINT:-}
-    # 2GB 小机器：doclayout ONNX 模型常驻，PyMuPDF 逐页渲染图像另占一部分，Redis
-    # 结果缓存由 PDF2ZH_REDIS_MAXMEMORY 限制。翻译被 OOM 时优先调小
-    # PDF2ZH_REDIS_MAXMEMORY。
+    # 2GB 小机器：doclayout ONNX 模型不常驻（第一次翻译时才在 task 子进程里建），
+    # PyMuPDF 逐页渲染图像另占一部分，Redis 结果缓存由 PDF2ZH_REDIS_MAXMEMORY 限制。
+    # 翻译被 OOM 时优先调小 PDF2ZH_REDIS_MAXMEMORY。
     #
-    # 2026-09-18 这轮把它的常驻和峰值都压下来了，两处改动都在 docker/pdf2zh 里：
+    # 2026-09-18 这轮把它的常驻和峰值都压下来了，三处改动都在 docker/pdf2zh 里：
     #   * worker.py 建 ONNX session 时关掉 CPU arena。arena 只增不减，实测 4 次
     #     imgsz=1024 推理就从 271MB 涨到 483MB 且不再回落；关掉后同样 4 次停在
     #     283MB。代价是单次 doclayout 推理慢约 15%（8.6s → 9.9s，这台 2 vCPU 上
     #     的实测量），而翻译的墙钟时间由逐页 LLM 调用主导，不是这一步。
-    #   * Dockerfile 里给 glibc 设 MALLOC_TRIM_THRESHOLD_/MALLOC_MMAP_THRESHOLD_。
-    #     上游加载路径会一次性分配 ~140MB protobuf 再 free，默认阈值下这些页留在
-    #     进程里。两个设置叠加后，同一段"载模型 + 推理 5 次"从 489MB 降到 225MB。
+    #   * glibc 的 MALLOC_TRIM_THRESHOLD_/MALLOC_MMAP_THRESHOLD_（在 base compose
+    #     的 environment 里，不在 Dockerfile，原因见那边的注释）。上游加载路径会
+    #     一次性分配 ~140MB protobuf 再 free，默认阈值下这些页留在进程里。两个设置
+    #     叠加后，同一段"载模型 + 推理 5 次"从 489MB 降到 225MB。
+    #   * 上面两条针对的是"怎么载"，这一条去掉了"常驻"本身：doclayout session 改成
+    #     第一次读 ModelInstance.value 时才建（上游唯一读者是 pdf2zh/backend.py 的
+    #     translate_task，也就是 celery 的 task 子进程），配合
+    #     --max-tasks-per-child=1 让它随子进程退出还给内核；Flask 也不再是独立
+    #     进程，而是 worker import 完整套依赖后 fork 出来的子进程，父子共享那一份
+    #     ~128MB 的 import 堆。
     #
-    # 稳态构成：worker 父进程 RssAnon 230MB（持有模型）+ 子进程增量 ~13MB +
-    # Flask 131MB + redis ~2MB ≈ 375MB，比改动前的 474MB 少约 100MB。
+    # 稳态（空转，实测 PSS）：worker 父进程 106MB + fork 出的 Flask 71MB + celery
+    # pool 子进程 88MB + redis ~5MB；cgroup memory.usage 268MB，改动前是 381MB
+    # （worker 持有模型的 230MB + 独立 import 一份栈的 Flask 128MB + pool 子进程）。
+    # 这里 RSS 会骗人：fork 出来的进程 RSS 仍然显示自己占了那 128MB，实际是同一份
+    # 物理页，只有 PSS 看得出来。
     #
-    # 但约束不在稳态而在冷启动。部署后实测：容器起来 1 分钟内 cgroup 峰值
-    # 624MB——worker 载模型那一瞬的 VmHWM 是 370MB，和 Flask 启动时 import 整个
-    # pdf2zh 栈的 206MB 正好叠在一起（改动前是 693MB，只降了 69MB，因为这是两个
-    # 进程峰值叠加，不是 ONNX 加载路径的锅）。上限要罩住的是这个峰值而不是稳态，
-    # 所以是 768m（约 1.23 倍），不是稳态的 2 倍。
+    # 冷启动同样降了：8 次实测 cgroup 峰值 259~338MB、6 秒内 healthy（改动前是
+    # 624MB——worker 载模型那一瞬的 370MB VmHWM 和 Flask 独立 import 整个 pdf2zh
+    # 栈的 206MB 叠在一起）。entrypoint 里那个"先串行跑一遍完整初始化"的重型进程
+    # （实测 ~200MB RSS、3s CPU）也随之取消，因为现在全容器只有一个 importer。
     #
-    # 这个 624MB 里还有约 150MB 是可做的，两条路都没动：让 entrypoint 等 worker
-    # 载完模型再起 Flask（把两个峰值串起来），或者把 Flask 并进 worker 进程（少
-    # 一个进程，代价是翻译进行时用户请求要和它抢 GIL）。
+    # 上限仍是 768m，因为真正的约束是翻译进行时、不是空转：实测单页翻译时 task
+    # 子进程 RssAnon 从 145MB 涨到 330MB（session ~80MB + PyMuPDF/onnxruntime 的
+    # 每页工作集），整个容器 cgroup 峰值 643MB，是上限的 1.19 倍。翻译结束后
+    # --max-tasks-per-child=1 回收该子进程（实测 pid 换新、内存回落到 147MB）。
     mem_limit: 768m
     cpus: 0.75
     pids_limit: 256

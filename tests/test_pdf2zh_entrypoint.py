@@ -1,34 +1,41 @@
-"""pdf2zh 容器 entrypoint 的启动顺序静态检查。
+"""pdf2zh 容器启动拓扑的静态检查。
 
-worker 和 server 会在同一瞬间 import pdf2zh，而 pdf2zh 的 import 阶段会初始化两处
-共享状态，两边都是"不存在就建"，于是两个进程抢着建同一份东西：
+2026-09-18 起容器里只有一个 Python 进程树：entrypoint 只起 `worker.py`，它 import
+完整套依赖后 fork 出 Flask server（`server.py`），再起 Celery pool。这么做的原因是
+内存：pdf2zh/babeldoc/onnxruntime/cv2 这一整套 import 在镜像里实测占 128MB 匿名内存，
+两个独立进程各自 import 就是两份（Flask 进程实测私有匿名 128MB，容器空转时 cgroup
+用量 381MB），
+而先 import 再 fork 的话父子共享同一份物理页（fork 出来的空转子进程 PSS 只有 66MB）。
 
-- pdf2zh.cache 在 import 阶段调用 init_db()，pragmas 是
-  {journal_mode: wal, busy_timeout: 1000}。peewee 按字典顺序生效，而 SQLite 对
-  journal mode 切换在库被别的连接占用时是立刻返回 SQLITE_BUSY、不走 busy handler
-  的（那个 busy_timeout 排在后面，那一刻还没生效）。entrypoint 又刚好在启动时把
-  这个库删掉，输的进程带着 "sqlite3.OperationalError: database is locked" 退出。
-- pdf2zh.config.ConfigManager 是单例，__init__ 里"文件不存在就写默认配置，存在就
-  json.load"。一个进程在写、另一个在读时，读的会拿到半截文件并抛
-  json.decoder.JSONDecodeError: Extra data。
+这份共享只在"fork 发生在 import 之后、celery 起之前"时成立，而且需要 worker 真的
+回收 task 子进程，否则按需加载的 doclayout session（~80MB）又会常驻下来——这三条都
+是运行期才能看出来的事，静态检查在这里兜住。
 
-任一进程退出，supervisor 就退出整个容器交给 compose 重启。2026-09 上线首启崩的
-就是第一种。2026-09-18 在 2GB 服务器上按生产内存上限（900m）各跑 12 次冷启动：
-改动前 5/12 干净（6 次 database is locked、1 次配置竞争），改动后 12/12 干净。
-这类错误只有真的重建容器才跑得出来，CI 里没有容器，所以用静态检查兜住顺序。
+顺带记一下由此消失的两个 import 期竞争（当年各修过一次，现在结构上不可能发生）：
+worker 和 server 同时第一次 import pdf2zh 时，`pdf2zh.cache.init_db()` 的
+journal_mode 切换会在库被占用时立刻返回 SQLITE_BUSY（busy_timeout 排在字典后面，
+那一刻还没生效），而 `ConfigManager.get_instance()` 一个在写 config.json、另一个在
+读，读到半截就抛 json.decoder.JSONDecodeError: Extra data。2026-09-18 在 2GB 服务器
+上按生产内存上限各跑 12 次冷启动，当时的修法（entrypoint 里先串行跑一遍完整初始化）
+做到 12/12 干净；现在是只有一个 importer，所以那段重型预建（实测 ~200MB RSS、
+3s CPU）取消了，冷启动顺序仍由这个文件看着。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-ENTRYPOINT_SCRIPT = (
-    Path(__file__).resolve().parents[1] / "docker" / "pdf2zh" / "entrypoint.sh"
-)
+PDF2ZH_DIR = Path(__file__).resolve().parents[1] / "docker" / "pdf2zh"
+ENTRYPOINT_SCRIPT = PDF2ZH_DIR / "entrypoint.sh"
+WORKER_SCRIPT = PDF2ZH_DIR / "worker.py"
 
 
 def _script() -> str:
     return ENTRYPOINT_SCRIPT.read_text(encoding="utf-8")
+
+
+def _worker() -> str:
+    return WORKER_SCRIPT.read_text(encoding="utf-8")
 
 
 def _function_body(name: str) -> str:
@@ -47,32 +54,73 @@ def _call_sites(name: str) -> list[str]:
     ]
 
 
-def test_shared_state_is_initialized_before_worker_and_server():
+def test_shared_state_is_initialized_before_the_worker_starts():
     script = _script()
 
     purge_call = script.index("\npurge_translation_memory\n")
     precreate_call = script.index("\ncreate_translation_memory_db\n")
-    init_call = script.index("\ninit_pdf2zh_shared_state\n")
     start_worker = script.index("python /opt/pdf2zh-patch/worker.py &")
-    start_server = script.index("python /opt/pdf2zh-patch/server.py &")
 
-    assert purge_call < precreate_call < init_call < start_worker < start_server, (
-        "pdf2zh 的 import 期共享状态必须在 worker/server 起来之前由 entrypoint "
-        "串行建出来，否则两个进程会抢着建同一份文件并崩掉一个"
+    assert purge_call < precreate_call < start_worker, (
+        "翻译记忆库必须在 worker 起来之前由 entrypoint 建出来：worker 及其 fork "
+        "出来的进程随后都会连它，而 pdf2zh.cache.init_db() 的 journal_mode 切换"
+        "在库被占用时是立刻失败的"
+    )
+
+
+def test_only_the_worker_is_started_and_it_forks_the_server():
+    script = _script()
+
+    started = [
+        line.strip()
+        for line in script.splitlines()
+        if line.strip().startswith("python /opt/pdf2zh-patch/")
+    ]
+    assert started == ["python /opt/pdf2zh-patch/worker.py &"], (
+        "entrypoint 只应起 worker.py 一个 pdf2zh 进程：Flask server 由 worker "
+        "fork 出来才能共享那 128MB import 堆，独立起一遍就是又一份拷贝"
+    )
+    assert "python /opt/pdf2zh-patch/server.py" not in script
+
+
+def test_worker_forks_the_server_before_starting_celery():
+    worker = _worker()
+
+    fork_call = worker.index("flask_pid = _fork_flask_server()")
+    celery_start = worker.index("celery_app.start(argv=_worker_argv())")
+
+    assert fork_call < celery_start, (
+        "Flask 子进程必须在 celery 起来之前 fork：那之后内存里除了 import 堆还多了"
+        "连接池和 pool 线程，而且 fork 时机的共享性也依赖这个顺序"
+    )
+    assert "runpy.run_path(SERVER_SCRIPT" in worker, (
+        "server.py 仍然是 Flask 的唯一出处（含绑 0.0.0.0 的原因），子进程里跑它"
+    )
+
+
+def test_worker_defers_the_doclayout_session_to_the_task_child():
+    worker = _worker()
+
+    assert "ModelInstance.value = _LazyModelValue()" in worker
+    assert "ModelInstance.value = LeanOnnxModel(" not in worker, (
+        "import 期就建 doclayout session 会让这 ~80MB 匿名内存常驻整个容器生命周期"
+    )
+    assert "--max-tasks-per-child=1" in worker, (
+        "按需建的 session 只能靠 task 子进程退出还给内核；不回收子进程等于没省"
     )
 
 
 def test_helpers_run_in_the_foreground_and_never_block_startup():
-    for name in ("create_translation_memory_db", "init_pdf2zh_shared_state"):
-        body = _function_body(name)
-        # 预建失败只应退化成改动前的抢锁行为，不能拦住容器启动
-        assert "|| echo" in body, f"{name} 失败时必须只告警，不能拦住启动"
+    name = "create_translation_memory_db"
+    body = _function_body(name)
+    # 预建失败只应退化成改动前的抢锁行为，不能拦住容器启动
+    assert "|| echo" in body, f"{name} 失败时必须只告警，不能拦住启动"
 
-        calls = _call_sites(name)
-        assert calls, f"{name} 没有被调用"
-        for line in calls:
-            # 后台化等于没修：抢锁窗口照样存在
-            assert not line.rstrip().endswith("&"), f"{name} 必须前台同步执行：{line!r}"
+    calls = _call_sites(name)
+    assert calls, f"{name} 没有被调用"
+    for line in calls:
+        # 后台化等于没修：抢锁窗口照样存在
+        assert not line.rstrip().endswith("&"), f"{name} 必须前台同步执行：{line!r}"
 
 
 def test_sqlite_precreate_matches_upstream_pragmas():
@@ -83,25 +131,25 @@ def test_sqlite_precreate_matches_upstream_pragmas():
     assert "busy_timeout=1000" in body
     # 表结构留给 pdf2zh 自己建，避免重复 DDL 跟上游漂移
     assert "CREATE TABLE" not in body.upper()
+    # 廉价路径：-E 跳过 sitecustomize.py，否则每 30 分钟白吃 84MB
+    assert body.index("python -E -") < body.index("import sqlite3")
 
 
-def test_pdf2zh_config_is_created_by_upstream_code_not_hand_rolled():
-    body = _function_body("init_pdf2zh_shared_state")
-    # 注释里可以提这个路径，但不许在代码里手写它
+def test_neither_script_hand_rolls_pdf2zh_shared_state():
+    # 注释里可以提这些名字（说明为什么不需要这么做），代码里不许出现
     code = "\n".join(
-        line for line in body.splitlines() if not line.strip().startswith("#")
+        line for line in _script().splitlines() if not line.strip().startswith("#")
     )
 
-    assert "ConfigManager.get_instance()" in code, (
-        "配置文件必须由 pdf2zh 自己的单例建出来，不要手写 JSON"
-    )
-    assert "json.dump" not in code, (
-        "不要自己拼配置内容：上游改默认值时手写的那份会静默漂移"
-    )
+    # 配置文件必须由 pdf2zh 自己的单例建出来，不要手写 JSON（上游改默认值时
+    # 手写的那份会静默漂移）；库的 schema 同理，见上一个用例。
+    assert "import pdf2zh" not in code
+    assert "ConfigManager" not in code
+    assert "json.dump" not in code
     assert "~/.config/PDFMathTranslate" not in code
 
 
-def test_periodic_purge_only_uses_the_cheap_precreate():
+def test_periodic_purge_recreates_the_db_and_avoids_the_heavy_init():
     script = _script()
     loop = script[script.index("while true; do") : script.index("\ndone\n")]
 
@@ -110,7 +158,7 @@ def test_periodic_purge_only_uses_the_cheap_precreate():
     tmp_cleanup = loop.index("find /tmp")
 
     assert purge < precreate < tmp_cleanup, (
-        "定期清理同样会删掉库，而 worker/server 之后是懒连接"
+        "定期清理同样会删掉库，而 worker 和 Flask 子进程之后是懒连接"
         "（celery 每个任务、Flask 每个请求都可能新建连接），"
         "所以每轮清理后都要重新预建，否则会重演同一个竞争"
     )

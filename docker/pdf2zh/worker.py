@@ -1,13 +1,30 @@
-"""Start the pdf2zh Celery worker with the doclayout model preloaded.
+"""Run pdf2zh as one supervised process tree: Flask HTTP API + Celery worker.
 
-Three upstream quirks make the plain CLI unusable here:
+The entrypoint starts this file and nothing else; this file owns the rest of the
+container's Python side:
+
+* It imports pdf2zh, babeldoc, onnxruntime and cv2 first — 128MB of anonymous
+  memory in this image (measured 2026-09-18) — and only then forks. The Flask
+  server is forked out of that state and the Celery pool forks out of it too, so
+  all of them map the same physical pages rather than importing their own copy of
+  the stack. Until then the entrypoint started `server.py` and `worker.py` as
+  independent processes and each paid for its own copy: measured 128MB private
+  anonymous in the Flask process, which is why the container sat at 381MB of
+  cgroup usage while idle. Forked children share it instead (an idle child's PSS
+  is ~66MB for the same 128MB, and the Flask child still shares most of it after
+  serving traffic).
+* It supervises the Flask child: if the HTTP side dies this process exits, so
+  compose restarts the container instead of leaving an API that answers 502
+  while Celery still reports healthy.
+
+Four upstream quirks make the plain CLI unusable here:
 
 * `pdf2zh --celery worker --loglevel=info --concurrency=1` never starts: the
   pdf2zh CLI uses a strict argparse parser that rejects Celery's own flags
   (`--loglevel`, `--concurrency`) with "unrecognized arguments".
 * Running `celery -A pdf2zh.backend:celery_app worker` on its own leaves
-  `pdf2zh.doclayout.ModelInstance.value` unset, and `translate_stream` calls
-  `model.predict(...)` for every page, so each job would fail with
+  `pdf2zh.doclayout.ModelInstance.value` unset, and `translate_stream` passes it
+  straight to the layout model, so each job would fail with
   `AttributeError: 'NoneType' object has no attribute 'predict'`.
 * `pdf2zh.doclayout.OnnxModel.__init__` loads the model file three times over:
   `onnx.load(path)` into a protobuf (~140 MB for the 72 MB file), then
@@ -27,18 +44,42 @@ Three upstream quirks make the plain CLI unusable here:
   cost is a few extra `malloc`/`free` pairs per page, which is noise next to the
   inference itself.
 
-The model is loaded in this parent process before Celery forks its children, so
-the worker pool inherits one copy instead of loading one per child (which would
-OOM a 1.5 GB container).
+Two Celery knobs in `_worker_argv` are deliberate rather than defaults:
+
+* `--concurrency=1`: one translation already fans out to several LLM calls per
+  batch internally, and every extra child that translates holds its own copy of
+  the doclayout session.
+* `--max-tasks-per-child=1` is what makes the lazy model loading below pay off.
+  A child exits after each task, so the pages its session allocated go back to
+  the kernel instead of staying resident for the container's lifetime.
+
+The doclayout session costs ~80MB of anonymous memory (measured: RssAnon 128MB
+after importing the stack, 209MB with the session built, back to 131MB after
+dropping it and calling malloc_trim). This file used to build it at import time,
+which kept those pages resident around the clock for a service that translates a
+handful of papers. Reading `ModelInstance.value` builds it instead: the only
+reader in this container is `translate_task` in upstream's `pdf2zh/backend.py`
+(its `model=ModelInstance.value` argument), i.e. the forked task child that is
+recycled right after the task. (`pdf2zh/gui.py` and `pdf2zh/pdf2zh.py` read it as
+well, but the GUI and the CLI do not run here.) Cost: 1.84s of session setup per
+translation, which is noise next to the per-page LLM calls that dominate a
+translation.
 """
 
 import ast
 import os
+import runpy
+import signal
+import sys
+import threading
+import traceback
 
 import onnxruntime
 from babeldoc.assets.assets import get_doclayout_onnx_model_path
 from pdf2zh.backend import celery_app
 from pdf2zh.doclayout import ModelInstance, OnnxModel
+
+SERVER_SCRIPT = "/opt/pdf2zh-patch/server.py"
 
 
 class LeanOnnxModel(OnnxModel):
@@ -71,7 +112,83 @@ class LeanOnnxModel(OnnxModel):
         self._names = ast.literal_eval(metadata["names"])
 
 
-ModelInstance.value = LeanOnnxModel(get_doclayout_onnx_model_path())
+# 这个进程里唯一一份 doclayout session。父进程从不读它，fork 出来的 task 子进程
+# 各自持有一份（子进程退出时随之还给内核，见 --max-tasks-per-child）。
+_session: LeanOnnxModel | None = None
+
+
+class _LazyModelValue:
+    """`ModelInstance.value` that builds the session on first read.
+
+    `ModelInstance` is a plain namespace (`class ModelInstance: value = None`),
+    so putting a descriptor in that class attribute is enough to defer the load:
+    every read goes through `__get__`, which builds the session once and then
+    hands back the real `LeanOnnxModel`. Nothing sees a wrapper object, so
+    upstream's own attribute and `isinstance` expectations still hold — a proxy
+    that forwards attributes would have to reimplement `OnnxModel.stride`'s
+    property lookup and would break the moment upstream touched a private one.
+    """
+
+    def __get__(self, instance: object, owner: type | None = None) -> LeanOnnxModel:
+        global _session
+        if _session is None:
+            _session = LeanOnnxModel(get_doclayout_onnx_model_path())
+        return _session
+
+
+ModelInstance.value = _LazyModelValue()
+
+
+def _fork_flask_server() -> int:
+    """Fork `server.py` out of this process's already-imported state.
+
+    Forking *before* `celery_app.start()` matters for two reasons: the child
+    inherits an interpreter that has only been imported into — no broker
+    connection, no Celery pool — and the memory it shares with the parent is
+    exactly the 128MB import stack, because nothing else has been allocated yet.
+
+    The import stack does leave native threads behind. Measured in this image via
+    `/proc/self/task`: 2 before any import (the sitecustomize chain), 3 after
+    `cv2`, 4 after `pdf2zh.backend` — while `threading.enumerate()` still reports
+    only `MainThread`. So the child is forked from a process with idle native
+    pools, which is what Celery's own prefork pool does for every task child, and
+    it does so from a busier state (after `celery_app.start()`) than this one.
+    Nothing in the child touches those pools: every module it needs is already in
+    `sys.modules`, and from here it only serves HTTP.
+
+    Because of those threads Python 3.12 prints its own DeprecationWarning at the
+    `fork()` below — "This process is multi-threaded, use of fork() may lead to
+    deadlocks in the child" — once per container start. It is expected here, and
+    it is the same fork the pool performs; if a future Python turns it into an
+    error, the fallback is the old layout (entrypoint starts `server.py` as a
+    second process) and paying for a second copy of the import stack.
+    """
+    pid = os.fork()
+    if pid != 0:
+        return pid
+
+    try:
+        runpy.run_path(SERVER_SCRIPT, run_name="__main__")
+    except BaseException:  # noqa: BLE001 —— 子进程里的任何异常都要留下痕迹再退
+        traceback.print_exc()
+    finally:
+        os._exit(0)
+
+
+def _exit_when_flask_dies(pid: int) -> None:
+    """Take the whole container down when the HTTP side stops.
+
+    The entrypoint only knows about this process now, so keeping the old
+    "either role dies, the container restarts" rule is our job. SIGTERM (rather
+    than an immediate exit) gives Celery its warm shutdown, which is what stops a
+    running task from being cut in half.
+    """
+    _, status = os.waitpid(pid, 0)
+    print(
+        f"pdf2zh Flask 子进程退出（status={status}），worker 随之退出以便容器重启",
+        file=sys.stderr,
+    )
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _worker_argv() -> list[str]:
@@ -82,6 +199,10 @@ def _worker_argv() -> list[str]:
         "worker",
         "--loglevel=info",
         f"--concurrency={concurrency}",
+        # 翻译结束后回收子进程：doclayout session 是在子进程里按需建的（~80MB 匿名
+        # 内存），只有子进程退出才会还给内核。代价是每篇翻译多花约 2s 建 session，
+        # 而一篇翻译的墙钟时间由逐页 LLM 调用主导。
+        "--max-tasks-per-child=1",
         # Single worker, single node: skip the gossip/mingle startup chatter.
         "--without-gossip",
         "--without-mingle",
@@ -89,4 +210,11 @@ def _worker_argv() -> list[str]:
 
 
 if __name__ == "__main__":
+    flask_pid = _fork_flask_server()
+    threading.Thread(
+        target=_exit_when_flask_dies,
+        args=(flask_pid,),
+        daemon=True,
+        name="flask-supervisor",
+    ).start()
     celery_app.start(argv=_worker_argv())
