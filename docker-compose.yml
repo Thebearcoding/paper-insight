@@ -68,6 +68,17 @@ services:
 
   app:
     logging: *service-logging
+    # 服务器上这个标签必须来自 release 的 .paper-insight-image（deploy-release.sh 会
+    # 把它 export 成 PAPER_INSIGHT_IMAGE）；本地开发才用下面的默认名。
+    #
+    # 这里默认值的选择有一个不显眼的坑：漏传 PAPER_INSIGHT_IMAGE 时 compose 不会
+    # 报错，而是静默用本地那个 paper-insight-app 镜像——机器上如果正好有个几周前手工
+    # build 的同名镜像，`docker compose up -d app` 就会把线上 app 静默换成几周前的
+    # 版本。2026-09-18 实际发生过一次：换成旧镜像后日志里连 Typesense 都没有，
+    # 搜索从 0.05s 退回 5.3s 的 PG 全表扫描，而容器状态一直是 healthy。
+    # 所以手工重建 app 时必须写成：
+    #   PAPER_INSIGHT_IMAGE=$(cat /opt/paper-insight/current/.paper-insight-image) \
+    #     docker compose ... up -d --no-deps --no-build app
     image: ${PAPER_INSIGHT_IMAGE:-paper-insight-app}
     build:
       context: .
