@@ -27,6 +27,13 @@ services:
     pids_limit: 256
 
   pdf2zh:
+    build:
+      # 国内服务器构建这个镜像时打开：apt + pip 走镜像源，doclayout 模型走
+      # hf-mirror。留空则与改动前完全一致（GitHub Actions 的构建校验就是留空跑的）。
+      args:
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
+        PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
+        HF_ENDPOINT: ${HF_ENDPOINT:-}
     # 2GB 小机器：doclayout ONNX 模型常驻 ~300MB，PyMuPDF 逐页渲染图像另占
     # 一部分，Redis 结果缓存由 PDF2ZH_REDIS_MAXMEMORY 限制。上限设太高会把
     # app/postgres 挤到 OOM，设太低翻译会被杀掉——翻译被 OOM 时优先调小

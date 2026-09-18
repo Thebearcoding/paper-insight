@@ -125,6 +125,33 @@ def test_installed_entrypoint_accepts_the_verb_from_arguments_too():
     assert 'sha256sum "$0"' in entrypoint
 
 
+def test_pdf2zh_build_mirror_args_stay_wired_and_default_off():
+    """国内服务器构建 pdf2zh 镜像必须能走镜像源，否则冷缓存构建会拖挂部署。
+
+    apt(deb.debian.org) + pip(pypi.org) 在国内实测几十 KB/s，整层要一两个小时，
+    而 CI 部署 job 只有 60 分钟超时。所以 compose 必须把三个可选参数透传进去，
+    而且默认值必须是空——GitHub Actions 的 docker-images 校验不带参数构建，默认
+    留空才能保证那条路径与改动前完全一致。
+    """
+    overlay = _load_services(COMPOSE_PERSONAL)
+    build_args = ((overlay.get("pdf2zh") or {}).get("build") or {}).get("args") or {}
+    assert set(build_args) == {"DEBIAN_MIRROR", "PYPI_INDEX_URL", "HF_ENDPOINT"}
+    for name, value in build_args.items():
+        assert value == "${" + name + ":-}", f"{name} 应该从 .env 取值且允许留空"
+
+    dockerfile = (REPO_ROOT / "docker" / "pdf2zh" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    for name in build_args:
+        assert re.search(rf"^ARG {name}=$", dockerfile, re.MULTILINE), (
+            f"Dockerfile 没有声明 ARG {name}=（compose 传了但构建时会被忽略）"
+        )
+
+    # 默认必须是国际源：改动前后行为一致
+    assert "deb.debian.org" in dockerfile
+    assert "https://huggingface.co" in dockerfile
+
+
 def test_personal_deployment_services_rotate_logs():
     services = _personal_deployment_services()
     for name, service in services.items():

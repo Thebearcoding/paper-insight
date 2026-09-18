@@ -457,9 +457,25 @@ PDF_TRANSLATION_OPENAI_API_KEY=sk-...
 部署脚本激活前会执行不带服务名的 `docker compose build`，也就是说**所有声明了
 `build:` 的服务（`app` 和 `pdf2zh`）都由部署流程自己构建**，不需要在服务器上手动
 准备镜像。首次构建 pdf2zh 要装 `pdf2zh[backend]` 依赖并预下载 doclayout 模型和中文
-字体（镜像约 2GB），在 2GB 小机器上要十几分钟，所以 CI 的 deploy job 超时放宽到
-60 分钟；依赖层和模型层之后都在 Docker 构建缓存里，改 `docker/pdf2zh/` 下的脚本只
-需要几十秒重建。
+字体（镜像约 2GB），所以 CI 的 deploy job 超时放宽到 60 分钟；依赖层和模型层之后都在
+Docker 构建缓存里，改 `docker/pdf2zh/` 下的脚本只需要几十秒重建。
+
+**但缓存一旦失效（改 Dockerfile、清构建缓存、换机器），构建速度就取决于源站的可达
+性**。国内服务器实测 apt(deb.debian.org) + pip(pypi.org) 只有几十 KB/s，冷构建要一两
+个小时，直接超过 deploy job 的 60 分钟超时——2026-09 手工构建时 apt 一层就跑了十几
+分钟。所以 `docker/pdf2zh/Dockerfile` 认三个可选构建参数，默认留空（= 与改动前完全
+一致，`docker-images.yml` 的构建校验就是这么跑的），`.env` 里打开即可：
+
+```bash
+DEBIAN_MIRROR=https://mirrors.aliyun.com          # 重写 deb822 sources 的 apt 源
+PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple   # pip -i
+HF_ENDPOINT=https://hf-mirror.com                 # babeldoc 取 doclayout 模型的 hf_hub_download
+```
+
+注意 `PYPI_INDEX_URL` 和 app 用的 `PYPI_FILES_MIRROR` 语义不同：后者是 uv.lock 里
+`files.pythonhosted.org` 的文件下载基址（`.../pypi/packages`），前者是 pip 要的
+simple 索引（`.../pypi/simple`），不要互相顶替。中文衬线字体是从 GitHub 下载的，
+不受 `HF_ENDPOINT` 影响，国内只是慢。
 
 `tests/test_deploy_compose_wiring.py` 会检查部署脚本是否覆盖了所有 build-only
 服务：新增这类服务时如果脚本又写死了服务名，pytest 会直接失败，避免再出现

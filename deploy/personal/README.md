@@ -103,6 +103,17 @@ remains available as the first rollback target.
 For mainland China servers that cannot reach Docker Hub directly, the bundled
 `docker-daemon.json` provides a reachable registry mirror. Install it only
 when `/etc/docker/daemon.json` is not already managed by the server operator.
-The personal Compose overlay can also rewrite locked Python package artifact
-URLs to the configured `PYPI_FILES_MIRROR` without changing package versions or
-hash verification.
+
+Build-time downloads are the other China-specific hazard. The personal Compose
+overlay rewrites locked Python package artifact URLs to the configured
+`PYPI_FILES_MIRROR` without changing package versions or hash verification, and
+passes three optional args to the `pdf2zh` image build:
+
+- `DEBIAN_MIRROR` — base for the apt sources (`https://mirrors.aliyun.com`)
+- `PYPI_INDEX_URL` — `pip -i` index (`https://mirrors.aliyun.com/pypi/simple`);
+  note this is not the same thing as `PYPI_FILES_MIRROR`, which is a file-download base
+- `HF_ENDPOINT` — for the doclayout model fetch (`https://hf-mirror.com`)
+
+All three default to empty, which reproduces the international behaviour exactly.
+Without them an apt + pip build of the pdf2zh image runs at tens of KB/s from a
+mainland server and overruns the deploy job's 60-minute timeout.

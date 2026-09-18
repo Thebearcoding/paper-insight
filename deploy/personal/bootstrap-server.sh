@@ -46,6 +46,9 @@ DOCKERHUB_PREFIX=docker.1ms.run/library/
 POSTGRES_IMAGE=docker.1ms.run/library/postgres:16-alpine
 CADDY_IMAGE=docker.1ms.run/library/caddy:2-alpine
 PYPI_FILES_MIRROR=https://mirrors.aliyun.com/pypi/packages
+DEBIAN_MIRROR=https://mirrors.aliyun.com
+PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+HF_ENDPOINT=https://hf-mirror.com
 EOF
 
 cat >"$config_tmp" <<EOF
