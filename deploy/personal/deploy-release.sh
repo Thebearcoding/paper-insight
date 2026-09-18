@@ -41,6 +41,35 @@ set_release_image() {
     fi
 }
 
+release_image_of() {
+    if [ -f "$1/.paper-insight-image" ]; then
+        cat "$1/.paper-insight-image"
+    fi
+}
+
+prune_stale_release_images() {
+    # 每次部署都会 build 出一个带标签的 paper-insight:<sha>，而 `docker image
+    # prune -f` 只删无标签（dangling）镜像，带标签的历史版本会一直累积。实测攒到
+    # 66 个、外加 289 条 build cache 之后，dockerd 自己的匿名内存涨到约 500MB：
+    # 这台机器只有 1.8GB 物理内存，一个守护进程占了四分之一还多，比任何应用容器
+    # 都大，而 / 盘也一直被镜像层占着。
+    #
+    # 回滚只会退一级（rollback_to 走 `up -d --no-build` 时需要上一版的镜像还在
+    # 本地），所以保留当前版和上一版就够；其余删掉，让 dockerd 的元数据不再随
+    # 部署次数增长。
+    keep_current=$1
+    keep_previous=$2
+    for image in $(docker images --format '{{.Repository}}:{{.Tag}}' --filter 'reference=paper-insight:*'); do
+        if [ "$image" = "$keep_current" ]; then
+            continue
+        fi
+        if [ -n "$keep_previous" ] && [ "$image" = "$keep_previous" ]; then
+            continue
+        fi
+        docker rmi "$image" >/dev/null 2>&1 || true
+    done
+}
+
 rollback_to() {
     previous_dir=$1
     if [ -z "$previous_dir" ] || [ ! -d "$previous_dir" ]; then
@@ -113,6 +142,11 @@ case "${1:-}" in
         if compose_for "$release_dir" up -d --no-build --wait --wait-timeout 300; then
             ln -sfn "$release_dir" "$deploy_root/current"
             docker image prune -f >/dev/null 2>&1 || true
+            prune_stale_release_images "$PAPER_INSIGHT_IMAGE" "$(release_image_of "$previous_dir")"
+            # build cache 同理，每次 build 留一层（实测 289 条 / 700MB）。只清 14
+            # 天以前的：近期的缓存让重复构建继续走 cache，而 pdf2zh 那层冷缓存要
+            # 一个多小时，热缓存只要两分钟。
+            docker builder prune -f --filter until=336h >/dev/null 2>&1 || true
             show_status
             log "Deployment completed for $commit_sha"
         else

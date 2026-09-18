@@ -17,6 +17,14 @@ services:
     cpus: 0.50
     pids_limit: 100
 
+  typesense:
+    # base compose 里 typesense 没有任何上限，是唯一能无限吃内存的服务。实测它
+    # 随索引重建涨到过约 231MB（匿名 60MB + 换出 171MB）。给上限的意义不是省内存，
+    # 而是把"某个服务失控"的后果限制在它自己：撞上限只会被 cgroup 杀掉并重启
+    # （重建索引），而它在 1.8GB 机器上把整机拖进 global OOM 时，被杀的是随机
+    # 进程——实测那次连杀的就是 pdf2zh 的 python。
+    mem_limit: 512m
+
   app:
     build:
       args:
@@ -39,11 +47,13 @@ services:
     # app/postgres 挤到 OOM，设太低翻译会被杀掉——翻译被 OOM 时优先调小
     # PDF2ZH_REDIS_MAXMEMORY。
     #
-    # 注意 mem_limit 之和（postgres 384m + app 1152m + pdf2zh 900m + caddy 128m
-    # ≈ 2.5GB）超过机器实际内存，属于超配：mem_limit 是上限而不是预留，平时
-    # 靠各容器不会同时吃满才跑得动。如果深度分析和翻译并发时出现容器被 OOM
-    # 杀掉，先降 PDF2ZH_REDIS_MAXMEMORY 或 PDF2ZH_CELERY_CONCURRENCY，再考虑
-    # 调低 app 的 mem_limit。
+    # 注意 mem_limit 之和（postgres 384m + typesense 512m + app 1152m + pdf2zh
+    # 900m + caddy 128m ≈ 3.1GB）超过机器实际内存（1.87GB），属于超配：
+    # mem_limit 是上限而不是预留，平时靠各容器不会同时吃满才跑得动。真正的稳态
+    # 占用要小得多（实测全部容器匿名内存合计约 410MB），但超配意味着这里的上限
+    # 只是"单个服务能失控到什么程度"，不是"总和不会超"。如果深度分析和翻译并发
+    # 时出现容器被 OOM 杀掉，先降 PDF2ZH_REDIS_MAXMEMORY 或
+    # PDF2ZH_CELERY_CONCURRENCY，再考虑调低 app 的 mem_limit。
     mem_limit: 900m
     cpus: 0.75
     pids_limit: 256

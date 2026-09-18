@@ -10,9 +10,13 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -177,3 +181,81 @@ def test_only_caddy_publishes_public_ports():
             continue
         for entry in entries:
             assert entry.startswith("127.0.0.1:"), f"{name} 把 {entry} 暴露到了公网"
+
+
+def test_every_personal_service_has_a_memory_limit():
+    """超配是靠上限兜住的，所以每个服务都必须有上限。
+
+    2GB 机器上真正危险的不是稳态占用，而是某一个服务失控：mem_limit 缺失的服务
+    可以一路涨到把整机拖进 global OOM，而 global OOM 杀的是随机进程（实测那次
+    杀的是 pdf2zh 的 python，尽管它自己远没到限额）。typesense 在 base compose
+    里原本就没有上限，这个断言防止它再被漏掉。
+    """
+    services = _personal_deployment_services()
+    missing = sorted(name for name, service in services.items() if "mem_limit" not in service)
+    assert not missing, f"{missing} 没有 mem_limit，失控时会把整机拖进 global OOM"
+
+
+def test_release_script_prunes_stale_release_images_but_keeps_rollback_target(tmp_path):
+    """带标签的历史 release 镜像不会自己被清掉，得靠部署脚本。
+
+    每次部署都会 build 出一个 paper-insight:<sha>；`docker image prune -f` 只删
+    无标签镜像，所以它们一直累积——实测 66 个之后 dockerd 的匿名内存涨到约 500MB
+    （机器只有 1.8GB）。回滚只退一级（rollback_to 走 --no-build 需要上一版镜像
+    还在本地），所以当前版和上一版必须留下。keep 列表写错很难从静态字符串看出来，
+    这里用一个假的 docker 把函数真正跑一遍。
+    """
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("需要 POSIX sh 来实跑 shell 函数")
+
+    script = RELEASE_SCRIPT.read_text(encoding="utf-8")
+    match = re.search(
+        r"^prune_stale_release_images\(\) \{\n(?P<body>.*?)\n\}\n",
+        script,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, "deploy-release.sh 里找不到 prune_stale_release_images()"
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_docker = bin_dir / "docker"
+    fake_docker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "images" ]; then\n'
+        "    printf '%s\\n' paper-insight:new paper-insight:prev paper-insight:old-1 paper-insight:old-2\n"
+        "else\n"
+        '    printf \'%s\\n\' "$2" >> "$DOCKER_RMI_LOG"\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+
+    rmi_log = tmp_path / "rmi.log"
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        "set -eu\n"
+        + match.group(0)
+        + '\nprune_stale_release_images "paper-insight:new" "paper-insight:prev"\n',
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["DOCKER_RMI_LOG"] = str(rmi_log)
+    subprocess.run([sh, str(runner)], check=True, env=env)
+
+    removed = sorted(rmi_log.read_text(encoding="utf-8").split())
+    assert removed == ["paper-insight:old-1", "paper-insight:old-2"]
+
+    # 没有上一版时（首次部署）不能把 current 也删掉
+    rmi_log.unlink()
+    subprocess.run(
+        [sh, "-c", match.group(0) + '\nprune_stale_release_images "paper-insight:new" ""\n'],
+        check=True,
+        env=env,
+    )
+    assert sorted(rmi_log.read_text(encoding="utf-8").split()) == [
+        "paper-insight:old-1",
+        "paper-insight:old-2",
+        "paper-insight:prev",
+    ]

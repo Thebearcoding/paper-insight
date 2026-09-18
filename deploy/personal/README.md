@@ -117,3 +117,58 @@ passes three optional args to the `pdf2zh` image build:
 All three default to empty, which reproduces the international behaviour exactly.
 Without them an apt + pip build of the pdf2zh image runs at tens of KB/s from a
 mainland server and overruns the deploy job's 60-minute timeout.
+
+## Host memory tuning
+
+The overlay is deliberately oversubscribed: the declared `mem_limit` values sum to
+roughly 3.1 GB on a machine with 1.87 GB. Those limits bound how far a single
+service can run away; they are not reservations, so the box only works while the
+services do not peak together. Actual steady state is much smaller — measured on
+2026-09-18, all five containers together held about 410 MB of anonymous memory.
+
+Two settings keep that arrangement from turning into OOM kills. Neither lives in
+the repository, so reapply them when rebuilding a server.
+
+**Swap and swappiness.** Alibaba Cloud Linux ships `vm.swappiness = 0` (set in both
+`/etc/sysctl.conf` and `/etc/sysctl.d/50-aliyun.conf`). That makes the kernel run
+out of reclaim options and reach for the OOM killer before it reaches for swap — on
+2026-09-18 the daemon logged 50 kills tagged `constraint=CONSTRAINT_NONE,global_oom`
+on a box that still had free swap, and the victims were randomly chosen (`pdf2zh`'s
+Python, `typesense-serve`). Keep disk swap in place and raise swappiness:
+
+```bash
+fallocate -l 2G /swapfile2 && chmod 600 /swapfile2 && mkswap /swapfile2
+swapon -p 10 /swapfile2
+echo '/swapfile2 none swap sw,pri=10 0 0' >> /etc/fstab
+# /etc/sysctl.conf wins over /etc/sysctl.d/*: 99-sysctl.conf symlinks to it.
+printf 'vm.swappiness = 10\n' >> /etc/sysctl.conf
+sysctl -w vm.swappiness=10
+```
+
+A drop-in under `/etc/sysctl.d/` is not enough on its own, because
+`/etc/sysctl.d/99-sysctl.conf` is a symlink to `/etc/sysctl.conf` and therefore
+loads last.
+
+**Docker daemon memory.** Every deploy builds a new tagged `paper-insight:<sha>`
+image, and `docker image prune -f` only removes untagged ones, so the images
+accumulated: after 66 of them plus 289 build-cache records, `dockerd` itself held
+520 MB of anonymous memory and 250 MB of swap — more than any application container,
+and a quarter of the machine. `deploy-release.sh` now prunes down to the current and
+previous release (rollback only ever goes back one step) and drops build cache older
+than 14 days. Reclaiming the daemon's own heap still needs a restart, which is why
+live restore is worth enabling — with it, containers keep running across the
+restart, so this is a no-downtime operation:
+
+```bash
+# add "live-restore": true to /etc/docker/daemon.json, then
+systemctl reload docker      # applies live-restore without touching containers
+systemctl restart docker     # resets the daemon heap; containers keep running
+```
+
+Confirm afterwards that the heap actually dropped and that the containers were not
+restarted (their `StartedAt` must be unchanged):
+
+```bash
+awk '/^RssAnon:/{print $2/1024 " MB"}' /proc/"$(pgrep -x dockerd)"/status
+docker inspect -f '{{.Name}} {{.State.StartedAt}}' $(docker ps -q)
+```
