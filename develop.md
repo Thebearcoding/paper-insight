@@ -339,7 +339,15 @@ docker build -t paper-insight .
 - 代码仓库：`Thebearcoding/paper-insight`
 - 部署分支：`master`
 - 部署目录：`/opt/paper-insight`
-- 受限部署入口：`/usr/local/sbin/deploy-paper-insight`
+- 受限部署入口：`/usr/local/sbin/deploy-paper-insight`（由 `deploy/personal/deploy-entrypoint.sh` 安装）
+
+这个入口点是手动安装的薄层，只做参数校验、把上传的归档解包到
+`/opt/paper-insight/releases/<sha>`，然后把控制权交给该 release 自带的
+`deploy/personal/deploy-release.sh`。也就是说**部署逻辑属于 release 内容**，改构建/
+激活/回滚流程正常合入 master 即可生效，不需要再登服务器同步；只有入口点自身的契约
+变化（新增 verb、改上传协议）才需要重新安装那份文件。pdf2zh 首次上线失败就是因为
+`/usr/local/sbin` 里还是只构建 `app` 的旧副本——`tests/test_deploy_compose_wiring.py`
+会守住这个分工（入口点里不允许出现 `docker compose`）。
 - Caddy 反代：`127.0.0.1:8000`
 
 日常更新通过 GitHub Actions 完成。推送到个人仓库的 `master` 后，后端测试、前端测试、Lint 和生产构建全部通过才会连接服务器：

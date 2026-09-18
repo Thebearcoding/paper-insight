@@ -1,4 +1,9 @@
 #!/bin/sh
+# 部署逻辑（属于 release 内容，随每次发布一起上传）。
+#
+# 由 /usr/local/sbin/deploy-paper-insight 调用：入口点已经校验过参数、把归档解包
+# 到 $release_root/<sha>，这里只负责把那个 release 切上线（构建镜像、迁移、健康
+# 检查、失败回滚）。
 set -eu
 set -f
 
@@ -63,36 +68,27 @@ show_status() {
     log "Production health check passed"
 }
 
-original_command=${SSH_ORIGINAL_COMMAND:-}
-set -- $original_command
-
 case "${1:-}" in
     status)
         [ "$#" -eq 1 ] || fail "status does not accept arguments"
         show_status
         ;;
-    deploy)
-        [ "$#" -eq 2 ] || fail "usage: deploy <40-character-commit-sha>"
+    activate)
+        [ "$#" -eq 2 ] || fail "usage: activate <40-character-commit-sha>"
         commit_sha=$2
         [ "${#commit_sha}" -eq 40 ] || fail "invalid commit SHA length"
         case "$commit_sha" in
             *[!0-9a-f]*) fail "invalid commit SHA" ;;
         esac
 
-        [ -r "$deploy_root/.env" ] || fail "$deploy_root/.env is missing"
-        [ -r "$deploy_root/config.yaml" ] || fail "$deploy_root/config.yaml is missing"
-
         release_dir="$release_root/$commit_sha"
+        [ -r "$release_dir/docker-compose.yml" ] || fail "release $commit_sha has not been staged"
+
         previous_dir=$(readlink -f "$deploy_root/current" 2>/dev/null || true)
         if [ -z "$previous_dir" ] || [ ! -d "$previous_dir" ]; then
             previous_dir=$deploy_root
         fi
 
-        umask 077
-        mkdir -p "$release_dir"
-        tar -xzf - -C "$release_dir"
-
-        [ -r "$release_dir/docker-compose.yml" ] || fail "release is missing docker-compose.yml"
         [ -r "$release_dir/docker-compose.personal.yml" ] || fail "release is missing the personal Compose overlay"
         [ -r "$release_dir/Dockerfile" ] || fail "release is missing Dockerfile"
 
@@ -126,6 +122,6 @@ case "${1:-}" in
         fi
         ;;
     *)
-        fail "only 'deploy <sha>' and 'status' are allowed"
+        fail "only 'status' and 'activate <sha>' are allowed"
         ;;
 esac

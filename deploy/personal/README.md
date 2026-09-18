@@ -35,12 +35,25 @@ pass. It uploads the exact tested commit over SSH, builds it in an isolated
 release directory, preserves `/opt/paper-insight/.env` and `config.yaml`, and
 switches the Compose project after the build succeeds.
 
-Install `deploy-release.sh` as `/usr/local/sbin/deploy-paper-insight` and add a
+Install `deploy-entrypoint.sh` as `/usr/local/sbin/deploy-paper-insight` and add a
 dedicated SSH public key with a forced command. Do not reuse a personal SSH key:
 
 ```text
 restrict,command="/usr/local/sbin/deploy-paper-insight" ssh-ed25519 ... github-actions-paper-insight
 ```
+
+The installed entry point is deliberately thin: it validates the command, extracts
+the uploaded archive into `/opt/paper-insight/releases/<sha>`, and then hands over
+to that release's own `deploy/personal/deploy-release.sh`. The deployment logic
+therefore ships with every release, so changes to it (build steps, activation,
+rollback) take effect on the next deploy without touching the server. Only a change
+to the entry point's own contract — new verbs, a different upload protocol —
+requires reinstalling it; when that happens, remember the installed copy is stale
+until you do, which is exactly how the first pdf2zh rollout failed.
+
+Do not move deployment logic into the installed entry point: `tests/test_deploy_compose_wiring.py`
+asserts that it stays a dispatcher (no `docker compose` calls, and the release script
+keeps the tarball extraction out of its own hands).
 
 Create a GitHub environment named `production` with these values:
 
