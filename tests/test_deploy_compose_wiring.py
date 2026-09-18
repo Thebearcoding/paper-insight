@@ -100,6 +100,26 @@ def test_installed_entrypoint_delegates_to_the_release_script():
     assert "tar -xzf - -C" not in release_script
 
 
+def test_installed_entrypoint_accepts_the_verb_from_arguments_too():
+    """手工执行 /usr/local/sbin/deploy-paper-insight status 也必须能用。
+
+    CI 走 SSH 强制命令，动词在 SSH_ORIGINAL_COMMAND 里；但运维手工检查时动词就是
+    普通参数。入口点如果只读环境变量，手工执行会让 $1 为空，掉进最后的分支报
+    "only 'deploy <sha>' and 'status' are allowed"，看起来像装错了版本（线上实际
+    遇到过，诊断成本很高）。所以环境变量只应覆写位置参数，不能取代它。
+    """
+    entrypoint = ENTRYPOINT_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then' in entrypoint
+    assert re.search(r"set -- \$SSH_ORIGINAL_COMMAND\nfi", entrypoint), (
+        "SSH_ORIGINAL_COMMAND 应该只在非空时覆写位置参数，否则调用者传的 \"$@\" 会丢失"
+    )
+    assert "set -- $original_command" not in entrypoint
+
+    # deploy 从 stdin 读归档，在终端里跑会一直等输入；必须快速失败而不是挂住。
+    assert "[ -t 0 ]" in entrypoint
+
+
 def test_personal_deployment_services_rotate_logs():
     services = _personal_deployment_services()
     for name, service in services.items():

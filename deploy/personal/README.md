@@ -47,9 +47,31 @@ the uploaded archive into `/opt/paper-insight/releases/<sha>`, and then hands ov
 to that release's own `deploy/personal/deploy-release.sh`. The deployment logic
 therefore ships with every release, so changes to it (build steps, activation,
 rollback) take effect on the next deploy without touching the server. Only a change
-to the entry point's own contract — new verbs, a different upload protocol —
-requires reinstalling it; when that happens, remember the installed copy is stale
-until you do, which is exactly how the first pdf2zh rollout failed.
+to the entry point's own contract — new verbs, a different upload protocol — requires
+reinstalling it; when that happens, remember the installed copy is stale until you
+do, which is exactly how the first pdf2zh rollout failed.
+
+The entry point takes the verb either from `SSH_ORIGINAL_COMMAND` (the SSH forced
+command CI uses) or from its own arguments, so it is also usable by hand:
+
+```bash
+/usr/local/sbin/deploy-paper-insight status
+```
+
+`deploy` reads the release archive from stdin and refuses to run in a terminal; it
+is meant to be driven as `git archive --format=tar.gz HEAD | ssh ... deploy <sha>`.
+
+After installing or replacing it, confirm the installed copy is actually the one you
+intended — this is the check that would have caught the stale-server-script problem
+immediately:
+
+```bash
+sha256sum /usr/local/sbin/deploy-paper-insight
+curl -fsSL https://raw.githubusercontent.com/Thebearcoding/paper-insight/master/deploy/personal/deploy-entrypoint.sh | sha256sum
+```
+
+Both digests must match. If you copied the file from a Windows checkout, strip the
+CRLF endings first (`sed -i 's/\r$//'`) or the shebang will not resolve.
 
 Do not move deployment logic into the installed entry point: `tests/test_deploy_compose_wiring.py`
 asserts that it stays a dispatcher (no `docker compose` calls, and the release script

@@ -348,6 +348,19 @@ docker build -t paper-insight .
 变化（新增 verb、改上传协议）才需要重新安装那份文件。pdf2zh 首次上线失败就是因为
 `/usr/local/sbin` 里还是只构建 `app` 的旧副本——`tests/test_deploy_compose_wiring.py`
 会守住这个分工（入口点里不允许出现 `docker compose`）。
+
+入口点的 verb 既可以从 `SSH_ORIGINAL_COMMAND`（CI 的强制命令）取，也可以直接从参数
+取，所以手工检查用 `/usr/local/sbin/deploy-paper-insight status` 就行；`deploy` 从 stdin
+读归档，在终端里会直接报错退出，只应由 CI 驱动。装完/换完入口点要核对是不是想要的那份
+（这正是"服务器上跑旧副本"最早的破绽）：
+
+```bash
+sha256sum /usr/local/sbin/deploy-paper-insight
+curl -fsSL https://raw.githubusercontent.com/Thebearcoding/paper-insight/master/deploy/personal/deploy-entrypoint.sh | sha256sum
+```
+
+两个摘要必须一致。从 Windows 工作区拷过去的话先 `sed -i 's/\r$//'` 去掉 CRLF，否则
+shebang 解析不了。
 - Caddy 反代：`127.0.0.1:8000`
 
 日常更新通过 GitHub Actions 完成。推送到个人仓库的 `master` 后，后端测试、前端测试、Lint 和生产构建全部通过才会连接服务器：

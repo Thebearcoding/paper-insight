@@ -30,8 +30,13 @@ active_release_script() {
     printf '%s\n' "$active_dir/deploy/personal/deploy-release.sh"
 }
 
-original_command=${SSH_ORIGINAL_COMMAND:-}
-set -- $original_command
+# 通过 SSH 强制命令调用时（CI 走的路径）动词在 SSH_ORIGINAL_COMMAND 里；直接在
+# 服务器上手工执行时动词就是普通参数（'deploy-paper-insight status'）。这里必须
+# 两种都认：只读环境变量会让手工执行时 $1 为空，直接掉进最后一个分支报
+# "only 'deploy <sha>' and 'status' are allowed"，看起来像装错版本。
+if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+    set -- $SSH_ORIGINAL_COMMAND
+fi
 
 case "${1:-}" in
     status)
@@ -53,6 +58,9 @@ case "${1:-}" in
         release_dir="$release_root/$commit_sha"
         umask 077
         mkdir -p "$release_dir"
+        if [ -t 0 ]; then
+            fail "deploy reads the release archive from stdin (git archive | ssh ...); it cannot be run from a terminal"
+        fi
         tar -xzf - -C "$release_dir"
 
         script="$release_dir/deploy/personal/deploy-release.sh"
