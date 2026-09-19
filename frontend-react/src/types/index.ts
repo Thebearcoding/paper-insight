@@ -10,6 +10,12 @@ export interface Paper {
   authors?: string[];
   pdf?: string | null;
   llm_response?: string | null;
+  analysis_figures?: ZoteroAnalysisFigure[];
+  analysis_source?: string | null;
+  analysis_warning?: string | null;
+  analysis_provider_id?: string | null;
+  analysis_provider_name?: string | null;
+  analysis_model_name?: string | null;
   created_at?: string;
   sort_order?: number | null;
   code_status?: PaperCodeStatus | null;

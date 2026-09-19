@@ -166,6 +166,7 @@ from database import (
     set_user_api_quota,
     create_llm_provider,
     update_feishu_test_result,
+    update_paper_analysis,
     update_llm_response,
     update_zotero_analysis,
     update_zotero_analysis_enrichment,
@@ -193,7 +194,9 @@ from markdown_utils import (
 )
 from prompt import build_open_in_ai_prompt, build_zotero_analysis_prompt
 from paper_figures import (
+    extract_and_save_public_analysis_assets,
     extract_and_save_zotero_analysis_assets,
+    paper_figure_path,
     zotero_figure_path,
 )
 from pdf_translation import (
@@ -1393,6 +1396,27 @@ def public_zotero_analysis_figures(item_key: str, figures: list[dict] | None) ->
             payload["url"] = f"/me/zotero/items/{item_key}/figures/{figure.get('id')}"
         public_figures.append(payload)
     return public_figures
+
+
+def public_paper_analysis_figures(paper_id: str, figures: list[dict] | None) -> list[dict]:
+    public_figures: list[dict] = []
+    for figure in figures or []:
+        if not isinstance(figure, dict) or not figure.get("id"):
+            continue
+        payload = {key: value for key, value in figure.items() if key != "filename"}
+        if figure.get("filename"):
+            payload["url"] = f"/paper/{quote(paper_id, safe='')}/figures/{figure.get('id')}"
+        public_figures.append(payload)
+    return public_figures
+
+
+def public_paper_info(paper: dict) -> dict:
+    result = dict(paper)
+    result["analysis_figures"] = public_paper_analysis_figures(
+        str(paper.get("id") or ""),
+        paper.get("analysis_figures"),
+    )
+    return result
 
 
 def public_zotero_item(item: dict) -> dict:
@@ -3130,6 +3154,34 @@ def get_or_fetch_paper_info(paper_id: str) -> dict:
     return paper_info
 
 
+@app.get("/paper/{paper_id}/figures/{figure_id}")
+async def get_paper_analysis_figure(paper_id: str, figure_id: str):
+    try:
+        paper = await asyncio.to_thread(get_paper, paper_id)
+        if not paper:
+            raise HTTPException(status_code=404, detail="论文不存在")
+        figure = next(
+            (
+                entry
+                for entry in paper.get("analysis_figures") or []
+                if isinstance(entry, dict) and str(entry.get("id")) == figure_id
+            ),
+            None,
+        )
+        if not figure or not figure.get("filename"):
+            raise HTTPException(status_code=404, detail="论文图表不存在")
+        path = paper_figure_path(paper_id, str(figure["filename"]))
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="论文图表文件不存在")
+        return FileResponse(
+            path,
+            media_type=str(figure.get("media_type") or "image/png"),
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+
+
 def _openreview_error_status(error: OpenReviewError) -> int:
     return 404 if str(error) == "Paper not found" else 502
 
@@ -3153,7 +3205,7 @@ async def get_paper_info(paper_id: str):
     if not paper_info:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    return paper_info
+    return public_paper_info(paper_info)
 
 
 @app.get("/paper/{paper_id}/open-in-ai-prompt")
@@ -3379,6 +3431,14 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                 paper_info["llm_response"] = normalized_response
             if not paper_info.get("code_checked_at"):
                 schedule_code_availability(paper_info, normalized_response)
+            if paper_info.get("analysis_figures"):
+                yield {
+                    "event": "figures",
+                    "data": json.dumps(
+                        public_paper_analysis_figures(paper_id, paper_info["analysis_figures"]),
+                        ensure_ascii=False,
+                    ),
+                }
             yield {"data": normalized_response}
             yield {"event": "done", "data": ""}
             return
@@ -3407,6 +3467,44 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             content_error = "论文没有可用 PDF 链接"
             yield {"event": "status", "data": "未找到 PDF 链接，正在基于论文元数据分析..."}
 
+        analysis_figures = list(paper_info.get("analysis_figures") or [])
+        yield {"event": "status", "data": "正在识别论文架构图与 SOTA 主结果表..."}
+        try:
+            extracted_assets = await asyncio.to_thread(
+                extract_and_save_public_analysis_assets,
+                paper_id,
+                paper_info,
+                analysis_figures,
+                force_refresh=reanalyze,
+            )
+            if extracted_assets:
+                analysis_figures = extracted_assets
+                yield {
+                    "event": "figures",
+                    "data": json.dumps(
+                        public_paper_analysis_figures(paper_id, analysis_figures),
+                        ensure_ascii=False,
+                    ),
+                }
+        except Exception as exc:
+            logger.info("Unable to extract public analysis assets %s: %s", paper_id, exc)
+            yield {"event": "status", "data": "论文图表提取失败，将继续生成文字报告"}
+        prompt_figure = next(
+            (
+                figure for figure in analysis_figures
+                if isinstance(figure, dict) and figure.get("kind") == "framework"
+            ),
+            None,
+        )
+        prompt_results_table = next(
+            (
+                figure for figure in analysis_figures
+                if isinstance(figure, dict) and figure.get("kind") == "results_table"
+            ),
+            None,
+        )
+        analysis_instruction = build_zotero_analysis_prompt(prompt_figure, prompt_results_table)
+
         try:
             selected_config = llm.public_config()
         except Exception as exc:
@@ -3415,6 +3513,14 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             return
 
         is_glm_proxy_analysis = is_glm_proxy_config(selected_config)
+        analysis_metadata = {
+            "source": "fulltext" if paper_content else "metadata",
+            "warning": content_error,
+            "provider_id": selected_config.get("provider_id"),
+            "provider_name": selected_config.get("provider_name"),
+            "model_name": selected_config.get("model_name"),
+        }
+        yield {"event": "analysis-meta", "data": json.dumps(analysis_metadata, ensure_ascii=False)}
         analysis_attempts: list[tuple[str | None, int | None]] = [(paper_content, None)]
         if is_glm_proxy_analysis:
             primary_content = (
@@ -3468,6 +3574,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             try:
                 async for stream_chunk in llm.get_response_stream_events(
                     user_prompt,
+                    _analysis_instruction=analysis_instruction,
                     _usage_context=(
                         "paper_analysis_stream_fallback"
                         if attempt_index
@@ -3492,9 +3599,15 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
 
             candidate = normalize_zotero_report("".join(full_response))
             completion_error = str(stream_error) if isinstance(stream_error, LLMOutputTruncatedError) else (
-                zotero_stream_recovery_error(candidate)
+                zotero_stream_recovery_error(
+                    candidate,
+                    require_framework_figure=bool(prompt_figure),
+                )
                 if stream_error
-                else zotero_report_completion_error(candidate)
+                else zotero_report_completion_error(
+                    candidate,
+                    require_framework_figure=bool(prompt_figure),
+                )
             )
             if candidate and not completion_error:
                 normalized_response = candidate
@@ -3521,7 +3634,13 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
 
         analysis_saved = True
         try:
-            await asyncio.to_thread(update_llm_response, paper_id, normalized_response)
+            await asyncio.to_thread(
+                update_paper_analysis,
+                paper_id,
+                normalized_response,
+                analysis_figures,
+                analysis_metadata,
+            )
         except Exception:
             analysis_saved = False
             logger.warning("Could not save generated paper analysis %s", paper_id, exc_info=True)

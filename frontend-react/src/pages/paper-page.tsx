@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Bookmark, ChevronDown, ChevronLeft, ExternalLink, Eye, FileText, Heart, Languages, Loader2, Sparkles } from 'lucide-react';
+import { Bookmark, ChevronDown, ChevronLeft, ExternalLink, Eye, FileText, Heart, Images, Languages, Loader2, Sparkles, Table2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -18,9 +18,10 @@ import { fetchOpenInAiPrompt, fetchPaperInfo, fetchPaperMarks, fetchPaperTransla
 import { useAuth } from '@/lib/auth';
 import { buildPaperKeywordSearchPath } from '@/lib/constants';
 import { getVenueParts, normalizeKeywords } from '@/lib/content';
+import { splitAnalysisAtMethodSection } from '@/lib/analysis-layout';
 import { useZoteroPaperMetadata } from '@/hooks/use-zotero-paper-metadata';
 import { navigate } from '@/lib/router';
-import type { Paper } from '@/types';
+import type { Paper, ZoteroAnalysisFigure } from '@/types';
 
 interface PaperPageProps {
   paperId: string;
@@ -39,6 +40,51 @@ function buildChatGptUrl(prompt: string) {
   return `https://chatgpt.com/?${params.toString()}`;
 }
 
+function AnalysisAsset({ figure, paperTitle }: { figure: ZoteroAnalysisFigure; paperTitle: string }) {
+  const isResultsTable = figure.kind === 'results_table';
+  const rows = figure.table_data?.rows ?? [];
+  const Icon = isResultsTable ? Table2 : Images;
+  const title = isResultsTable ? 'SOTA 对比表' : '论文架构图';
+  return (
+    <figure className="overflow-hidden rounded-lg border border-[#e8edf4] bg-[#f8fafc]">
+      <div className="flex items-center gap-2 border-b border-[#e8edf4] bg-white px-4 py-3 text-sm font-medium text-[#334155]">
+        <Icon className="h-4 w-4 text-[#ff9900]" />
+        {title} · {figure.label}
+      </div>
+      {isResultsTable && rows.length ? (
+        <div className="max-h-[48rem] overflow-auto bg-white p-3 sm:p-5">
+          <table className="min-w-full border-collapse text-[11px] leading-5 text-slate-700 sm:text-xs" aria-label={figure.caption || title}>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={rowIndex} className="border-b border-slate-200 last:border-b-0">
+                  {row.map((cell, cellIndex) => {
+                    const CellTag = cell.header || rowIndex === 0 ? 'th' : 'td';
+                    return <CellTag key={cellIndex} colSpan={cell.col_span || 1} rowSpan={cell.row_span || 1} className={`min-w-20 whitespace-nowrap border-r border-slate-100 px-2.5 py-2 text-center align-middle last:border-r-0 ${CellTag === 'th' ? 'bg-slate-50 font-semibold text-slate-900' : ''} ${cell.emphasis === 'best' ? 'font-semibold text-[#c2410c]' : ''}`}>
+                      {cell.text || ' '}
+                    </CellTag>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : figure.url ? (
+        <a href={figure.url} target="_blank" rel="noreferrer" className="block bg-white p-3 sm:p-5">
+          <img src={figure.url} alt={figure.caption || `${paperTitle}${title}`} className="mx-auto max-h-[48rem] w-auto max-w-full rounded-md object-contain" loading="lazy" />
+        </a>
+      ) : null}
+      <figcaption className="space-y-1 px-4 py-3 text-sm leading-6 text-[#64748b]">
+        <p>{figure.caption}</p>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[#94a3b8]">
+          <span>来源：{figure.source}</span>
+          {figure.page_number ? <span>PDF 第 {figure.page_number} 页</span> : null}
+          {figure.source_url ? <a href={figure.source_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">原始材料</a> : null}
+        </div>
+      </figcaption>
+    </figure>
+  );
+}
+
 export function PaperPage({ paperId }: PaperPageProps) {
   const { user, isLoading: isAuthLoading } = useAuth();
   const [paper, setPaper] = useState<Paper | null>(null);
@@ -51,6 +97,9 @@ export function PaperPage({ paperId }: PaperPageProps) {
   const [analysisStreaming, setAnalysisStreaming] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisWarning, setAnalysisWarning] = useState<string | null>(null);
+  const [analysisFigures, setAnalysisFigures] = useState<ZoteroAnalysisFigure[]>([]);
+  const [analysisSource, setAnalysisSource] = useState<string | null>(null);
+  const [analysisModel, setAnalysisModel] = useState<string | null>(null);
   const [openInAiPrompt, setOpenInAiPrompt] = useState('');
   const [openInAiPromptError, setOpenInAiPromptError] = useState<string | null>(null);
   const [marks, setMarks] = useState(EMPTY_MARKS);
@@ -200,6 +249,9 @@ export function PaperPage({ paperId }: PaperPageProps) {
       .then((payload) => {
         if (active) {
           setPaper(payload);
+          setAnalysisFigures(payload.analysis_figures ?? []);
+          setAnalysisSource(payload.analysis_source ?? null);
+          setAnalysisModel(payload.analysis_model_name ?? null);
         }
       })
       .catch((error) => {
@@ -231,6 +283,9 @@ export function PaperPage({ paperId }: PaperPageProps) {
     setAnalysisReasoning('');
     setAnalysisError(null);
     setAnalysisWarning(null);
+    setAnalysisSource(null);
+    setAnalysisModel(null);
+    if (reanalyze) setAnalysisFigures([]);
     setAnalysisLoading(true);
     setAnalysisStreaming(true);
     setAnalysisStatus(reanalyze ? '正在重新分析论文...' : '正在获取论文信息...');
@@ -256,6 +311,24 @@ export function PaperPage({ paperId }: PaperPageProps) {
             }
             if (event === 'warning') {
               setAnalysisWarning((current) => [current, data].filter(Boolean).join('；'));
+            }
+            if (event === 'figures') {
+              try {
+                const figures = JSON.parse(data) as ZoteroAnalysisFigure[];
+                setAnalysisFigures(Array.isArray(figures) ? figures : []);
+              } catch {
+                setAnalysisWarning((current) => [current, '论文图表数据格式无效，已忽略'].filter(Boolean).join('；'));
+              }
+            }
+            if (event === 'analysis-meta') {
+              try {
+                const metadata = JSON.parse(data) as { source?: string; warning?: string | null; model_name?: string | null };
+                setAnalysisSource(metadata.source ?? null);
+                setAnalysisModel(metadata.model_name ?? null);
+                if (metadata.warning) setAnalysisWarning(metadata.warning);
+              } catch {
+                // Provenance is supplementary; the report stream remains usable.
+              }
             }
             if (event === 'reasoning') {
               setAnalysisLoading(false);
@@ -333,6 +406,7 @@ export function PaperPage({ paperId }: PaperPageProps) {
 
   const venue = getVenueParts(paper?.venue);
   const keywords = normalizeKeywords(paper?.keywords);
+  const analysisSplit = splitAnalysisAtMethodSection(analysisText);
   const pdfUrl = paper?.pdf || `https://openreview.net/pdf?id=${paperId}`;
   const aiTutorTargets = openInAiPrompt ? [
     {
@@ -665,6 +739,12 @@ export function PaperPage({ paperId }: PaperPageProps) {
             </div>
 
             {analysisWarning ? <p role="status" className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">{analysisWarning}</p> : null}
+            {(analysisSource || analysisModel) && (analysisText || analysisStreaming) ? (
+              <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 rounded-xl border border-emerald-100 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-900">
+                {analysisSource ? <span><strong>分析材料：</strong>{analysisSource === 'fulltext' ? '已提取论文全文与图表证据' : '仅论文元数据与摘要'}</span> : null}
+                {analysisModel ? <span><strong>报告模型：</strong>{analysisModel}</span> : null}
+              </div>
+            ) : null}
             {analysisLoading ? (
               <div className="mt-6 flex items-center gap-2 text-[#728095]">
                 <Loader2 className="h-5 w-5 animate-spin" />
@@ -676,12 +756,27 @@ export function PaperPage({ paperId }: PaperPageProps) {
               <div className="mt-6 space-y-4">
                 <ReasoningStreamPanel reasoning={analysisStreaming ? analysisReasoning : ''} />
                 {analysisText ? (
-                  <RichContent
-                    content={analysisText}
-                    analysisMode
-                    isStreaming={analysisStreaming}
-                    className="markdown-body analysis-markdown text-base leading-7 text-[#334155]"
-                  />
+                  <>
+                    <RichContent
+                      content={analysisSplit.beforeAssets}
+                      analysisMode
+                      isStreaming={analysisStreaming}
+                      className="markdown-body analysis-markdown text-base leading-7 text-[#334155]"
+                    />
+                    {analysisFigures.length ? (
+                      <div className="space-y-4 border-l-2 border-[#fed7aa] pl-3 sm:pl-5">
+                        {analysisFigures.map((figure) => <AnalysisAsset key={`${figure.kind}-${figure.id}`} figure={figure} paperTitle={paper?.title || '论文'} />)}
+                      </div>
+                    ) : null}
+                    {analysisSplit.afterAssets ? (
+                      <RichContent
+                        content={analysisSplit.afterAssets}
+                        analysisMode
+                        isStreaming={analysisStreaming}
+                        className="markdown-body analysis-markdown text-base leading-7 text-[#334155]"
+                      />
+                    ) : null}
+                  </>
                 ) : null}
               </div>
             )}

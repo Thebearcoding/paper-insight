@@ -723,6 +723,47 @@ def update_llm_response(paper_id: str, response: str):
     _run_with_retry(operation, f"update_llm_response:{paper_id}")
 
 
+def update_paper_analysis(
+    paper_id: str,
+    response: str,
+    analysis_figures: list[dict] | None = None,
+    analysis_metadata: dict | None = None,
+) -> None:
+    if not DATABASE_URL:
+        return
+    metadata = analysis_metadata or {}
+
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE papers
+                    SET llm_response = %s,
+                        analysis_figures = COALESCE(%s, analysis_figures),
+                        analysis_source = %s,
+                        analysis_warning = %s,
+                        analysis_provider_id = %s,
+                        analysis_provider_name = %s,
+                        analysis_model_name = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        response,
+                        Jsonb(analysis_figures) if analysis_figures is not None else None,
+                        metadata.get("source"),
+                        metadata.get("warning"),
+                        metadata.get("provider_id"),
+                        metadata.get("provider_name"),
+                        metadata.get("model_name"),
+                        paper_id,
+                    ),
+                )
+            conn.commit()
+
+    _run_with_retry(operation, f"update_paper_analysis:{paper_id}")
+
+
 def update_paper_code_availability(
     paper_id: str,
     status: str,
