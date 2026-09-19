@@ -27,6 +27,7 @@ import {
 } from '@/lib/api';
 import { splitAnalysisAtMethodSection } from '@/lib/analysis-layout';
 import { useAuth } from '@/lib/auth';
+import { modelSelectionValue, parseModelSelection, resolveModelSelection } from '@/lib/llm-selection';
 import { navigate } from '@/lib/router';
 import type {
   SelectableLlmCatalog,
@@ -47,35 +48,6 @@ function creators(item: ZoteroItem): string {
     .map((creator) => creator.name || [creator.firstName, creator.lastName].filter(Boolean).join(' '))
     .filter(Boolean)
     .join('、') || '作者未知';
-}
-
-const MODEL_SELECTION_SEPARATOR = '::';
-
-function modelSelectionValue(providerId: string, modelName: string): string {
-  return `${providerId}${MODEL_SELECTION_SEPARATOR}${encodeURIComponent(modelName)}`;
-}
-
-function parseModelSelection(value: string): { provider_id: string; model_name: string } | null {
-  const separatorIndex = value.indexOf(MODEL_SELECTION_SEPARATOR);
-  if (separatorIndex <= 0) {
-    return null;
-  }
-  const providerId = value.slice(0, separatorIndex);
-  const encodedModelName = value.slice(separatorIndex + MODEL_SELECTION_SEPARATOR.length);
-  try {
-    const modelName = decodeURIComponent(encodedModelName);
-    return providerId && modelName ? { provider_id: providerId, model_name: modelName } : null;
-  } catch {
-    return null;
-  }
-}
-
-function catalogHasSelection(catalog: SelectableLlmCatalog, value: string): boolean {
-  const selection = parseModelSelection(value);
-  return Boolean(selection && catalog.providers.some(
-    (provider) => provider.id === selection.provider_id
-      && provider.models.some((model) => model.model_name === selection.model_name),
-  ));
 }
 
 function sourceLabel(source?: string | null): string {
@@ -267,28 +239,13 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
     if (!item || !modelCatalog) {
       return;
     }
-    setSelectedModel((current) => {
-      if (current && catalogHasSelection(modelCatalog, current)) {
-        return current;
-      }
-      const reportSelection = item.analysis_provider_id && item.analysis_model_name
-        ? modelSelectionValue(item.analysis_provider_id, item.analysis_model_name)
-        : '';
-      if (reportSelection && catalogHasSelection(modelCatalog, reportSelection)) {
-        return reportSelection;
-      }
-      const activeSelection = modelCatalog.active_provider_id && modelCatalog.active_model_name
-        ? modelSelectionValue(modelCatalog.active_provider_id, modelCatalog.active_model_name)
-        : '';
-      if (activeSelection && catalogHasSelection(modelCatalog, activeSelection)) {
-        return activeSelection;
-      }
-      const firstProvider = modelCatalog.providers.find((provider) => provider.models.length > 0);
-      const firstModel = firstProvider?.models[0];
-      return firstProvider && firstModel
-        ? modelSelectionValue(firstProvider.id, firstModel.model_name)
-        : '';
-    });
+    setSelectedModel((current) => resolveModelSelection(
+      modelCatalog,
+      current,
+      item.analysis_provider_id && item.analysis_model_name
+        ? { provider_id: item.analysis_provider_id, model_name: item.analysis_model_name }
+        : null,
+    ));
   }, [item, modelCatalog]);
 
   useEffect(() => {
