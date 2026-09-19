@@ -25,6 +25,7 @@ from paper_resources import (
     direct_document_candidates,
     download_public_pdf_bytes,
     extract_arxiv_id,
+    resolve_public_document,
 )
 from utils import ReaderError
 
@@ -821,6 +822,24 @@ def zotero_figure_root() -> Path:
     return root
 
 
+def paper_figure_root() -> Path:
+    configured = settings.paths.paper_content_cache_dir
+    root = Path(configured) if configured else REPO_ROOT / "data" / "paper_cache"
+    if not root.is_absolute():
+        root = REPO_ROOT / root
+    return root / "figures"
+
+
+def paper_figure_path(paper_id: str, filename: str) -> Path:
+    if Path(filename).name != filename:
+        raise ReaderError("无效的论文图表文件名")
+    directory = (paper_figure_root() / _safe_path_segment(paper_id)).resolve()
+    target = (directory / filename).resolve()
+    if target.parent != directory:
+        raise ReaderError("无效的论文图表路径")
+    return target
+
+
 def _zotero_figure_directory(user_id: str, item_key: str) -> Path:
     return (
         zotero_figure_root()
@@ -861,6 +880,67 @@ def save_zotero_analysis_asset(
         "height": asset.height,
         "media_type": asset.media_type,
         "filename": filename,
+    }
+
+
+def save_public_analysis_asset(
+    paper_id: str,
+    asset: FrameworkFigureAsset,
+    *,
+    kind: str,
+) -> dict[str, Any]:
+    digest = hashlib.sha256(asset.image_bytes).hexdigest()[:24]
+    filename = f"{kind}-{digest}.{asset.extension}"
+    target = paper_figure_path(paper_id, filename)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_bytes(asset.image_bytes)
+        temporary.replace(target)
+    for old_file in target.parent.glob(f"{kind}-*"):
+        if old_file != target and old_file.is_file():
+            old_file.unlink()
+    return {
+        "id": digest,
+        "kind": kind,
+        "label": asset.label,
+        "caption": asset.caption,
+        "source": asset.source,
+        "source_url": asset.source_url,
+        "page_number": asset.page_number,
+        "width": asset.width,
+        "height": asset.height,
+        "media_type": asset.media_type,
+        "filename": filename,
+    }
+
+
+def save_public_structured_results_table(asset: StructuredResultsTableAsset) -> dict[str, Any]:
+    table_data = {"rows": asset.rows}
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "caption": asset.caption,
+                "source_url": asset.source_url,
+                "table_data": table_data,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "id": digest,
+        "kind": RESULTS_TABLE_KIND,
+        "label": asset.label,
+        "caption": asset.caption,
+        "source": asset.source,
+        "source_url": asset.source_url,
+        "page_number": None,
+        "width": None,
+        "height": None,
+        "media_type": "application/vnd.paper-insight.table+json",
+        "table_data": table_data,
     }
 
 
@@ -1138,3 +1218,115 @@ def extract_and_save_zotero_analysis_assets(
         if isinstance(entry, dict) and entry.get("kind") not in known_kinds
     ]
     return [asset for asset in assets if asset] + extras
+
+
+def _cached_public_asset(
+    paper_id: str,
+    assets: list[dict[str, Any]],
+    kind: str,
+) -> dict[str, Any] | None:
+    for cached in assets:
+        if not isinstance(cached, dict) or cached.get("kind") != kind:
+            continue
+        if kind == RESULTS_TABLE_KIND and isinstance(cached.get("table_data"), dict):
+            if isinstance(cached["table_data"].get("rows"), list) and cached["table_data"]["rows"]:
+                return cached
+        filename = str(cached.get("filename") or "")
+        if not filename:
+            continue
+        try:
+            if paper_figure_path(paper_id, filename).is_file():
+                return cached
+        except ReaderError:
+            continue
+    return None
+
+
+def _public_document_urls(item: dict[str, Any]) -> list[str]:
+    urls = [candidate.url for candidate in direct_document_candidates(item, [])]
+    try:
+        resolved, _ = resolve_public_document(item, [])
+    except (ReaderError, requests.RequestException, ValueError) as exc:
+        logger.info("Unable to resolve public document for analysis assets: %s", exc)
+        resolved = None
+    if resolved and resolved.url:
+        urls.append(resolved.url)
+    return list(dict.fromkeys(urls))
+
+
+def _extract_public_pdf_asset(
+    urls: list[str],
+    extractor: Callable[[bytes, str], FrameworkFigureAsset | None],
+    asset_name: str,
+) -> FrameworkFigureAsset | None:
+    for url in urls:
+        try:
+            pdf_bytes = download_public_pdf_bytes(
+                url,
+                total_timeout_seconds=PDF_DOWNLOAD_TIMEOUT_SECONDS,
+            )
+            asset = extractor(pdf_bytes, url)
+        except (ReaderError, requests.RequestException, ValueError) as exc:
+            logger.info("Unable to extract public %s from %s: %s", asset_name, url, exc)
+            continue
+        if asset:
+            return asset
+    return None
+
+
+def extract_and_save_public_analysis_assets(
+    paper_id: str,
+    item: dict[str, Any],
+    existing_assets: list[dict[str, Any]] | None = None,
+    *,
+    force_refresh: bool = False,
+) -> list[dict[str, Any]]:
+    """Extract the same evidence assets used by Zotero for a public paper."""
+    assets = list(existing_assets or [])
+    cached_framework = _cached_public_asset(paper_id, assets, FRAMEWORK_FIGURE_KIND)
+    cached_results = _cached_public_asset(paper_id, assets, RESULTS_TABLE_KIND)
+    if not force_refresh and cached_framework and cached_results:
+        return assets
+
+    urls = _public_document_urls(item)
+    arxiv_id = extract_arxiv_id(*urls)
+    framework = cached_framework if not force_refresh else None
+    results_table = cached_results if not force_refresh else None
+
+    if not framework and arxiv_id:
+        try:
+            asset = extract_arxiv_framework_figure(arxiv_id)
+        except (ReaderError, requests.RequestException, ValueError) as exc:
+            logger.info("Unable to extract public arXiv framework figure %s: %s", arxiv_id, exc)
+            asset = None
+        if asset:
+            framework = save_public_analysis_asset(paper_id, asset, kind=FRAMEWORK_FIGURE_KIND)
+    if not results_table and arxiv_id:
+        try:
+            structured = extract_arxiv_results_table(arxiv_id)
+        except (ReaderError, requests.RequestException, ValueError) as exc:
+            logger.info("Unable to extract public arXiv results table %s: %s", arxiv_id, exc)
+            structured = None
+        if structured:
+            results_table = save_public_structured_results_table(structured)
+
+    if not framework:
+        asset = _extract_public_pdf_asset(
+            urls,
+            extract_framework_figure_from_pdf_bounded,
+            "framework figure",
+        )
+        if asset:
+            framework = save_public_analysis_asset(paper_id, asset, kind=FRAMEWORK_FIGURE_KIND)
+    if not results_table:
+        asset = _extract_public_pdf_asset(
+            urls,
+            extract_results_table_from_pdf_bounded,
+            "SOTA results table",
+        )
+        if asset:
+            results_table = save_public_analysis_asset(paper_id, asset, kind=RESULTS_TABLE_KIND)
+
+    known_kinds = {FRAMEWORK_FIGURE_KIND, RESULTS_TABLE_KIND}
+    extras = [entry for entry in assets if isinstance(entry, dict) and entry.get("kind") not in known_kinds]
+    return [asset for asset in (framework, results_table) if asset] + extras

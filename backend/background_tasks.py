@@ -101,6 +101,7 @@ class BackgroundAnalyzer:
                                 get_or_cache_paper_content,
                                 paper_id,
                                 paper_info["pdf"],
+                                paper_info.get("title"),
                             )
                             paper_content = truncate_content_for_llm(paper_content)
                         except ReaderError as e:

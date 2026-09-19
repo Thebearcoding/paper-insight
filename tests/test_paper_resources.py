@@ -66,6 +66,17 @@ def test_direct_document_candidates_normalizes_arxiv_and_openreview_urls():
     ]
 
 
+def test_direct_document_candidates_accepts_public_paper_pdf_field():
+    candidates = paper_resources.direct_document_candidates(
+        {"pdf": "https://arxiv.org/pdf/2503.06661", "raw": {"data": {}}},
+        [],
+    )
+
+    assert candidates == [
+        paper_resources.DocumentCandidate("https://arxiv.org/pdf/2503.06661", "arxiv")
+    ]
+
+
 def test_direct_document_candidates_converts_cvf_open_access_page_to_pdf():
     candidates = paper_resources.direct_document_candidates(
         {
@@ -144,6 +155,33 @@ def test_open_access_candidate_accepts_download_url_without_pdf_suffix():
         "https://repository.example.edu/download?id=123",
         "openalex",
     )
+
+
+def test_openalex_title_candidates_requires_exact_normalized_title(monkeypatch):
+    response = FakeResponse(
+        {
+            "results": [
+                {
+                    "title": "CLIP Behaves Like a Bag-of-Words Model Cross-modally but not Uni-modally",
+                    "best_oa_location": {"pdf_url": "https://arxiv.org/pdf/2502.03566"},
+                },
+                {
+                    "title": "A Different CLIP Paper",
+                    "best_oa_location": {"pdf_url": "https://example.org/wrong.pdf"},
+                },
+            ]
+        }
+    )
+    monkeypatch.setattr(paper_resources.requests, "get", lambda *args, **kwargs: response)
+
+    candidates = paper_resources.openalex_title_candidates(
+        {"title": "CLIP behaves like a bag-of-words model cross-modally but not uni-modally"}
+    )
+
+    assert candidates == [
+        paper_resources.DocumentCandidate("https://arxiv.org/pdf/2502.03566", "arxiv")
+    ]
+    assert response.closed is True
 
 
 def test_arxiv_html_extractor_keeps_article_text_only():

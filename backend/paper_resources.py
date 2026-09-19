@@ -247,7 +247,12 @@ def direct_document_candidates(
             if value:
                 values.append((str(value), "zotero-attachment-url"))
     raw_item = _raw_data(item)
-    for value in [item.get("url"), raw_item.get("url")]:
+    for value in [
+        item.get("pdf"),
+        item.get("url"),
+        raw_item.get("pdf"),
+        raw_item.get("url"),
+    ]:
         if value:
             values.append((str(value), "zotero-item-url"))
     for text in [item.get("doi"), raw_item.get("DOI"), raw_item.get("extra")]:
@@ -370,6 +375,10 @@ def openalex_candidates(item: dict[str, Any]) -> list[DocumentCandidate]:
         response.close()
     if not isinstance(payload, dict):
         return []
+    return _openalex_location_candidates(payload)
+
+
+def _openalex_location_candidates(payload: dict[str, Any]) -> list[DocumentCandidate]:
     locations = [payload.get("best_oa_location"), payload.get("primary_location")]
     if isinstance(payload.get("locations"), list):
         locations.extend(payload["locations"])
@@ -380,6 +389,51 @@ def openalex_candidates(item: dict[str, Any]) -> list[DocumentCandidate]:
         if candidate and candidate.url not in seen:
             seen.add(candidate.url)
             candidates.append(candidate)
+    return candidates
+
+
+def _normalized_title(value: object) -> str:
+    return re.sub(r"[^\w]+", "", str(value or "").casefold())
+
+
+def openalex_title_candidates(item: dict[str, Any]) -> list[DocumentCandidate]:
+    """Find an OA copy only when OpenAlex returns the same paper title.
+
+    A title search is deliberately the last resort: it recovers papers whose
+    venue site blocks the server, while exact normalization avoids accepting a
+    similarly named paper as the source text.
+    """
+    title = str(item.get("title") or "").strip()
+    normalized_title = _normalized_title(title)
+    if len(normalized_title) < 12:
+        return []
+    response = requests.get(
+        "https://api.openalex.org/works",
+        params={"search": title, "per-page": 5},
+        headers={"User-Agent": RESOURCE_USER_AGENT},
+        timeout=min(max(settings.zotero.request_timeout_seconds, 5), 15),
+    )
+    try:
+        if response.status_code in {403, 404, 429}:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+    finally:
+        response.close()
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return []
+    candidates: list[DocumentCandidate] = []
+    seen: set[str] = set()
+    for result in payload["results"]:
+        if not isinstance(result, dict):
+            continue
+        result_title = result.get("title") or result.get("display_name")
+        if _normalized_title(result_title) != normalized_title:
+            continue
+        for candidate in _openalex_location_candidates(result):
+            if candidate.url not in seen:
+                seen.add(candidate.url)
+                candidates.append(candidate)
     return candidates
 
 
@@ -604,6 +658,7 @@ def resolve_public_document(
         semantic_scholar_candidates,
         crossref_candidates,
         openalex_candidates,
+        openalex_title_candidates,
     )
     for provider in providers:
         try:

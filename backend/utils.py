@@ -27,6 +27,8 @@ BLOCKED_READER_MARKERS = (
     "target url returned error 403: forbidden",
     "this page maybe requiring captcha",
     "enable javascript and cookies to continue",
+    "verifying your browser",
+    "challenge verification required",
 )
 
 HEADERS = {
@@ -184,11 +186,41 @@ def cache_paper_content(paper_id: str, pdf_url: str, content: str, source: str =
         logger.warning("写入论文正文缓存失败 %s: %s", content_path, exc)
 
 
-def get_or_cache_paper_content(paper_id: str, pdf_url: str) -> str:
+def get_or_cache_paper_content(
+    paper_id: str,
+    pdf_url: str,
+    title: str | None = None,
+) -> str:
     normalized_pdf_url = normalize_paper_pdf_url(paper_id, pdf_url) or pdf_url
     cached_content = get_cached_paper_content(paper_id, normalized_pdf_url)
     if cached_content is not None:
         return cached_content
+
+    if title and title.strip():
+        # The resource resolver knows source-specific routes (for example,
+        # arXiv HTML) and can find an exact-title OA mirror when a publisher
+        # starts challenging this server.  Import lazily because that module
+        # also uses the low-level cache and PDF helpers in this module.
+        from paper_resources import resolve_public_document
+
+        resolved, errors = resolve_public_document(
+            {"id": paper_id, "title": title, "pdf": normalized_pdf_url},
+            [],
+        )
+        if resolved is not None:
+            cache_paper_content(
+                paper_id,
+                normalized_pdf_url,
+                resolved.content,
+                source=resolved.source,
+            )
+            return resolved.content
+        if errors:
+            logger.info(
+                "论文资源解析器未找到可读全文，回退旧下载器: paper_id=%s errors=%s",
+                paper_id,
+                "; ".join(errors),
+            )
 
     source = "jina_reader"
     try:

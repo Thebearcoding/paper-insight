@@ -294,3 +294,37 @@ def test_force_refresh_skips_existing_zotero_framework_figure(tmp_path, monkeypa
 
     assert cached == item["analysis_figures"][0]
     assert refreshed is None
+
+
+def test_public_analysis_assets_use_public_cache_without_zotero_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_figures, "paper_figure_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        paper_figures,
+        "_public_document_urls",
+        lambda _item: ["https://arxiv.org/pdf/2503.06661"],
+    )
+    framework = paper_figures.FrameworkFigureAsset(
+        label="Figure 1",
+        caption="Framework overview.",
+        source="arxiv-html",
+        source_url="https://arxiv.org/html/2503.06661",
+        image_bytes=b"framework-image",
+    )
+    table = paper_figures.StructuredResultsTableAsset(
+        label="Table 1",
+        caption="Main results.",
+        source="arxiv-html",
+        source_url="https://arxiv.org/html/2503.06661",
+        rows=[[{"text": "Method", "header": True}, {"text": "Acc", "header": True}]],
+    )
+    monkeypatch.setattr(paper_figures, "extract_arxiv_framework_figure", lambda _id: framework)
+    monkeypatch.setattr(paper_figures, "extract_arxiv_results_table", lambda _id: table)
+
+    assets = paper_figures.extract_and_save_public_analysis_assets(
+        "arxiv:2503.06661",
+        {"pdf": "https://arxiv.org/pdf/2503.06661"},
+    )
+
+    assert [asset["kind"] for asset in assets] == ["framework", "results_table"]
+    assert paper_figures.paper_figure_path("arxiv:2503.06661", assets[0]["filename"]).is_file()
+    assert assets[1]["table_data"]["rows"][0][0]["text"] == "Method"
