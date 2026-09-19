@@ -17,7 +17,8 @@ container's Python side:
   compose restarts the container instead of leaving an API that answers 502
   while Celery still reports healthy.
 
-Four upstream quirks make the plain CLI unusable here:
+Four upstream quirks make the plain CLI unusable here, plus one that breaks the
+HTTP contract outright:
 
 * `pdf2zh --celery worker --loglevel=info --concurrency=1` never starts: the
   pdf2zh CLI uses a strict argparse parser that rejects Celery's own flags
@@ -43,6 +44,15 @@ Four upstream quirks make the plain CLI unusable here:
   runs then sit at 283 MB with a 353 MB high-water mark instead of 491 MB. The
   cost is a few extra `malloc`/`free` pairs per page, which is noise next to the
   inference itself.
+* `pdf2zh/backend.py` builds Celery from
+  `ConfigManager.get("CELERY_RESULT", "redis://127.0.0.1:6379/0")`, but that
+  default is unreachable: the image already ships a `config.json` containing
+  `"CELERY_RESULT": null`, and `ConfigManager.get` returns any stored value
+  verbatim instead of falling back. Celery then runs with `result_backend = None`,
+  i.e. `DisabledBackend`, and `/v1/translate/<id>` dies with
+  `AttributeError: 'DisabledBackend' object has no attribute '_get_task_meta_for'`
+  → Flask 500 on every progress poll. This file sets the backend to the broker URL
+  before forking, so the Flask child reads the same one the worker writes to.
 
 Two Celery knobs in `_worker_argv` are deliberate rather than defaults:
 
@@ -80,6 +90,17 @@ from pdf2zh.backend import celery_app
 from pdf2zh.doclayout import ModelInstance, OnnxModel
 
 SERVER_SCRIPT = "/opt/pdf2zh-patch/server.py"
+
+# pdf2zh 的 config.json 把 CELERY_RESULT 固化成 null（构建期就被写进镜像层），而
+# ConfigManager.get 只要 key 已存在就直接返回它、不再回退到上游传入的默认值，于是
+# celery_app.conf.result_backend 是 None，Celery 退化成 DisabledBackend：
+# `/v1/translate/<id>` 读 result.state 会抛 AttributeError → Flask 500，前端永远拿
+# 不到进度，也就永远拿不到产物。broker 和结果本来就在同一个容器内 Redis 上，这里
+# 显式补上。必须在 fork 之前设好——Flask 子进程要用同一个后端读进度。
+if not celery_app.conf.result_backend:
+    celery_app.conf.result_backend = (
+        celery_app.conf.broker_url or "redis://127.0.0.1:6379/0"
+    )
 
 
 class LeanOnnxModel(OnnxModel):

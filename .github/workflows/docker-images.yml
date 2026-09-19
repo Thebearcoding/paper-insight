@@ -121,6 +121,13 @@ jobs:
               # 那条路径根本不碰它——所以这里按 worker 的方式载一次模型，再用一页
               # 全黑图推一次推理。仍写成单行，避免 YAML 块缩进被带进 python 源码。
               docker exec pdf2zh-smoke python -c "import importlib.util as u, numpy as np; s = u.spec_from_file_location('patch_worker', '/opt/pdf2zh-patch/worker.py'); m = u.module_from_spec(s); s.loader.exec_module(m); from pdf2zh.doclayout import ModelInstance as M; print('doclayout stride', M.value.stride, 'boxes', len(M.value.predict(np.zeros((512, 512, 3), dtype=np.uint8))))"
+              # Celery 的结果后端：镜像里的 config.json 固化了 "CELERY_RESULT": null，
+              # 而 ConfigManager.get 会原样返回已存在的值、不回退默认值，于是 worker
+              # 起来后是 DisabledBackend，`/v1/translate/<id>` 每次轮询都抛
+              # AttributeError → 500。健康检查看不出来（它只看 Redis 应答和端口），
+              # 所以在这里断言 worker.py 补上了后端。写成单行，避免 YAML 块缩进被
+              # 带进 python 源码。
+              docker exec pdf2zh-smoke python -c "import importlib.util as u; s = u.spec_from_file_location('patch_worker_backend', '/opt/pdf2zh-patch/worker.py'); m = u.module_from_spec(s); s.loader.exec_module(m); from pdf2zh.backend import celery_app; print('result_backend ->', celery_app.conf.result_backend); assert celery_app.conf.result_backend, 'Celery would run with DisabledBackend'"
               # 启动拓扑：entrypoint 只起 worker.py 一个 pdf2zh 进程，Flask 是它
               # fork 出来的子进程（这样才能共享那份 import 堆，也就是这次改动的
               # 全部意义）。健康检查只看端口和进程存活，看不出是不是又退化成两个
