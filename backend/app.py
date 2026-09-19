@@ -3397,6 +3397,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                     get_or_cache_paper_content,
                     paper_id,
                     paper_info["pdf"],
+                    paper_info.get("title"),
                 )
                 paper_content = truncate_content_for_llm(paper_content)
             except ReaderError as e:
@@ -3571,6 +3572,7 @@ async def chat_with_paper(
                     get_or_cache_paper_content,
                     paper_id,
                     paper_info["pdf"],
+                    paper_info.get("title"),
                 )
                 paper_content = truncate_content_for_llm(paper_content)
             except ReaderError as e:
@@ -3703,6 +3705,7 @@ async def regenerate_chat(
                     get_or_cache_paper_content,
                     paper_id,
                     paper_info["pdf"],
+                    paper_info.get("title"),
                 )
                 paper_content = truncate_content_for_llm(paper_content)
             except ReaderError as e:

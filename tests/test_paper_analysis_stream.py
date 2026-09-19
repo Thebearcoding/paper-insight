@@ -88,7 +88,7 @@ def configure_paper_analysis_dependencies(monkeypatch, fake_llm, updates):
     monkeypatch.setattr(
         app_module,
         "get_or_cache_paper_content",
-        lambda paper_id, pdf_url: "full paper text",
+        lambda paper_id, pdf_url, title=None: "full paper text",
     )
     monkeypatch.setattr(
         app_module,

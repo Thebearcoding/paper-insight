@@ -3,9 +3,12 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import utils
+import paper_resources
 
 
 def test_cache_round_trip_uses_paper_id_and_metadata(tmp_path, monkeypatch):
@@ -186,6 +189,56 @@ def test_reader_rejects_blocked_page(monkeypatch):
         assert "访问验证" in str(exc)
     else:
         raise AssertionError("reader should reject blocked verification pages")
+
+
+def test_reader_rejects_browser_challenge_page(monkeypatch):
+    class FakeResponse:
+        text = "Title: Verifying your browser | OpenReview\n\nChallenge verification required"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(utils.requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(utils.ReaderError, match="访问验证"):
+        utils.reader("https://openreview.net/pdf?id=paper-123")
+
+
+def test_get_or_cache_uses_resolver_with_title_for_blocked_venue(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        utils,
+        "settings",
+        SimpleNamespace(paths=SimpleNamespace(paper_content_cache_dir=str(tmp_path))),
+    )
+    calls = []
+    resolved = paper_resources.ResolvedDocument(
+        content="full text from the arXiv mirror",
+        url="https://arxiv.org/pdf/2502.03566",
+        source="arxiv",
+    )
+    monkeypatch.setattr(
+        paper_resources,
+        "resolve_public_document",
+        lambda item, children: (calls.append((item, children)) or (resolved, [])),
+    )
+
+    content = utils.get_or_cache_paper_content(
+        "DldwXCCP25",
+        "https://openreview.net/pdf?id=DldwXCCP25",
+        "CLIP Behaves like a Bag-of-Words Model Cross-modally but not Uni-modally",
+    )
+
+    assert content == resolved.content
+    assert calls == [
+        (
+            {
+                "id": "DldwXCCP25",
+                "title": "CLIP Behaves like a Bag-of-Words Model Cross-modally but not Uni-modally",
+                "pdf": "https://openreview.net/pdf?id=DldwXCCP25",
+            },
+            [],
+        )
+    ]
 
 
 def test_get_openreview_info_returns_none_on_404(monkeypatch):
