@@ -8,7 +8,9 @@
 # ~100MB 的下载层缓存失效。
 #
 # agentrouter 等网关会做客户端 UA 检测（默认 openai SDK / httpx UA 直接 401），
-# 通过 sitecustomize.py 给 openai SDK 注入自定义 transport 改写 UA。
+# 通过 sitecustomize.py 给 openai SDK 的 httpx 客户端挂一个 request 事件钩子改写 UA。
+# 不能用自定义 transport= 实现：httpx 只在 transport is None 时才认 HTTP(S)_PROXY，
+# 而本容器只能经 OUTBOUND_PROXY_URL 出网，那样写会让每次翻译都 Network is unreachable。
 FROM python:3.12-slim
 
 # 三个可选镜像参数，默认留空 = 走国际源。默认值必须保持"什么都不做"，因为
@@ -99,8 +101,9 @@ print('baked font:', dst)" \
 from babeldoc.assets.assets import get_doclayout_onnx_model_path as path; \
 print('baked model:', path())"
 
-# UA patch：openai SDK 3.x 在 transport 层强制覆盖 User-Agent，
-# 必须用自定义 transport 才能改写（已实测验证）
+# UA patch：openai SDK 3.x 在组装请求时自己写 User-Agent，default_headers 覆盖不掉，
+# 所以改用 httpx 的 request 事件钩子在发送前改写（已实测验证；钩子同时保留了
+# httpx 对 HTTP(S)_PROXY 的支持，见 sitecustomize.py 的说明）
 COPY docker/pdf2zh/sitecustomize.py \
      docker/pdf2zh/worker.py \
      docker/pdf2zh/server.py \

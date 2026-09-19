@@ -1,17 +1,25 @@
 """Container-wide runtime patches for pdf2zh: openai User-Agent and NumPy 2.
 
 Two unrelated upstream quirks are fixed here, both of which have to be applied
-inside every Python process of this image (Flask server and Celery worker, plus
-the worker's forked children):
+inside every Python process of this image (the forked Flask server and the
+Celery worker, plus the worker's task children):
 
 1. Some OpenAI-compatible gateways (e.g. agentrouter.org) answer requests whose
    User-Agent looks like the plain openai SDK / httpx default with
    401 "unauthorized client detected". The openai SDK forces its own User-Agent
-   at the transport layer, so `default_headers` cannot override it — we wrap
-   `openai.OpenAI` / `openai.AsyncOpenAI` with a custom httpx transport that
-   rewrites the User-Agent (and `x-app`) header on every request.
-   pdf2zh's translators build `openai.OpenAI(...)` (sync) while babeldoc builds
-   the sync client too, so both classes are patched.
+   while building the request, so `default_headers` cannot override it — we
+   instead register an httpx request event hook that rewrites the User-Agent
+   (and `x-app`) on every outgoing request. pdf2zh's translators build
+   `openai.OpenAI(...)` (sync) while babeldoc builds the sync client too, so
+   both classes are patched.
+
+   The hook has to stay the *only* thing we customise on the client: passing an
+   explicit `transport=` here would disable httpx's environment-proxy support
+   (`Client.__init__` only honours HTTP(S)_PROXY while `transport is None`), and
+   this container reaches the gateway solely through `OUTBOUND_PROXY_URL` —
+   without it every translation dies with `ConnectError: Network is unreachable`.
+   Event hooks run after the SDK has assembled the headers and before the
+   transport sends them, so the spoof still wins.
 
 2. pdf2zh 1.9.4 calls the binary mode of `np.fromstring` (removed in NumPy 2) in
    `translate_patch`, and babeldoc's `docvision` does the same, so every page
@@ -43,23 +51,24 @@ def _rewrite_headers(request: httpx.Request) -> None:
         request.headers[name] = value
 
 
-class _UAOverrideTransport(httpx.HTTPTransport):
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        _rewrite_headers(request)
-        return super().handle_request(request)
-
-
-class _UAOverrideAsyncTransport(httpx.AsyncHTTPTransport):
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        _rewrite_headers(request)
-        return await super().handle_async_request(request)
-
-
 def _timeout_from(kwargs: dict) -> httpx.Timeout | float:
     configured = kwargs.get("timeout")
     if isinstance(configured, (int, float)):
         return float(configured)
     return _DEFAULT_TIMEOUT
+
+
+def _patched_client_kwargs(kwargs: dict) -> dict:
+    """kwargs for the httpx client we hand to the openai SDK.
+
+    No `transport=`: that alone would turn off HTTP(S)_PROXY support for this
+    container, which only reaches the gateway through the outbound proxy.
+    """
+
+    return {
+        "event_hooks": {"request": [_rewrite_headers]},
+        "timeout": _timeout_from(kwargs),
+    }
 
 
 _original_sync_init = openai.OpenAI.__init__
@@ -68,19 +77,13 @@ _original_async_init = openai.AsyncOpenAI.__init__
 
 def _patched_sync_init(self, *args, **kwargs):
     if kwargs.get("http_client") is None:
-        kwargs["http_client"] = httpx.Client(
-            transport=_UAOverrideTransport(),
-            timeout=_timeout_from(kwargs),
-        )
+        kwargs["http_client"] = httpx.Client(**_patched_client_kwargs(kwargs))
     _original_sync_init(self, *args, **kwargs)
 
 
 def _patched_async_init(self, *args, **kwargs):
     if kwargs.get("http_client") is None:
-        kwargs["http_client"] = httpx.AsyncClient(
-            transport=_UAOverrideAsyncTransport(),
-            timeout=_timeout_from(kwargs),
-        )
+        kwargs["http_client"] = httpx.AsyncClient(**_patched_client_kwargs(kwargs))
     _original_async_init(self, *args, **kwargs)
 
 

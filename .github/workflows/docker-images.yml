@@ -108,6 +108,14 @@ jobs:
               # frombuffer 实现，这里实跑确认 patch 生效）。写成单行，避免
               # YAML 块缩进被带进 python 源码。
               docker exec pdf2zh-smoke python -c "import numpy as np; import pdf2zh; from pdf2zh.high_level import translate_patch; print('numpy', np.__version__); print('fromstring shim ->', np.fromstring(b'\x01\x02\x03\x04', np.uint8).tolist())"
+              # UA 伪装和出网能力必须同时成立：openai SDK 在组装请求时自己写
+              # User-Agent，所以 sitecustomize 用 httpx 的 request 事件钩子改写；
+              # 而钩子只能挂在客户端上，一旦顺手写了 transport=，httpx 就不再见
+              # HTTP(S)_PROXY（它只在 transport is None 时读代理环境变量），容器
+              # 里每次翻译都会 Network is unreachable。CI 容器本身没有代理，所以
+              # 这里显式设一个再看 httpx 有没有为它建出 mounts。写成单行，避免
+              # YAML 块缩进被带进 python 源码。
+              docker exec pdf2zh-smoke python -c "import os, httpx, openai, sitecustomize; c = openai.OpenAI(api_key='k', base_url='https://gw.invalid/v1'); r = httpx.Request('POST', 'https://gw.invalid/v1/chat/completions', headers={'User-Agent': 'OpenAI/Python 3.14.1'}); [h(r) for h in c._client._event_hooks['request']]; print('spoofed UA ->', r.headers['User-Agent'], '| x-app ->', r.headers.get('x-app')); assert r.headers['User-Agent'] == sitecustomize._SPOOFED_USER_AGENT and r.headers.get('x-app') == 'cli', dict(r.headers); os.environ['HTTPS_PROXY'] = 'http://127.0.0.1:18098'; c2 = openai.OpenAI(api_key='k', base_url='https://gw.invalid/v1'); print('proxy mounts ->', len(c2._client._mounts)); assert c2._client._mounts, 'env proxy support lost'"
               # worker.py 里那份精简的模型加载也要真的跑起来：元数据键名写错只会
               # 在第一次翻译（而不是容器启动）时才炸——惰性加载生效后，容器启动
               # 那条路径根本不碰它——所以这里按 worker 的方式载一次模型，再用一页
