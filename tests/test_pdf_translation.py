@@ -547,3 +547,92 @@ def test_task_semaphore_respects_config(monkeypatch):
     finally:
         pdf_translation._semaphore = None
     # monkeypatch 自动还原 settings，无需手动断言
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+
+
+class FakeCursor:
+    def __init__(self, row=None):
+        self.row = row
+        self.statements: list[str] = []
+
+    def execute(self, sql, params=None):
+        self.statements.append(" ".join(str(sql).split()))
+
+    def fetchone(self):
+        return self.row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
+class FakeConnection:
+    """Mirrors production psycopg: closing without a commit discards the write."""
+
+    def __init__(self, cursor):
+        self.cursor_instance = cursor
+        self.commits = 0
+
+    def cursor(self):
+        return self.cursor_instance
+
+    def commit(self):
+        self.commits += 1
+
+
+def _patch_translation_connection(monkeypatch, cursor):
+    import contextlib
+
+    import database
+
+    connection = FakeConnection(cursor)
+
+    @contextlib.contextmanager
+    def fake_get_connection():
+        yield connection
+
+    monkeypatch.setattr(database, "DATABASE_URL", "postgresql://test/paper_online")
+    monkeypatch.setattr(database, "_get_connection", fake_get_connection)
+    return connection
+
+
+def test_translation_writes_commit(monkeypatch):
+    """The translation DAL reused `_get_connection`, which only closes — and closing
+    without a commit rolls the write back, so every row silently vanished and the
+    frontend polled "idle" forever. Each write has to commit explicitly."""
+
+    import database
+
+    row = {
+        "id": 1,
+        "paper_id": "pmlr-v267-li25u",
+        "pdf_url": "https://example.com/p.pdf",
+        "lang_out": "zh",
+        "service": "openai:deepseek-v4-flash",
+        "status": "pending",
+        "progress": 0,
+        "remote_task_id": None,
+        "error": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+    cursor = FakeCursor(row)
+    connection = _patch_translation_connection(monkeypatch, cursor)
+
+    created = database.create_paper_translation(
+        "pmlr-v267-li25u", "https://example.com/p.pdf", "zh", "openai:deepseek-v4-flash"
+    )
+    assert created["id"] == "1"
+    assert connection.commits == 1, "create_paper_translation did not commit"
+
+    database.update_paper_translation("1", status="success", progress=100)
+    assert connection.commits == 2, "update_paper_translation did not commit"
+
+    database.reset_stale_paper_translations()
+    assert connection.commits == 3, "reset_stale_paper_translations did not commit"

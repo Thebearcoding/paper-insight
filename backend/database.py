@@ -5783,7 +5783,9 @@ def create_paper_translation(
                     """,
                     (paper_id, pdf_url, lang_out, service),
                 )
-                return _normalize_translation_row(cur.fetchone())
+                row = _normalize_translation_row(cur.fetchone())
+            conn.commit()
+        return row
 
     return _run_with_retry(operation, f"create_paper_translation:{paper_id}")
 
@@ -5821,6 +5823,7 @@ def update_paper_translation(
                     f"UPDATE paper_translations SET {', '.join(assignments)} WHERE id = %s",
                     tuple(params),
                 )
+            conn.commit()
 
     _run_with_retry(operation, f"update_paper_translation:{translation_id}")
 
@@ -5840,5 +5843,6 @@ def reset_stale_paper_translations() -> None:
                     WHERE status IN ('pending', 'progress')
                     """,
                 )
+            conn.commit()
 
     _run_with_retry(operation, "reset_stale_paper_translations")
