@@ -24,6 +24,7 @@ done
 
 umask 077
 db_password="$(openssl rand -hex 24)"
+typesense_key="$(openssl rand -hex 32)"
 admin_password="$(openssl rand -hex 16)"
 llm_key="$(openssl rand -hex 32)"
 zotero_key="$(openssl rand -hex 32)"
@@ -37,11 +38,13 @@ cat >"$env_tmp" <<EOF
 POSTGRES_DB=paper_online
 POSTGRES_USER=paper
 POSTGRES_PASSWORD=$db_password
+TYPESENSE_API_KEY=$typesense_key
+TYPESENSE_SEMANTIC_SEARCH_ENABLED=true
 POSTGRES_PORT=5433
 PORT=8000
 PAPER_DOMAIN=$domain
 OUTBOUND_PROXY_URL=
-OUTBOUND_NO_PROXY=localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api
+OUTBOUND_NO_PROXY=localhost,127.0.0.1,::1,postgres,typesense,app,caddy,sub2api,pdf2zh
 DOCKERHUB_PREFIX=docker.1ms.run/library/
 POSTGRES_IMAGE=docker.1ms.run/library/postgres:16-alpine
 CADDY_IMAGE=docker.1ms.run/library/caddy:2-alpine

@@ -18,9 +18,11 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
 import httpx
 
 from config import settings
@@ -49,6 +51,17 @@ TRANSLATION_KINDS = frozenset({"mono", "dual"})
 
 class TranslationError(Exception):
     """Raised when the pdf2zh service fails or misbehaves."""
+
+
+class TranslationDownloadError(TranslationError):
+    """An upstream download failure with a status for pre-response error mapping."""
+
+    def __init__(
+        self, message: str, *, status_code: int = 502, upstream_status_code: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.upstream_status_code = upstream_status_code
 
 
 @dataclass(frozen=True)
@@ -156,7 +169,9 @@ def _map_remote_task_state(body: dict[str, Any]) -> dict[str, Any]:
         info = body.get("info") or {}
         total = int(info.get("total") or 0)
         current = int(info.get("n") or 0)
-        progress = int(current * 100 / total) if total > 0 else 0
+        # Upstream counts processed pages before all translated PDFs are ready.
+        # Reserve 100% for SUCCESS so an unfinished/failed job cannot look done.
+        progress = min(99, max(0, int(current * 100 / total))) if total > 0 else 0
         return {"state": "progress", "progress": progress}
     if state == "SUCCESS":
         return {"state": "success", "progress": 100}
@@ -171,24 +186,64 @@ async def stream_translation_result(
     task_id: str,
     kind: str,
 ) -> AsyncIterator[bytes]:
-    """Yield the mono (Chinese-only) or dual (bilingual) PDF straight to the caller.
+    """Relay a PDF with bounded buffering; prime before sending HTTP 200.
 
-    The bytes are relayed from pdf2zh as they arrive and are never written to
-    this server's disk.
+    The first yield validates both the upstream response and the PDF signature.
+    The caller owns this generator and must close it on downstream disconnect.
+    No translated PDF is stored on disk or buffered in full.
     """
 
     if kind not in TRANSLATION_KINDS:
         raise TranslationError(f"无效的翻译产物类型: {kind}")
-    async with httpx.AsyncClient() as client:
-        async with client.stream(
+    resources = AsyncExitStack()
+    try:
+        client = await resources.enter_async_context(httpx.AsyncClient())
+        response = await resources.enter_async_context(client.stream(
             "GET",
             f"{cfg.base_url}/v1/translate/{task_id}/{kind}",
             timeout=_DOWNLOAD_TIMEOUT_SECONDS,
-        ) as response:
-            if response.status_code != 200:
-                raise TranslationError(f"下载翻译结果失败 (HTTP {response.status_code})")
-            async for chunk in response.aiter_bytes():
+        ))
+        if response.status_code != 200:
+            status = response.status_code
+            public_status = 410 if status in {404, 410} else (
+                503 if status >= 500 or status == 429 else 502
+            )
+            raise TranslationDownloadError(
+                f"下载翻译结果失败 (HTTP {status})",
+                status_code=public_status,
+                upstream_status_code=status,
+            )
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type not in {"", "application/pdf", "application/octet-stream"}:
+            raise TranslationDownloadError("pdf2zh 返回的翻译结果不是 PDF")
+
+        # Fixed-size chunks bound memory even if the upstream sends large frames.
+        # Accommodate signatures split across transport chunks without losing bytes.
+        prefix = b""
+        validated = False
+        async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+            if not validated:
+                prefix += chunk
+                if len(prefix) < 5:
+                    continue
+                if not prefix.startswith(b"%PDF-"):
+                    raise TranslationDownloadError("pdf2zh 返回的翻译结果不是 PDF")
+                validated = True
+                yield prefix
+                prefix = b""
+            else:
                 yield chunk
+        if not validated:
+            raise TranslationDownloadError("pdf2zh 返回的翻译结果为空或不是 PDF")
+    except httpx.HTTPError as exc:
+        raise TranslationDownloadError(
+            "pdf2zh 服务暂时不可用，请稍后重试", status_code=503
+        ) from exc
+    finally:
+        # Starlette cancels streaming tasks when the browser disconnects. Cleanup
+        # must survive that cancellation, including disconnects during a read.
+        with anyio.CancelScope(shield=True):
+            await resources.aclose()
 
 
 async def revoke_remote_task(
@@ -227,10 +282,25 @@ def remote_result_state(
     except httpx.HTTPError as exc:
         logger.warning("Probing pdf2zh task %s failed: %s", task_id, exc)
         return None
+    if response.status_code in {404, 410}:
+        return "gone"
     if response.status_code != 200:
         return None
-    state = _map_remote_task_state(response.json() or {})["state"]
-    return "success" if state == "success" else "gone"
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    state = body.get("state")
+    if state == "SUCCESS":
+        return "success"
+    # This probe is only used for previously successful rows. Celery represents
+    # forgotten tasks as PENDING. Unknown/malformed or still-running responses
+    # are not evidence of expiry and must never destroy a cached success row.
+    if state in ("PENDING", "FAILURE", "REVOKED"):
+        return "gone"
+    return None
 
 
 def _json_dumps(payload: dict[str, Any]) -> str:
@@ -289,6 +359,9 @@ async def _run_translation(paper_id: str, pdf_url: str) -> None:
 
             async with httpx.AsyncClient() as client:
                 remote_task_id = await submit_translation(client, cfg, pdf_bytes)
+                # The remote worker owns the source now; do not retain a large
+                # source PDF throughout the potentially 30-minute polling loop.
+                del pdf_bytes
                 await asyncio.to_thread(
                     update_paper_translation,
                     translation_id,

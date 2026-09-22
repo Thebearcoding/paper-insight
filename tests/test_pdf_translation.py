@@ -54,8 +54,9 @@ class FakeStreamResponse:
     def __init__(self, chunks=(b"%PDF-mono",), status_code=200):
         self.status_code = status_code
         self._chunks = chunks
+        self.headers = {"content-type": "application/pdf"}
 
-    async def aiter_bytes(self):
+    async def aiter_bytes(self, chunk_size=None):
         for chunk in self._chunks:
             yield chunk
 

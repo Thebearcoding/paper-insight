@@ -1,9 +1,13 @@
 import logging
 import re
+import sys
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+from threading import RLock
 from typing import Callable, Iterator, TypeVar
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -19,10 +23,14 @@ DATABASE_URL = settings.database.url
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
-# Cache for conference/search results
-_conference_cache = {}
-_cache_timestamp = {}
-_CACHE_TTL_SECONDS = 86400
+# Bounded process-local cache: expiry alone does not release retained results.
+_conference_cache: OrderedDict[str, tuple[float, int, list, int]] = OrderedDict()
+_cache_lock = RLock()
+_cache_bytes = 0
+_CACHE_TTL_SECONDS = 300
+_CACHE_MAX_ENTRIES = 128
+_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_CACHE_MAX_ENTRY_BYTES = 4 * 1024 * 1024
 _READ_FILTER_SEARCH_LIMIT = 1_000_000
 CODE_AVAILABILITY_STATUSES = {"open_source", "unavailable", "not_found", "unknown"}
 CODE_FILTERS = CODE_AVAILABILITY_STATUSES | {"all", "not_open_source"}
@@ -372,6 +380,7 @@ def save_paper(paper_info: dict, llm_response: str = None):
             conn.commit()
 
     _run_with_retry(operation, f"save_paper:{paper_info['id']}")
+    _clear_search_cache()
     _sync_typesense_papers([paper_info["id"]])
 
 
@@ -514,8 +523,7 @@ def upsert_arxiv_paper(
 
             conn.commit()
 
-        _conference_cache.clear()
-        _cache_timestamp.clear()
+        _clear_search_cache()
         paper["authors"] = authors
         paper["keywords"] = keywords
         paper["pdf"] = normalize_paper_pdf_url(paper_id, paper.get("pdf")) or paper.get("pdf")
@@ -694,8 +702,7 @@ def upsert_hf_daily_papers(daily_date: date, entries: list[dict]) -> list[str]:
 
             conn.commit()
 
-        _conference_cache.clear()
-        _cache_timestamp.clear()
+        _clear_search_cache()
         return analyzable_paper_ids
 
     result = _run_with_retry(operation, f"upsert_hf_daily_papers:{daily_date.isoformat()}")
@@ -721,6 +728,7 @@ def update_llm_response(paper_id: str, response: str):
             conn.commit()
 
     _run_with_retry(operation, f"update_llm_response:{paper_id}")
+    _clear_search_cache()
 
 
 def update_paper_analysis(
@@ -762,6 +770,7 @@ def update_paper_analysis(
             conn.commit()
 
     _run_with_retry(operation, f"update_paper_analysis:{paper_id}")
+    _clear_search_cache()
 
 
 def update_paper_code_availability(
@@ -798,8 +807,7 @@ def update_paper_code_availability(
                 )
             conn.commit()
 
-        _conference_cache.clear()
-        _cache_timestamp.clear()
+        _clear_search_cache()
 
     _run_with_retry(operation, f"update_paper_code_availability:{paper_id}")
     _sync_typesense_papers([paper_id])
@@ -923,8 +931,7 @@ def update_paper_generated_keywords(
                     )
             conn.commit()
 
-        _conference_cache.clear()
-        _cache_timestamp.clear()
+        _clear_search_cache()
 
     _run_with_retry(operation, f"update_paper_generated_keywords:{paper_id}")
     _sync_typesense_papers([paper_id])
@@ -3947,18 +3954,70 @@ def _build_cache_key(
     )
 
 
+def _clear_search_cache() -> None:
+    global _cache_bytes
+    with _cache_lock:
+        _conference_cache.clear()
+        _cache_bytes = 0
+
+
+def _cache_value_size(value: object, seen: set[int] | None = None) -> int:
+    """Account for retained Python objects, including report strings."""
+    if seen is None:
+        seen = set()
+    if id(value) in seen:
+        return 0
+    seen.add(id(value))
+    size = sys.getsizeof(value)
+    if isinstance(value, dict):
+        size += sum(_cache_value_size(k, seen) + _cache_value_size(v, seen) for k, v in value.items())
+    elif isinstance(value, (list, tuple)):
+        size += sum(_cache_value_size(item, seen) for item in value)
+    return size
+
+
+def _evict_cached_result(cache_key: str) -> None:
+    global _cache_bytes
+    entry = _conference_cache.pop(cache_key)
+    _cache_bytes -= entry[1]
+
+
+def _prune_search_cache(now: float) -> None:
+    # Called under the lock on reads AND writes; an expired key need not be
+    # requested again to be released. The scan is bounded by MAX_ENTRIES.
+    for key, entry in list(_conference_cache.items()):
+        if now >= entry[0]:
+            _evict_cached_result(key)
+
+
 def _get_cached_result(cache_key: str):
-    current_time = time.time()
-    if cache_key in _conference_cache and (
-        current_time - _cache_timestamp.get(cache_key, 0)
-    ) < _CACHE_TTL_SECONDS:
-        return _conference_cache[cache_key]
-    return None
+    with _cache_lock:
+        _prune_search_cache(time.monotonic())
+        entry = _conference_cache.get(cache_key)
+        if entry is None:
+            return None
+        _conference_cache.move_to_end(cache_key)
+        # Callers may attach request-specific fields; never share mutable rows.
+        return deepcopy(entry[2]), entry[3]
 
 
 def _set_cached_result(cache_key: str, papers: list, total: int):
-    _conference_cache[cache_key] = (papers, total)
-    _cache_timestamp[cache_key] = time.time()
+    global _cache_bytes
+    size = _cache_value_size((cache_key, papers, total))
+    with _cache_lock:
+        now = time.monotonic()
+        _prune_search_cache(now)
+        if cache_key in _conference_cache:
+            _evict_cached_result(cache_key)
+        if size > min(_CACHE_MAX_ENTRY_BYTES, _CACHE_MAX_BYTES):
+            return
+        while _conference_cache and (
+            len(_conference_cache) >= _CACHE_MAX_ENTRIES
+            or _cache_bytes + size > _CACHE_MAX_BYTES
+        ):
+            _evict_cached_result(next(iter(_conference_cache)))
+        _conference_cache[cache_key] = (now + _CACHE_TTL_SECONDS, size, deepcopy(papers), total)
+        _cache_bytes += size
 
 
 def _load_keywords_for_papers(papers: list[dict]) -> tuple[list[dict], bool]:
@@ -4104,6 +4163,54 @@ def _paper_read_filter_clause(
         )
 
     raise ValueError(f"unsupported read_status: {read_status}")
+
+
+def _paper_scope_conditions(venue_prefix: str | None, code_filter: str) -> tuple[str, list[object]]:
+    conditions = []
+    params: list[object] = []
+    if venue_prefix:
+        conditions.append("p.venue ILIKE %s")
+        params.append(f"{venue_prefix}%")
+    code_clause = _paper_code_filter_clause(code_filter)
+    if code_clause:
+        conditions.append(code_clause)
+    return " AND ".join(conditions) or "TRUE", params
+
+
+def _search_paper_ids_sql(
+    venue_prefix: str | None,
+    search: str | None,
+    search_title: bool,
+    search_abstract: bool,
+    search_keywords: bool,
+    code_filter: str,
+) -> tuple[str, list[object]]:
+    """Match the FTS RPC's scope without ranking or loading full reports.
+
+    Read counters need only IDs. Keep the three indexed candidate branches
+    from migration 018, but omit its sorting, report projection and page cap.
+    """
+    scope, scope_params = _paper_scope_conditions(venue_prefix, code_filter)
+    if not search or not search.strip():
+        return f"SELECT p.id FROM papers p WHERE {scope}", scope_params
+    queries = []
+    params: list[object] = []
+    for enabled, field, source in (
+        (search_title, "p.title", "papers p"),
+        (search_abstract, "p.abstract", "papers p"),
+        (search_keywords, "k.keyword", "keywords k JOIN papers p ON p.id = k.paper_id"),
+    ):
+        if enabled:
+            # A keywords-only search has no UNION to deduplicate multiple
+            # matching keywords belonging to the same paper.
+            projection = "DISTINCT p.id" if field == "k.keyword" else "p.id"
+            queries.append(
+                f"SELECT {projection} FROM {source} WHERE {scope} "
+                f"AND to_tsvector('english', COALESCE({field}, '')) "
+                "@@ websearch_to_tsquery('english', %s)"
+            )
+            params.extend([*scope_params, search.strip()])
+    return " UNION ".join(queries) or "SELECT p.id FROM papers p WHERE FALSE", params
 
 
 def _count_read_states_from_scoped_sql(
@@ -4438,6 +4545,38 @@ def _search_papers_with_read_filter(
     def operation() -> tuple[list[dict], int]:
         with _get_connection() as conn:
             with conn.cursor() as cur:
+                if not search or not search.strip():
+                    # Browsing needs no FTS ranking. Filter before LIMIT rather
+                    # than materializing up to a million rows with full reports.
+                    scope, scope_params = _paper_scope_conditions(venue_prefix, code_filter)
+                    where = f"({scope}) AND ({read_clause})"
+                    params = [*scope_params, *read_params]
+                    cur.execute(
+                        f"""
+                        SELECT p.id, p.title, p.abstract, p.venue, p.primary_area,
+                               p.llm_response, p.created_at, p.code_status, p.code_url,
+                               p.code_evidence, p.code_checked_at
+                        FROM papers p
+                        WHERE {where}
+                        ORDER BY CASE
+                            WHEN p.venue ILIKE '%%oral%%' THEN 1
+                            WHEN p.venue ILIKE '%%spotlight%%' THEN 2
+                            WHEN p.venue ILIKE '%%poster%%' THEN 3
+                            ELSE 4 END,
+                            COALESCE(p.sort_order, 2147483647),
+                            COALESCE(LOWER(p.title), ''), p.id
+                        LIMIT %s OFFSET %s
+                        """,
+                        [*params, limit, offset],
+                    )
+                    papers = cur.fetchall()
+                    cur.execute(f"SELECT COUNT(*) AS total FROM papers p WHERE {where}", params)
+                    total = int((cur.fetchone() or {}).get("total") or 0)
+                    keywords = _fetch_keywords_for_papers(conn, [paper["id"] for paper in papers])
+                    for paper in papers:
+                        paper["keywords"] = keywords.get(paper["id"], [])
+                    return papers, total
+
                 scoped_params = [
                     search,
                     venue_prefix,
@@ -4475,17 +4614,17 @@ def _search_papers_with_read_filter(
                 papers = cur.fetchall()
                 papers, _ = _load_keywords_for_papers(papers)
 
+                scoped_sql, count_params = _search_paper_ids_sql(
+                    venue_prefix, search, search_title, search_abstract, search_keywords, code_filter
+                )
                 cur.execute(
                     f"""
-                    WITH scoped_papers AS (
-                        SELECT *
-                        FROM search_papers_optimized(%s, %s, %s, %s, %s, %s, %s, %s)
-                    )
+                    WITH scoped_papers AS ({scoped_sql})
                     SELECT COUNT(*) AS total
                     FROM scoped_papers p
                     WHERE {read_clause}
                     """,
-                    [*scoped_params, *read_params],
+                    [*count_params, *read_params],
                 )
                 total = int((cur.fetchone() or {}).get("total") or 0)
 
@@ -4513,24 +4652,10 @@ def count_search_paper_read_states(
     def operation() -> dict[str, int]:
         with _get_connection() as conn:
             with conn.cursor() as cur:
-                return _count_read_states_from_scoped_sql(
-                    cur,
-                    """
-                    SELECT id
-                    FROM search_papers_optimized(%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    [
-                        search,
-                        venue_prefix,
-                        search_title,
-                        search_abstract,
-                        search_keywords,
-                        code_filter,
-                        _READ_FILTER_SEARCH_LIMIT,
-                        0,
-                    ],
-                    user_id,
+                scoped_sql, scoped_params = _search_paper_ids_sql(
+                    venue_prefix, search, search_title, search_abstract, search_keywords, code_filter
                 )
+                return _count_read_states_from_scoped_sql(cur, scoped_sql, scoped_params, user_id)
 
     return _run_with_retry(operation, f"count_search_paper_read_states:{user_id}:{venue_prefix}:{search}")
 

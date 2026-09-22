@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -202,6 +203,7 @@ from paper_figures import (
 from pdf_translation import (
     EXPIRED_ERROR_MESSAGE,
     TRANSLATION_KINDS,
+    TranslationDownloadError,
     get_translation_status,
     mark_translation_expired,
     remote_result_state,
@@ -3274,7 +3276,10 @@ def _translation_download_headers(paper_id: str, kind: str) -> dict[str, str]:
 
     safe_paper_id = _safe_paper_id(paper_id)
     is_mono = kind == "mono"
-    ascii_name = f"{safe_paper_id}-{'zh' if is_mono else 'bilingual'}.pdf"
+    # str.isalnum() accepts Unicode: keep it for filename*, but the quoted
+    # fallback must be ASCII to remain valid for all browsers and ASGI headers.
+    ascii_paper_id = "".join(c if c.isascii() else "_" for c in safe_paper_id) or "paper"
+    ascii_name = f"{ascii_paper_id}-{'zh' if is_mono else 'bilingual'}.pdf"
     utf8_name = f"{safe_paper_id}-{'中文' if is_mono else '中英双语'}.pdf"
     return {
         "Content-Disposition": (
@@ -3355,6 +3360,30 @@ async def get_paper_translation_status(paper_id: str):
     return _translation_public_payload(row, paper_id)
 
 
+class _TranslationDownloadResponse(StreamingResponse):
+    """Own a preflighted upstream iterator for the entire ASGI response lifetime."""
+
+    def __init__(self, upstream, first_chunk: bytes, *, headers: dict[str, str]):
+        self._upstream = upstream
+
+        async def body():
+            yield first_chunk
+            async for chunk in upstream:
+                yield chunk
+
+        super().__init__(body(), media_type="application/pdf", headers=headers)
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # BackgroundTask is not sufficient: send failures and cancellation
+            # can skip background callbacks, even before the first body chunk.
+            with anyio.CancelScope(shield=True):
+                await self.body_iterator.aclose()
+                await self._upstream.aclose()
+
+
 @app.get("/paper/{paper_id}/translation/{kind}")
 async def download_paper_translation(paper_id: str, kind: str):
     if not translation_enabled():
@@ -3362,9 +3391,12 @@ async def download_paper_translation(paper_id: str, kind: str):
     if kind not in TRANSLATION_KINDS:
         raise HTTPException(status_code=404, detail="未知的翻译产物类型")
     try:
-        row = await asyncio.to_thread(get_translation_status, paper_id)
+        # Probe once below, so a newly expired row returns 410, not a generic 404.
+        row = await asyncio.to_thread(get_translation_status, paper_id, verify_remote=False)
     except DatabaseError as e:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from e
+    if row and row.get("status") == "expired":
+        raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE)
     if not row or row.get("status") != "success":
         raise HTTPException(status_code=404, detail="翻译结果尚未就绪")
 
@@ -3372,8 +3404,6 @@ async def download_paper_translation(paper_id: str, kind: str):
     if not task_id:
         raise HTTPException(status_code=404, detail="翻译任务信息缺失，请重新翻译")
 
-    # The PDFs live in the pdf2zh service, not on our disk, so verify it still
-    # holds the result before starting a response body.
     cfg = translation_service_config()
     state = await asyncio.to_thread(remote_result_state, cfg, task_id)
     if state == "gone":
@@ -3382,11 +3412,28 @@ async def download_paper_translation(paper_id: str, kind: str):
     if state != "success":
         raise HTTPException(status_code=503, detail="pdf2zh 服务暂时不可用，请稍后重试")
 
-    return StreamingResponse(
-        stream_translation_result(cfg, task_id, kind),
-        media_type="application/pdf",
-        headers=_translation_download_headers(paper_id, kind),
-    )
+    headers = _translation_download_headers(paper_id, kind)
+    stream = stream_translation_result(cfg, task_id, kind)
+    try:
+        # StreamingResponse sends headers before iterating. Open the real result
+        # and validate its prefix now, while JSON errors can still be returned.
+        first_chunk = await anext(stream)
+    except TranslationDownloadError as exc:
+        status_code = exc.status_code
+        if exc.upstream_status_code == 400:
+            # pdf2zh uses 400 for unfinished/missing results. Re-probe to handle
+            # expiry between status and download without expiring on every 400.
+            state = await asyncio.to_thread(remote_result_state, cfg, task_id)
+            if state == "gone":
+                status_code = 410
+            elif state is None:
+                status_code = 503
+        if status_code == 410:
+            await asyncio.to_thread(mark_translation_expired, str(row["id"]))
+            raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE) from exc
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    return _TranslationDownloadResponse(stream, first_chunk, headers=headers)
 
 
 @app.get("/paper/{paper_id}")
@@ -3885,12 +3932,13 @@ async def get_conference_papers_endpoint(
 
     validated_read_status = validate_read_status(read_status)
     validated_code_filter = validate_code_filter(code_status)
-    user = get_current_user_optional(request)
+    user = await asyncio.to_thread(get_current_user_optional, request)
     require_user_for_read_filter(validated_read_status, user)
     user_id = user["id"] if user else None
     offset = (page - 1) * limit
     try:
-        papers, total = get_conference_papers(
+        papers, total = await asyncio.to_thread(
+            get_conference_papers,
             venue_name, offset, limit,
             search if search else None,
             search_title, search_abstract, search_keywords,
@@ -3899,7 +3947,8 @@ async def get_conference_papers_endpoint(
             code_filter=validated_code_filter,
         )
         read_counts = (
-            count_search_paper_read_states(
+            await asyncio.to_thread(
+                count_search_paper_read_states,
                 venue_name,
                 search if search else None,
                 search_title,
@@ -3944,14 +3993,15 @@ async def get_hf_daily_papers_endpoint(
 ):
     validated_read_status = validate_read_status(read_status)
     validated_code_filter = validate_code_filter(code_status)
-    user = get_current_user_optional(request)
+    user = await asyncio.to_thread(get_current_user_optional, request)
     require_user_for_read_filter(validated_read_status, user)
     user_id = user["id"] if user else None
     safe_page = max(page, 1)
     safe_limit = min(max(limit, 1), 100)
     offset = (safe_page - 1) * safe_limit
     try:
-        papers, total = get_hf_daily_papers(
+        papers, total = await asyncio.to_thread(
+            get_hf_daily_papers,
             offset,
             safe_limit,
             search if search else None,
@@ -3963,7 +4013,8 @@ async def get_hf_daily_papers_endpoint(
             code_filter=validated_code_filter,
         )
         read_counts = (
-            count_hf_daily_paper_read_states(
+            await asyncio.to_thread(
+                count_hf_daily_paper_read_states,
                 search if search else None,
                 search_title,
                 search_abstract,
@@ -4000,14 +4051,15 @@ async def get_arxiv_papers_endpoint(
 ):
     validated_read_status = validate_read_status(read_status)
     validated_code_filter = validate_code_filter(code_status)
-    user = get_current_user_optional(request)
+    user = await asyncio.to_thread(get_current_user_optional, request)
     require_user_for_read_filter(validated_read_status, user)
     user_id = user["id"] if user else None
     safe_page = max(page, 1)
     safe_limit = min(max(limit, 1), 24)
     offset = (safe_page - 1) * safe_limit
     try:
-        papers, total = get_arxiv_papers(
+        papers, total = await asyncio.to_thread(
+            get_arxiv_papers,
             offset,
             safe_limit,
             analyzed_only=True,
@@ -4020,7 +4072,8 @@ async def get_arxiv_papers_endpoint(
             code_filter=validated_code_filter,
         )
         read_counts = (
-            count_arxiv_paper_read_states(
+            await asyncio.to_thread(
+                count_arxiv_paper_read_states,
                 True,
                 search if search else None,
                 search_title,
@@ -4060,12 +4113,13 @@ async def search_all_papers_endpoint(
     limit = min(max(limit, 1), 100)
     validated_read_status = validate_read_status(read_status)
     validated_code_filter = validate_code_filter(code_status)
-    user = get_current_user_optional(request)
+    user = await asyncio.to_thread(get_current_user_optional, request)
     require_user_for_read_filter(validated_read_status, user)
     user_id = user["id"] if user else None
     offset = (page - 1) * limit
     try:
-        papers, total = search_all_papers(
+        papers, total = await asyncio.to_thread(
+            search_all_papers,
             offset, limit,
             search if search else None,
             search_title, search_abstract, search_keywords,
@@ -4074,7 +4128,8 @@ async def search_all_papers_endpoint(
             code_filter=validated_code_filter,
         )
         read_counts = (
-            count_search_paper_read_states(
+            await asyncio.to_thread(
+                count_search_paper_read_states,
                 None,
                 search if search else None,
                 search_title,

@@ -28,8 +28,21 @@ RELEASE_SCRIPT = REPO_ROOT / "deploy" / "personal" / "deploy-release.sh"
 # 生产（个人 profile）实际使用的 Compose 组合：base + personal overlay。
 # 与 deploy/personal/deploy-release.sh 里的 -f 参数保持一致。
 BUILD_COMMAND_PATTERN = re.compile(
-    r'compose_for\s+"\$release_dir"\s+build(?P<services>[^\n]*)'
+    r'compose_for\s+"\$release_dir"\s+(?:--parallel\s+1\s+)?build(?P<services>[^\n]*)'
 )
+
+
+def _posix_shell() -> str:
+    sh = shutil.which("sh")
+    if sh is None and os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            candidate = Path(git).resolve().parents[1] / "bin" / "sh.exe"
+            if candidate.is_file():
+                sh = str(candidate)
+    if sh is None:
+        pytest.skip("需要 POSIX sh 来实跑 shell 函数")
+    return sh
 
 
 def _load_services(path: Path) -> dict:
@@ -98,7 +111,7 @@ def test_installed_entrypoint_delegates_to_the_release_script():
     assert re.search(r"^\s*status\)", release_script, re.MULTILINE)
 
     assert "docker compose" not in entrypoint
-    assert 'compose_for "$release_dir" build' in release_script
+    assert BUILD_COMMAND_PATTERN.search(release_script)
     # 解包上传归档是入口点的职责（release 脚本只处理已落盘的 release）
     assert "tar -xzf - -C" in entrypoint
     assert "tar -xzf - -C" not in release_script
@@ -184,16 +197,102 @@ def test_only_caddy_publishes_public_ports():
 
 
 def test_every_personal_service_has_a_memory_limit():
-    """超配是靠上限兜住的，所以每个服务都必须有上限。
+    """每个服务都有上限，但上限之和超出物理内存仍可能触发 global OOM。
 
-    2GB 机器上真正危险的不是稳态占用，而是某一个服务失控：mem_limit 缺失的服务
-    可以一路涨到把整机拖进 global OOM，而 global OOM 杀的是随机进程（实测那次
-    杀的是 pdf2zh 的 python，尽管它自己远没到限额）。typesense 在 base compose
-    里原本就没有上限，这个断言防止它再被漏掉。
+    此检查只防止单个容器无限增长，不能替代包含宿主机与构建进程的总预算。
     """
     services = _personal_deployment_services()
     missing = sorted(name for name, service in services.items() if "mem_limit" not in service)
     assert not missing, f"{missing} 没有 mem_limit，失控时会把整机拖进 global OOM"
+
+
+def test_personal_postgres_avoids_extra_parallel_workers():
+    command = _personal_deployment_services()["postgres"]["command"]
+    assert command[0] == "postgres"
+    assert command[1::2] == ["-c"] * len(command[2::2])
+    settings = dict(value.split("=", 1) for value in command[2::2])
+    assert settings["max_parallel_workers_per_gather"] == "0"
+    assert settings["max_parallel_maintenance_workers"] == "0"
+    assert settings["jit"] == "off"
+    assert settings.get("autovacuum", "on") == "on"
+    assert settings["shared_buffers"] == "64MB"
+    assert settings["work_mem"] == "2MB"
+    assert settings["maintenance_work_mem"] == "32MB"
+    assert settings["max_connections"] == "30"
+
+
+def test_personal_optimizations_preserve_limits_and_features():
+    services = _personal_deployment_services()
+    limits = {name: service["mem_limit"] for name, service in services.items()}
+    assert limits == {
+        "postgres": "384m", "typesense": "512m", "app": "320m",
+        "pdf2zh": "768m", "caddy": "80m",
+    }
+    assert sum(int(value[:-1]) for value in limits.values()) == 2064
+    # 本辅助函数的浅合并足够检查限制；环境变量按 Compose 的 mapping 规则单独合并。
+    base = _load_services(COMPOSE_BASE)
+    overlay = _load_services(COMPOSE_PERSONAL)
+    for name in ("typesense", "pdf2zh"):
+        assert not services[name].get("profiles"), f"{name} 不应变为默认停用的服务"
+    app_env = {**base["app"]["environment"], **overlay["app"].get("environment", {})}
+    assert app_env["TYPESENSE_ENABLED"] == "true"
+    assert app_env["TYPESENSE_SEMANTIC_SEARCH_ENABLED"] == (
+        "${TYPESENSE_SEMANTIC_SEARCH_ENABLED:-true}"
+    )
+    pdf_env = {**base["pdf2zh"]["environment"], **overlay["pdf2zh"]["environment"]}
+    assert pdf_env["PDF2ZH_CELERY_CONCURRENCY"] == "${PDF2ZH_CELERY_CONCURRENCY:-1}"
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        assert pdf_env[name] == "1"
+
+
+def test_personal_env_sources_supply_all_required_compose_variables():
+    compose = COMPOSE_BASE.read_text(encoding="utf-8") + COMPOSE_PERSONAL.read_text(encoding="utf-8")
+    required = set(re.findall(r"\$\{([A-Z_]+):\?", compose))
+    bootstrap = (REPO_ROOT / "deploy/personal/bootstrap-server.sh").read_text(encoding="utf-8")
+    template = re.search(r'cat >"\$env_tmp" <<EOF\n(.*?)\nEOF', bootstrap, re.DOTALL)
+    assert template
+    example = (REPO_ROOT / ".env.personal.example").read_text(encoding="utf-8")
+    for source in (template.group(1), example):
+        values = dict(re.findall(r"^([A-Z_]+)=(.*)$", source, re.MULTILINE))
+        assert required <= values.keys()
+        assert all(values[key] for key in required)
+        assert "pdf2zh" in values["OUTBOUND_NO_PROXY"].split(",")
+        assert values["TYPESENSE_SEMANTIC_SEARCH_ENABLED"] == "true"
+    assert 'typesense_key="$(openssl rand -hex 32)"' in bootstrap
+    assert "TYPESENSE_API_KEY=$typesense_key" in template.group(1)
+
+
+def test_release_builds_all_services_serially(tmp_path):
+    """运行真实 Compose 包装函数与构建命令，验证选项实际传给 Docker。"""
+    script = RELEASE_SCRIPT.read_text(encoding="utf-8")
+    wrapper = re.search(r"^compose_for\(\) \{\n.*?\n\}\n", script, re.MULTILINE | re.DOTALL)
+    assert wrapper
+    build_line = re.search(
+        r'^\s*(COMPOSE_BAKE=false compose_for "\$release_dir" --parallel 1 build)\s*$', script, re.MULTILINE,
+    )
+    assert build_line, "2GB 主机应串行构建所有服务，且不能禁用 Docker 层缓存"
+    runner = tmp_path / "build.sh"
+    runner.write_text(
+        'set -eu\ndeploy_root="/test deployment"\ncompose_project=paper-insight\n'
+        'release_dir="/test deployment/releases/new"\n'
+        'docker() { printf "%s\\n" "$COMPOSE_BAKE" "$@"; }\n'
+        + wrapper.group(0) + "\n" + build_line.group(1) + "\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([_posix_shell(), str(runner)], check=True, capture_output=True, text=True)
+    assert result.stdout.splitlines() == [
+        "false", "compose", "--env-file", "/test deployment/.env",
+        "--project-name", "paper-insight",
+        "-f", "/test deployment/releases/new/docker-compose.yml",
+        "-f", "/test deployment/releases/new/docker-compose.personal.yml",
+        "--parallel", "1", "build",
+    ]
+
+
+def test_personal_shell_scripts_have_valid_syntax():
+    sh = _posix_shell()
+    for name in ("deploy-release.sh", "deploy-entrypoint.sh", "bootstrap-server.sh"):
+        subprocess.run([sh, "-n", str(REPO_ROOT / "deploy/personal" / name)], check=True)
 
 
 def test_release_script_prunes_stale_release_images_but_keeps_rollback_target(tmp_path):
@@ -205,9 +304,7 @@ def test_release_script_prunes_stale_release_images_but_keeps_rollback_target(tm
     还在本地），所以当前版和上一版必须留下。keep 列表写错很难从静态字符串看出来，
     这里用一个假的 docker 把函数真正跑一遍。
     """
-    sh = shutil.which("sh")
-    if sh is None:
-        pytest.skip("需要 POSIX sh 来实跑 shell 函数")
+    sh = _posix_shell()
 
     script = RELEASE_SCRIPT.read_text(encoding="utf-8")
     match = re.search(
@@ -241,7 +338,7 @@ def test_release_script_prunes_stale_release_images_but_keeps_rollback_target(tm
     )
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    env["DOCKER_RMI_LOG"] = str(rmi_log)
+    env["DOCKER_RMI_LOG"] = rmi_log.as_posix()
     subprocess.run([sh, str(runner)], check=True, env=env)
 
     removed = sorted(rmi_log.read_text(encoding="utf-8").split())

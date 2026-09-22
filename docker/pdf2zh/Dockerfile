@@ -105,6 +105,7 @@ print('baked model:', path())"
 # 所以改用 httpx 的 request 事件钩子在发送前改写（已实测验证；钩子同时保留了
 # httpx 对 HTTP(S)_PROXY 的支持，见 sitecustomize.py 的说明）
 COPY docker/pdf2zh/sitecustomize.py \
+     docker/pdf2zh/cache_maintenance.py \
      docker/pdf2zh/worker.py \
      docker/pdf2zh/server.py \
      /opt/pdf2zh-patch/

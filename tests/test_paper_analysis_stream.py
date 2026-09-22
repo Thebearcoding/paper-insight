@@ -90,6 +90,7 @@ def configure_paper_analysis_dependencies(monkeypatch, fake_llm, updates):
         "get_or_cache_paper_content",
         lambda paper_id, pdf_url, title=None: "full paper text",
     )
+    monkeypatch.setattr(app_module, "update_llm_response", lambda *_args: None)
     monkeypatch.setattr(app_module, "extract_and_save_public_analysis_assets", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         app_module,
@@ -173,7 +174,7 @@ async def test_cached_analysis_still_streams_when_normalization_write_fails(monk
     def write_failure(*_args):
         raise RuntimeError('database write unavailable')
 
-    monkeypatch.setattr(app_module, 'update_paper_analysis', write_failure)
+    monkeypatch.setattr(app_module, 'update_llm_response', write_failure)
     response = await app_module.get_paper_analysis('cached-write-failure')
     events = [event async for event in response.body_iterator]
 

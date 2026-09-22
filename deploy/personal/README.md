@@ -7,7 +7,7 @@ PostgreSQL settings, service memory limits, and Caddy-managed HTTPS.
 docker compose -f docker-compose.yml -f docker-compose.personal.yml up -d --build
 ```
 
-Set `PAPER_DOMAIN` and the database variables in `.env`, and create
+Set `PAPER_DOMAIN`, `TYPESENSE_API_KEY`, and the database variables in `.env`, and create
 `config.yaml` from `config.server.yaml.example`. The application stays bound to
 localhost while Caddy publishes ports 80 and 443.
 
@@ -34,6 +34,18 @@ The `Deploy production` CI job runs only for pushes to `master` in the
 pass. It uploads the exact tested commit over SSH, builds it in an isolated
 release directory, preserves `/opt/paper-insight/.env` and `config.yaml`, and
 switches the Compose project after the build succeeds.
+
+Release builds use `docker compose --parallel 1 ... build` to submit service builds
+serially instead of building app and pdf2zh concurrently beside the live services.
+All build-only services are still included, and existing Docker layer caches are
+retained. The build command sets `COMPOSE_BAKE=false` so Compose's service-level
+parallelism setting is used rather than delegating the build to Bake.
+Calling `build` does not itself imply a full rebuild: unchanged pdf2zh
+inputs can reuse their layers. This is not a BuildKit memory cap or a guarantee
+that stages within one image build run serially. CI currently validates images
+but does not publish production images, so removing host builds would leave new
+releases without their required images. Moving builds off-host requires a separate
+image publishing and deployment change.
 
 Install `deploy-entrypoint.sh` as `/usr/local/sbin/deploy-paper-insight` and add a
 dedicated SSH public key with a forced command. Do not reuse a personal SSH key:
@@ -118,16 +130,93 @@ All three default to empty, which reproduces the international behaviour exactly
 Without them an apt + pip build of the pdf2zh image runs at tens of KB/s from a
 mainland server and overruns the deploy job's 60-minute timeout.
 
+## Application request and cache bounds
+
+Conference, HF Daily, arXiv, and search list endpoints run synchronous authentication,
+listing, and read-count queries sequentially in worker threads. Slow database or
+search requests therefore do not block the async event loop; this does not increase
+the number of application processes or run multiple queries per request at once.
+
+The process-local PostgreSQL search-result cache uses least-recently-used eviction,
+with at most 128 entries, a 16 MiB estimated Python-object budget, and a 5-minute TTL.
+Entries estimated above 4 MiB are returned normally but not cached. Reads and writes
+remove expired entries, access is locked across worker threads, and callers receive
+independent copies. These are cache bounds, not a cap on total process memory.
+Paper and analysis updates invalidate cached results.
+
+Read-state counters query matching paper IDs without loading reports or sorting by
+search relevance. Browsing without search terms applies read/unread filters before
+pagination. Keyword search ranking is unchanged. These changes require no schema
+migration; query latency and PostgreSQL plans still need verification on real data.
+
+## PDF translation and download validation
+
+Translation success requires a remote `SUCCESS` state and downloadable PDFs; the
+upstream page counter can reach its total before document generation finishes.
+The application caps in-progress values at 99 and reserves 100 for success.
+
+The pdf2zh translation-memory SQLite databases are initialized before the worker
+starts. During operation, `cache_maintenance.py` deletes cached rows every 30
+minutes without removing the database, schema, WAL, or SHM files. A busy database
+is skipped until the next cleanup. SQLite reuses freed pages; this is neither a
+secure erasure mechanism nor a hard disk-size cap. Unlinking the live database
+and recreating only an empty file breaks later tasks because upstream creates
+`_translationcache` only at import time.
+
+Downloads validate the upstream status, content type, and PDF signature before
+sending HTTP 200. Missing/expired results return 410, temporary service failures
+return 503, and invalid PDF responses return 502. After streaming starts, a
+connection failure aborts the transfer; it cannot be converted into a JSON error.
+The response retains bounded buffering, attachment filenames, and `no-store`.
+
+On 2026-09-22, an isolated container using the production image with the patched
+startup and cleanup scripts completed two real one-page English-to-Chinese
+translations, before and after explicitly running periodic cleanup (15.70 and
+15.43 seconds). The locally patched application download routes retrieved both
+outputs each time: a one-page Chinese PDF and a two-page bilingual PDF, with
+Chinese text and the original English page verified by a PDF parser. Only the
+paper metadata was substituted; translation, model calls, remote status, and PDF
+streams were real. This did not deploy the fixes to the live website or validate
+its browser workflow, production database writes, long papers, or concurrent
+users. A 512 MiB test limit triggered an OOM kill; 768 MiB completed these small
+tests. Keep representative peak-load testing separate from this smoke test.
+
 ## Host memory tuning
 
-The overlay is deliberately oversubscribed: the declared `mem_limit` values sum to
-roughly 3.1 GB on a machine with 1.87 GB. Those limits bound how far a single
-service can run away; they are not reservations, so the box only works while the
-services do not peak together. Actual steady state is much smaller — measured on
-2026-09-18, all five containers together held about 410 MB of anonymous memory.
+The five declared `mem_limit` values sum to **2064 MiB (2.016 GiB)**:
+PostgreSQL 384, Typesense 512, app 320, pdf2zh 768, and Caddy 80 MiB.
+This already exceeds 2 GiB, before the operating system, Docker daemon, and build
+processes are counted. Limits are not reservations, but neither do they prevent
+host-wide out-of-memory kills when several containers grow together. Swap can
+help absorb temporary pressure; it is not additional RAM or a latency guarantee.
 
-Two settings keep that arrangement from turning into OOM kills. Neither lives in
-the repository, so reapply them when rebuilding a server.
+The limits remain unchanged because reducing them without representative peak
+measurements risks killing working features. This tuning does not disable semantic
+search or remove the pdf2zh service; the application's translation feature still
+uses its existing `pdf_translation.enabled` configuration. In particular, the historical Typesense measurements in the
+overlay were taken **without embeddings** and do not validate the 512 MiB limit
+for semantic indexing. Validate cold startup, index rebuilds with embeddings,
+translation, and deployment overlap before declaring this configuration safe for
+a particular corpus. Apart from the bounded translation smoke test described
+above, no new peak-memory or latency measurements validate these configuration
+changes.
+
+PostgreSQL keeps its existing 64 MiB shared buffers, 2 MiB work memory, 32 MiB
+maintenance work memory, and 30-connection ceiling. Query and maintenance parallel
+workers are disabled under its 0.5-CPU quota, and JIT compilation is disabled to
+avoid compilation overhead for interactive queries. Autovacuum remains enabled.
+`work_mem` is per operation, not per connection; hash operations and concurrent
+maintenance can still multiply memory use. `effective_cache_size` is a planner
+estimate, not an allocation. Measure complex queries before further tuning.
+
+The pdf2zh overlay limits OpenMP, OpenBLAS, MKL, and NumExpr to one thread per
+library pool under its 0.75-CPU quota. These settings do not control ONNX Runtime's
+own thread pools or change LLM request concurrency. The existing lazy layout model
+loading and worker recycling remain in place; no service is disabled when idle.
+
+The following host-side settings can reduce memory pressure but cannot guarantee
+freedom from OOM kills. Neither lives in the repository; review the actual host
+configuration when rebuilding a server.
 
 **Swap and swappiness.** Alibaba Cloud Linux ships `vm.swappiness = 0` (set in both
 `/etc/sysctl.conf` and `/etc/sysctl.d/50-aliyun.conf`). That makes the kernel run

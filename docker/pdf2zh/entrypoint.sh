@@ -24,9 +24,10 @@ redis-server --daemonize yes \
     --maxmemory-policy volatile-lru
 
 # pdf2zh/babeldoc 会把每句原文+译文写进 ~/.cache/{pdf2zh,babeldoc}/cache.v1.db
-# （sqlite 翻译记忆）。那是服务器磁盘，会随翻译篇数一直涨，而用户明确要求产物
-# 只留在用户本机，所以启动时清一次、之后每 30 分钟清一次：它只是省 token 的
-# 缓存，删掉不影响正确性。顺带清掉 /tmp 里 6 小时以上的残留工作目录。
+# （sqlite 翻译记忆）。启动前可以删库；运行中每 30 分钟只 DELETE 缓存行，
+# 保留表结构、文件和 WAL。上游只在 import 时建表，删掉活跃库后仅预建空库会
+# 导致后续任务不断报 no such table: _translationcache，永远无法生成 PDF。
+# 清空后的页由 SQLite 复用。顺带清掉 /tmp 里 6 小时以上的残留工作目录。
 purge_translation_memory() {
     rm -f /root/.cache/pdf2zh/cache.v1.db* \
           /root/.cache/babeldoc/cache.v1.db* 2>/dev/null || true
@@ -46,7 +47,7 @@ purge_translation_memory() {
 # 那只是退化成改动前的抢锁行为，多数情况下能自愈。
 #
 # `-E` 只用到 sqlite3，却正好跳过 PYTHONPATH 上的 sitecustomize.py——它会先
-# import httpx + numpy + openai，让这个每 30 分钟跑一次的轻量进程白吃 84MB 和
+# import httpx + numpy + openai，让这个轻量初始化进程白吃 84MB 和
 # 约 3 秒 CPU（见 healthcheck.sh 里同样的处理）。
 create_translation_memory_db() {
     python -E - <<'PY' || echo "警告：翻译记忆库预建失败，worker 将自行建库" >&2
@@ -77,11 +78,9 @@ create_translation_memory_db
 (
     while true; do
         sleep 1800
-        purge_translation_memory
-        # 定期清理同样会把库删掉，而 worker 和 Flask 子进程之后都是懒连接
-        # （celery 每个任务、Flask 每个请求都可能新建连接），所以每轮清理后都要
-        # 重新预建，否则会重演同一个竞争。
-        create_translation_memory_db
+        # 只清行，不删活跃库：已 import 的 worker 不会重新执行上游建表逻辑。
+        # 碰到写锁则跳过本轮，避免清理任务阻塞翻译。
+        python -E /opt/pdf2zh-patch/cache_maintenance.py || true
         find /tmp -mindepth 1 -maxdepth 1 -mmin +360 -exec rm -rf {} + 2>/dev/null || true
     done
 ) &

@@ -1,3 +1,6 @@
+# 2 核小内存主机配置。上限合计 2064 MiB，尚未计入系统、Docker 和构建进程。
+# mem_limit 不是预留，也不能保证多个服务同时增长时不会发生整机 OOM。
+# 保留功能和现有限制；调整前验证真实语义索引、翻译与部署峰值。详见部署 README。
 services:
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:16}
@@ -13,26 +16,23 @@ services:
       - maintenance_work_mem=32MB
       - -c
       - max_connections=30
+      # 在 0.5 CPU 配额下避免额外并行 worker 和逐操作 work_mem 叠加。
+      # autovacuum 保持启用；effective_cache_size 只是规划器估计，不是内存分配。
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - max_parallel_maintenance_workers=0
+      - -c
+      - jit=off
     mem_limit: 384m
     cpus: 0.50
     pids_limit: 100
 
   typesense:
-    # base compose 里 typesense 没有任何上限，是唯一能无限吃内存的服务，所以上限
-    # 必须给，而且要贴着它的真实需求给。2026-09-18 实测（48446 篇索引、语义检索
-    # 关闭、schema 里没有 embedding 字段）：常驻 151MB、cgroup 用量 187MB（含索引
-    # 文件的 page cache），512m 是 3 倍余量。
-    #
-    # 别再往 512m 以下压：同一个探针里 typesense 的 peak 正好等于 512.0MB（上限），
-    # memory.failcnt=48722——也就是说重建索引那一轮它一直在撞上限、一边回收一边
-    # 前进，最后靠内核换出 168MB 才活下来。压到下面只会把它换成反复被杀重启。
-    #
-    # 上限的另一个意义是"失控被限制在它自己"：它在 1.8GB 机器上把整机拖进 global
-    # OOM 时，被杀的是随机进程（实测那次杀的是 pdf2zh 的 python）。
+    # 历史 48446 篇索引的测量未启用 embedding，不能用于证明语义索引够用。
+    # 重建会同时保留旧、新索引；继续压低上限可能造成索引加载或重建失败。
     mem_limit: 512m
-    # typesense 的 cgroup 默认 swappiness=0：宁可被 memcg 杀掉也不换页。加载索引时
-    # 的 page cache + jemalloc 保留内存会顶到上限，给 10 让它能换出去做完加载，
-    # 代价只是那次冷查询慢一点。
+    # 仅在宿主机有 swap 且内核支持此设置时有效，不能替代物理内存预算。
     mem_swappiness: 10
 
   app:
@@ -40,67 +40,32 @@ services:
       args:
         DOCKERHUB_PREFIX: ${DOCKERHUB_PREFIX:-}
         PYPI_FILES_MIRROR: ${PYPI_FILES_MIRROR:-}
-    # 实测稳态 127MB（RssAnon）、历史峰值 231MB（深度分析/SSE 时），320m 是峰值的
-    # 1.4 倍。上限的意义是把"app 失控"限制在它自己，而不是让它留一份用不到的余量：
-    # 2026-09-18 之前这里是 768m，是所有上限之和比机器内存高出 44% 的主要原因。
-    # 索引重建是分批的（iter_postgres_documents 每批 100 篇），不会整份读进内存。
-    # 如果 app 真的被 OOM 杀掉，日志里会有记录，那时再往上调。
+    # 索引重建按批读取；搜索缓存另有容量限制，但 PDF/图表处理仍需峰值验证。
     mem_limit: 320m
     cpus: 1.25
     pids_limit: 256
 
   pdf2zh:
     build:
-      # 国内服务器构建这个镜像时打开：apt + pip 走镜像源，doclayout 模型走
-      # hf-mirror。留空则与改动前完全一致（GitHub Actions 的构建校验就是留空跑的）。
+      # 可选国内镜像源；留空沿用国际源，不改变依赖版本。
       args:
         DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
         PYPI_INDEX_URL: ${PYPI_INDEX_URL:-}
         HF_ENDPOINT: ${HF_ENDPOINT:-}
-    # 2GB 小机器：doclayout ONNX 模型不常驻（第一次翻译时才在 task 子进程里建），
-    # PyMuPDF 逐页渲染图像另占一部分，Redis 结果缓存由 PDF2ZH_REDIS_MAXMEMORY 限制。
-    # 翻译被 OOM 时优先调小 PDF2ZH_REDIS_MAXMEMORY。
-    #
-    # 2026-09-18 这轮把它的常驻和峰值都压下来了，三处改动都在 docker/pdf2zh 里：
-    #   * worker.py 建 ONNX session 时关掉 CPU arena。arena 只增不减，实测 4 次
-    #     imgsz=1024 推理就从 271MB 涨到 483MB 且不再回落；关掉后同样 4 次停在
-    #     283MB。代价是单次 doclayout 推理慢约 15%（8.6s → 9.9s，这台 2 vCPU 上
-    #     的实测量），而翻译的墙钟时间由逐页 LLM 调用主导，不是这一步。
-    #   * glibc 的 MALLOC_TRIM_THRESHOLD_/MALLOC_MMAP_THRESHOLD_（在 base compose
-    #     的 environment 里，不在 Dockerfile，原因见那边的注释）。上游加载路径会
-    #     一次性分配 ~140MB protobuf 再 free，默认阈值下这些页留在进程里。两个设置
-    #     叠加后，同一段"载模型 + 推理 5 次"从 489MB 降到 225MB。
-    #   * 上面两条针对的是"怎么载"，这一条去掉了"常驻"本身：doclayout session 改成
-    #     第一次读 ModelInstance.value 时才建（上游唯一读者是 pdf2zh/backend.py 的
-    #     translate_task，也就是 celery 的 task 子进程），配合
-    #     --max-tasks-per-child=1 让它随子进程退出还给内核；Flask 也不再是独立
-    #     进程，而是 worker import 完整套依赖后 fork 出来的子进程，父子共享那一份
-    #     ~128MB 的 import 堆。
-    #
-    # 稳态（空转，实测 PSS）：worker 父进程 106MB + fork 出的 Flask 71MB + celery
-    # pool 子进程 88MB + redis ~5MB；cgroup memory.usage 268MB，改动前是 381MB
-    # （worker 持有模型的 230MB + 独立 import 一份栈的 Flask 128MB + pool 子进程）。
-    # 这里 RSS 会骗人：fork 出来的进程 RSS 仍然显示自己占了那 128MB，实际是同一份
-    # 物理页，只有 PSS 看得出来。
-    #
-    # 冷启动同样降了：8 次实测 cgroup 峰值 259~338MB、6 秒内 healthy（改动前是
-    # 624MB——worker 载模型那一瞬的 370MB VmHWM 和 Flask 独立 import 整个 pdf2zh
-    # 栈的 206MB 叠在一起）。entrypoint 里那个"先串行跑一遍完整初始化"的重型进程
-    # （实测 ~200MB RSS、3s CPU）也随之取消，因为现在全容器只有一个 importer。
-    #
-    # 上限仍是 768m，因为真正的约束是翻译进行时、不是空转：实测单页翻译时 task
-    # 子进程 RssAnon 从 145MB 涨到 330MB（session ~80MB + PyMuPDF/onnxruntime 的
-    # 每页工作集），整个容器 cgroup 峰值 643MB，是上限的 1.19 倍。翻译结束后
-    # --max-tasks-per-child=1 回收该子进程（实测 pid 换新、内存回落到 147MB）。
+    # 版面模型在翻译子进程内延迟加载，每个任务后回收子进程。
+    # 此上限同时覆盖 worker、Flask、模型、PDF 工作集及 Redis；空闲用量不足以验收。
     mem_limit: 768m
     cpus: 0.75
     pids_limit: 256
     stop_grace_period: 30s
     environment:
-      # 结果缓存在内存里，小机器按 128MB 起步（base compose 的默认值是 512mb）。
-      # 实测用量只有 ~1MB，这个值纯粹是兜底：它计入 pdf2zh 的 cgroup 预算，所以
-      # 不能按 base 的 512mb 来。
+      # Redis 的结果缓存计入容器总内存，不能直接沿用 base 的 512mb 默认值。
       PDF2ZH_REDIS_MAXMEMORY: ${PDF2ZH_REDIS_MAXMEMORY:-128mb}
+      # 限制支持这些变量的数值库线程；不控制 ONNX Runtime 线程池或 LLM 请求并发。
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
 
   caddy:
     logging:
@@ -123,16 +88,6 @@ services:
       - ./deploy/personal/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    # 上面的上限是按"加起来不超过这台机器的量级"配的，这是 2026-09-18 那轮真正想修
-    # 的东西：postgres 384m + typesense 512m + app 320m + pdf2zh 768m + caddy 80m
-    # ≈ 2.06GB，对应 1.87GB 物理内存 + 4GB swap。改动前是 ≈ 2.7GB（比内存高 44%），
-    # 于是任意两个大容器同时顶到上限就能触发内核的 global OOM——被杀的是分数最高的
-    # 随机进程，而不是越界的那个（实测 dmesg 里累计 55 次，杀的多半是 pdf2zh 的
-    # python）。现在超配 10%，且每个上限都在自己实测峰值的 1.2 倍以上，所以内存紧张
-    # 时是 memcg 在容器内部收尾。
-    #
-    # 注意 mem_limit 是上限不是预留：真正吃掉的内存不因这个数字变大，部署后实测全机
-    # RssAnon 977MB、swap 用到 364MB，都比改动前低。
     mem_limit: 80m
     cpus: 0.25
     pids_limit: 100

@@ -246,8 +246,7 @@ def test_multilingual_query_expansion_prefers_specific_domain_terms():
 @pytest.mark.parametrize('mode', ['fallback', 'unread', 'read_counts'])
 def test_chinese_query_is_preserved_across_search_backends(monkeypatch, mode):
     monkeypatch.setattr(database, 'DATABASE_URL', 'postgresql://test/paper_online')
-    database._conference_cache.clear()
-    database._cache_timestamp.clear()
+    database._clear_search_cache()
     monkeypatch.setattr(typesense_search, 'should_use_search', lambda *a, **kw: False)
     queries = []
 
@@ -303,8 +302,7 @@ def test_database_search_prefers_typesense_and_preserves_order(monkeypatch):
 
 
 def test_database_search_falls_back_when_typesense_fails(monkeypatch):
-    database._conference_cache.clear()
-    database._cache_timestamp.clear()
+    database._clear_search_cache()
     monkeypatch.setattr(database, "DATABASE_URL", "postgresql://test/paper_online")
     monkeypatch.setattr(database.typesense_search, "should_use_search", lambda *args, **kwargs: True)
 

@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import stat
 import sys
 from pathlib import Path
@@ -80,6 +81,14 @@ def test_compose_helper_generates_and_reuses_typesense_key(tmp_path, monkeypatch
     generated_env_path = generated_dir / "compose.env"
     monkeypatch.setattr(docker_compose, "generated_dir", generated_dir)
     monkeypatch.setattr(docker_compose, "generated_env_path", generated_env_path)
+    chmod_calls = []
+    original_chmod = Path.chmod
+
+    def record_chmod(path, mode):
+        chmod_calls.append((path, mode))
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", record_chmod)
     payload = {
         "database": {
             "url": "postgresql://paper:password@postgres:5432/paper_online",
@@ -98,4 +107,7 @@ def test_compose_helper_generates_and_reuses_typesense_key(tmp_path, monkeypatch
     assert first_key == second_key
     assert len(first_key.split("=", 1)[1]) == 64
     assert "TYPESENSE_HTTP_PORT=8108" in second
-    assert stat.S_IMODE(generated_env_path.stat().st_mode) == 0o600
+    assert chmod_calls == [(generated_env_path, 0o600)] * 2
+    # Windows chmod controls the read-only flag, not POSIX owner/group bits.
+    if os.name == "posix":
+        assert stat.S_IMODE(generated_env_path.stat().st_mode) == 0o600

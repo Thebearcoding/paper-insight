@@ -149,19 +149,17 @@ def test_neither_script_hand_rolls_pdf2zh_shared_state():
     assert "~/.config/PDFMathTranslate" not in code
 
 
-def test_periodic_purge_recreates_the_db_and_avoids_the_heavy_init():
+def test_periodic_cleanup_preserves_live_schema_and_avoids_heavy_imports():
     script = _script()
     loop = script[script.index("while true; do") : script.index("\ndone\n")]
 
-    purge = loop.index("purge_translation_memory")
-    precreate = loop.index("create_translation_memory_db")
-    tmp_cleanup = loop.index("find /tmp")
-
-    assert purge < precreate < tmp_cleanup, (
-        "定期清理同样会删掉库，而 worker 和 Flask 子进程之后是懒连接"
-        "（celery 每个任务、Flask 每个请求都可能新建连接），"
-        "所以每轮清理后都要重新预建，否则会重演同一个竞争"
-    )
-    # 定期路径只删 sqlite 库、不删配置文件，用廉价的预建就够；
-    # 每 30 分钟再起一个重型 import 进程在 2GB 机器上要省着点。
+    assert "purge_translation_memory" not in loop
+    assert "create_translation_memory_db" not in loop
+    assert "python -E /opt/pdf2zh-patch/cache_maintenance.py" in loop
+    assert "find /tmp" in loop
     assert "init_pdf2zh_shared_state" not in loop
+    # Unlink is safe only before the worker imports/opens the database.
+    assert len(_call_sites("purge_translation_memory")) == 1
+    assert len(_call_sites("create_translation_memory_db")) == 1
+    dockerfile = (PDF2ZH_DIR / "Dockerfile").read_text(encoding="utf-8")
+    assert "docker/pdf2zh/cache_maintenance.py" in dockerfile
