@@ -106,6 +106,7 @@ print('baked model:', path())"
 # httpx 对 HTTP(S)_PROXY 的支持，见 sitecustomize.py 的说明）
 COPY docker/pdf2zh/sitecustomize.py \
      docker/pdf2zh/cache_maintenance.py \
+     docker/pdf2zh/pdfinterp_compat.py \
      docker/pdf2zh/worker.py \
      docker/pdf2zh/server.py \
      /opt/pdf2zh-patch/

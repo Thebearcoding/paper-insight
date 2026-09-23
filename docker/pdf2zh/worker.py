@@ -88,6 +88,13 @@ import onnxruntime
 from babeldoc.assets.assets import get_doclayout_onnx_model_path
 from pdf2zh.backend import celery_app
 from pdf2zh.doclayout import ModelInstance, OnnxModel
+from pdf2zh.pdfinterp import PDFPageInterpreterEx
+
+from pdfinterp_compat import patch_pdf_interpreter_colorspaces
+
+# pdf2zh 1.9.4 expects these attributes on the interpreter, but current
+# pdfminer keeps them on graphicstate. Install before Celery forks its worker.
+patch_pdf_interpreter_colorspaces(PDFPageInterpreterEx)
 
 SERVER_SCRIPT = "/opt/pdf2zh-patch/server.py"
 
