@@ -113,6 +113,35 @@ describe('splitStreamingMarkdown', () => {
 });
 
 describe('RichContent', () => {
+  it('shows prompt templates and escape tokens as literal code in analysis reports', () => {
+    const report = String.raw`### 核心公式与符号说明
+
+公式 (1)：
+
+$$
+q_{\mathrm{inst}} = [IMAGE_TOKEN] Instruct: {task_definition} \n Query: {q}
+$$
+
+| 符号 | 含义 |
+| --- | --- |
+| $q_{\mathrm{inst}}$ | 加指令后的查询 |
+| $[IMAGE_TOKEN]$ | 图像占位 token |
+| ${'$'}{task_definition}${'$'} | 任务描述 |
+| $\n$ | 换行符 |`;
+    const normalized = normalizeMarkdownContent(report, { analysisMode: true });
+    const html = renderToStaticMarkup(<RichContent content={report} analysisMode />);
+
+    expect(normalized).toContain('$q_{\\mathrm{inst}}$ =\n\n```text\n[IMAGE_TOKEN] Instruct: {task_definition} \\n Query: {q}\n```');
+    expect(normalized).toContain('| `[IMAGE_TOKEN]` |');
+    expect(normalized).toContain('| `\\n` |');
+    expect(normalizeMarkdownContent(report)).toContain('$$\nq_{\\mathrm{inst}} = [IMAGE_TOKEN]');
+    expect(html).toContain('<pre>');
+    expect(html).toContain('Instruct: {task_definition}');
+    expect(html).toContain('\\n Query: {q}');
+    expect(html).toContain('katex'); // q_{inst} remains real inline math.
+    expect(html).not.toContain('katex-error');
+  });
+
   it('renders math through the markdown AST renderer', () => {
     const html = renderToStaticMarkup(
       <RichContent content={'The rate is $\\frac{1}{2}$.'} className="markdown-body" />,

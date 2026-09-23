@@ -319,6 +319,32 @@ function moveTrailingLineToUnstable(stableContent: string, unstableContent: stri
   };
 }
 
+function normalizePromptTemplateMath(content: string): string {
+  // A prompt string such as `[IMAGE_TOKEN] Instruct: {task_definition} \\n Query: {q}`
+  // is program text, not a mathematical expression. Treat only recognizable
+  // template placeholders as code; leave ordinary LaTeX (including q_{inst})
+  // untouched. Mask existing code so examples are not rewritten twice.
+  const { masked, segments } = maskCodeSegments(content);
+  const normalized = masked.replace(MATH_SEGMENT_PATTERN, (segment) => {
+    const display = segment.startsWith('$$') && segment.endsWith('$$') && segment.length > 4;
+    const inline = segment.startsWith('$') && !segment.startsWith('$$') && segment.endsWith('$') && segment.length > 2;
+    if (!display && !inline) return segment;
+    const expression = segment.slice(display ? 2 : 1, display ? -2 : -1).trim();
+    const hasTemplatePlaceholder = /\[IMAGE\\?_TOKEN\]|\{task_definition\}|\bInstruct\s*:|\bQuery\s*:/i.test(expression);
+    if (!hasTemplatePlaceholder && !(inline && expression === '\\n')) return segment;
+    if (display) {
+      const fence = '`'.repeat(Math.max(3, ...Array.from(expression.matchAll(/`+/g), ([run]) => run.length + 1)));
+      const queryTemplate = expression.match(/^(q_(?:\{\\(?:mathrm|text)\{inst\}\}|\{?inst\}?))\s*=\s*([\s\S]+)$/);
+      if (queryTemplate) {
+        return `\n\n$${queryTemplate[1]}$ =\n\n${fence}text\n${queryTemplate[2]}\n${fence}\n\n`;
+      }
+      return `\n\n${fence}text\n${expression}\n${fence}\n\n`;
+    }
+    return `\`${expression}\``;
+  });
+  return unmaskCodeSegments(normalized, segments);
+}
+
 export function normalizeMathContent(content: string): string {
   if (!content) {
     return '';
@@ -405,7 +431,10 @@ export function normalizeMarkdownContent(
   content: string,
   options: MarkdownNormalizationOptions = {},
 ): string {
-  return normalizeMarkdownSyntax(normalizeMathContent(content), options);
+  return normalizeMarkdownSyntax(
+    normalizeMathContent(options.analysisMode ? normalizePromptTemplateMath(content) : content),
+    options,
+  );
 }
 
 export function splitStreamingMarkdown(

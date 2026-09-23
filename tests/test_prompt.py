@@ -25,6 +25,8 @@ def test_paper_analysis_prompt_defines_canonical_markdown_structure():
     assert "方法变体与组件区别" in PAPER_ANALYSIS_PROMPT
     assert "设计 → 机制 → 指标" in PAPER_ANALYSIS_PROMPT
     assert "不要只围绕摘要重复" in PAPER_ANALYSIS_PROMPT
+    assert "它们是字面文本，不是数学变量" in PAPER_ANALYSIS_PROMPT
+    assert "不要把 `\\n` 放入 LaTeX 公式中" in PAPER_ANALYSIS_PROMPT
 
 
 def test_zotero_analysis_prompt_includes_grounded_framework_figure():
