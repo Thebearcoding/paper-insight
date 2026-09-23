@@ -3342,10 +3342,10 @@ async def start_paper_translation(paper_id: str):
         return _translation_public_payload(row, paper_id)
     if row and row.get("status") in {"pending", "progress"}:
         if not translation_task_running(paper_id):
-            start_translation_task(paper_id, pdf_url)
+            start_translation_task(paper_id, pdf_url, paper_info.get("title"))
         return _translation_public_payload(row, paper_id)
 
-    start_translation_task(paper_id, pdf_url)
+    start_translation_task(paper_id, pdf_url, paper_info.get("title"))
     return _translation_public_payload({"status": "pending", "progress": 0}, paper_id)
 
 
@@ -3600,6 +3600,17 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             else:
                 yield {"event": "status", "data": "正在分析论文..."}
         else:
+            # Other models can also hit their configured output-token limit.
+            # A bounded main-text retry reduces competing context without
+            # changing the user's model settings or accepting a partial report.
+            if paper_content:
+                fallback_content = select_paper_main_text(
+                    paper_content, ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT
+                )
+                if fallback_content != paper_content:
+                    analysis_attempts.append(
+                        (fallback_content, ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT)
+                    )
             yield {"event": "status", "data": "正在分析论文..."}
 
         normalized_response = ""
@@ -3616,12 +3627,19 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                 }
 
             user_prompt = build_analysis_prompt(paper_info, attempt_content, content_error)
+            attempt_instruction = analysis_instruction
+            if attempt_index:
+                attempt_instruction += (
+                    "\n这是完整报告的重试，请在保留三个固定章节、必要的小节、"
+                    "论文内证据锚点和关键方法/实验细节的前提下，精简重复叙述，"
+                    "优先写完第 3 节和最后的完整总结句。"
+                )
             full_response: list[str] = []
             stream_error: Exception | None = None
             try:
                 async for stream_chunk in llm.get_response_stream_events(
                     user_prompt,
-                    _analysis_instruction=analysis_instruction,
+                    _analysis_instruction=attempt_instruction,
                     _usage_context=(
                         "paper_analysis_stream_fallback"
                         if attempt_index

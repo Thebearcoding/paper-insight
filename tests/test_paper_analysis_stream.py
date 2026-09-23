@@ -122,6 +122,38 @@ async def test_paper_analysis_retries_glm_stream_and_saves_complete_report(monke
 
 
 @pytest.mark.asyncio
+async def test_paper_analysis_retries_truncated_non_glm_with_shorter_context(monkeypatch):
+    from llm import LLMOutputTruncatedError
+
+    class TruncatedThenSucceedLlm(RetryThenSucceedLlm):
+        def public_config(self):
+            return {"provider_key": "sub2api", "model_name": "deepseek-v4-flash"}
+
+        async def get_response_stream_events(self, prompt, **kwargs):
+            self.calls.append((prompt, kwargs))
+            if len(self.calls) == 1:
+                yield LLMStreamChunk(kind="content", content="incomplete")
+                raise LLMOutputTruncatedError("output limit")
+            yield LLMStreamChunk(kind="content", content=COMPLETE_REPORT)
+
+    fake_llm = TruncatedThenSucceedLlm()
+    updates = []
+    configure_paper_analysis_dependencies(monkeypatch, fake_llm, updates)
+    monkeypatch.setattr(app_module, "select_paper_main_text", lambda text, limit: "short core text")
+
+    response = await app_module.get_paper_analysis("paper-1", reanalyze=True)
+    events = [event async for event in response.body_iterator]
+
+    assert len(fake_llm.calls) == 2
+    assert "full paper text" in fake_llm.calls[0][0]
+    assert "short core text" in fake_llm.calls[1][0]
+    assert "精简重复叙述" in fake_llm.calls[1][1]["_analysis_instruction"]
+    assert "max_tokens" not in fake_llm.calls[1][1]
+    assert events[-1]["event"] == "done"
+    assert updates == [("paper-1", COMPLETE_REPORT)]
+
+
+@pytest.mark.asyncio
 async def test_paper_analysis_returns_sse_error_instead_of_breaking_stream(monkeypatch):
     fake_llm = AlwaysFailLlm()
     updates = []

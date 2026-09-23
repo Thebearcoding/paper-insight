@@ -184,6 +184,43 @@ def test_openalex_title_candidates_requires_exact_normalized_title(monkeypatch):
     assert response.closed is True
 
 
+def test_exact_title_pdf_fallback_uses_validated_mirror(monkeypatch):
+    attempts = []
+    monkeypatch.setattr(
+        paper_resources,
+        "openalex_title_candidates",
+        lambda item: [
+            paper_resources.DocumentCandidate("https://openreview.net/pdf?id=p", "openreview"),
+            paper_resources.DocumentCandidate("https://arxiv.org/pdf/2410.05160", "arxiv"),
+        ] if item["title"] == "Verified paper" else [],
+    )
+    monkeypatch.setattr(
+        paper_resources,
+        "download_public_pdf_bytes",
+        lambda url: attempts.append(url) or b"%PDF-mirror",
+    )
+
+    result = paper_resources.download_matching_title_pdf_bytes(
+        "Verified paper", "https://openreview.net/pdf?id=p"
+    )
+
+    assert result == b"%PDF-mirror"
+    assert attempts == ["https://arxiv.org/pdf/2410.05160"]
+
+
+def test_exact_title_pdf_fallback_rejects_unmatched_title(monkeypatch):
+    monkeypatch.setattr(paper_resources, "openalex_title_candidates", lambda item: [])
+    monkeypatch.setattr(
+        paper_resources,
+        "download_public_pdf_bytes",
+        lambda url: pytest.fail("must not download an unverified paper"),
+    )
+    with pytest.raises(paper_resources.ReaderError, match="同标题"):
+        paper_resources.download_matching_title_pdf_bytes(
+            "Other paper", "https://openreview.net/pdf?id=p"
+        )
+
+
 def test_arxiv_html_extractor_keeps_article_text_only():
     parser = paper_resources._ArxivHtmlExtractor()
     parser.feed(

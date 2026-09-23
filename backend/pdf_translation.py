@@ -24,6 +24,7 @@ from typing import Any
 
 import anyio
 import httpx
+import requests
 
 from config import settings
 from database import (
@@ -33,7 +34,7 @@ from database import (
     get_paper_translation,
     update_paper_translation,
 )
-from paper_resources import ReaderError, download_public_pdf_bytes
+from paper_resources import ReaderError, download_matching_title_pdf_bytes, download_public_pdf_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -329,17 +330,17 @@ def translation_task_running(paper_id: str) -> bool:
     return task is not None and not task.done()
 
 
-def start_translation_task(paper_id: str, pdf_url: str) -> None:
+def start_translation_task(paper_id: str, pdf_url: str, title: str | None = None) -> None:
     """Spawn (or reuse) the background translation task for a paper."""
 
     if translation_task_running(paper_id):
         return
-    task = asyncio.create_task(_run_translation(paper_id, pdf_url))
+    task = asyncio.create_task(_run_translation(paper_id, pdf_url, title))
     _running_tasks[paper_id] = task
     task.add_done_callback(lambda _t: _running_tasks.pop(paper_id, None))
 
 
-async def _run_translation(paper_id: str, pdf_url: str) -> None:
+async def _run_translation(paper_id: str, pdf_url: str, title: str | None = None) -> None:
     cfg = translation_service_config()
     translation = await asyncio.to_thread(
         create_paper_translation,
@@ -355,7 +356,15 @@ async def _run_translation(paper_id: str, pdf_url: str) -> None:
         remote_task_id: str | None = None
         try:
             await update_translation_status(translation_id, "progress", 0)
-            pdf_bytes = await asyncio.to_thread(download_public_pdf_bytes, pdf_url)
+            try:
+                pdf_bytes = await asyncio.to_thread(download_public_pdf_bytes, pdf_url)
+            except (ReaderError, requests.RequestException):
+                if not title or not pdf_url.startswith("https://openreview.net/"):
+                    raise
+                logger.info("OpenReview PDF unavailable for %s; trying exact-title OA copy", paper_id)
+                pdf_bytes = await asyncio.to_thread(
+                    download_matching_title_pdf_bytes, title, pdf_url
+                )
 
             async with httpx.AsyncClient() as client:
                 remote_task_id = await submit_translation(client, cfg, pdf_bytes)

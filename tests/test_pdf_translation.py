@@ -482,6 +482,48 @@ async def test_run_translation_success_flow(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_translation_openreview_403_uses_exact_title_copy(monkeypatch):
+    rows: dict[str, dict] = {}
+    updates: list[dict] = []
+    _patch_translation_db(monkeypatch, rows, updates)
+    calls = []
+
+    # The production downloader uses requests, not httpx.
+    import requests
+
+    def blocked_openreview(url):
+        calls.append(url)
+        raise requests.HTTPError("403 Forbidden")
+
+    monkeypatch.setattr(pdf_translation, "download_public_pdf_bytes", blocked_openreview)
+    monkeypatch.setattr(
+        pdf_translation,
+        "download_matching_title_pdf_bytes",
+        lambda title, url: calls.append((title, url)) or b"%PDF-verified",
+    )
+    client = FakeAsyncClient(
+        post_response=FakeJsonResponse({"id": "mirror-1"}),
+        get_responses={
+            "http://pdf2zh:11008/v1/translate/mirror-1": FakeJsonResponse(
+                {"state": "SUCCESS"}
+            )
+        },
+    )
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClientFactory(client))
+
+    await pdf_translation._run_translation(
+        "paper-x", "https://openreview.net/pdf?id=paper-x", "Verified paper"
+    )
+
+    assert updates[-1]["status"] == "success"
+    assert client.post_calls[0]["files"]["file"][1] == b"%PDF-verified"
+    assert calls == [
+        "https://openreview.net/pdf?id=paper-x",
+        ("Verified paper", "https://openreview.net/pdf?id=paper-x"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_run_translation_service_failure_marks_error(monkeypatch):
     rows: dict[str, dict] = {}
     updates: list[dict] = []

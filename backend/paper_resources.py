@@ -515,6 +515,28 @@ def download_public_pdf_bytes(
     raise ReaderError("PDF 下载重定向次数过多")
 
 
+def download_matching_title_pdf_bytes(title: str, original_url: str) -> bytes:
+    """Use an exact-title open-access copy when the original PDF is blocked.
+
+    OpenAlex title matching is strict, and every candidate still passes the
+    public-URL, redirect, size and PDF checks in download_public_pdf_bytes.
+    """
+    if not title.strip():
+        raise ReaderError("缺少论文标题，无法查找同标题的公开 PDF")
+    try:
+        candidates = openalex_title_candidates({"title": title})
+    except requests.RequestException as exc:
+        raise ReaderError("同标题公开 PDF 检索失败") from exc
+    for candidate in candidates:
+        if candidate.url == original_url:
+            continue
+        try:
+            return download_public_pdf_bytes(candidate.url)
+        except (ReaderError, requests.RequestException) as exc:
+            logger.info("Unable to download exact-title PDF %s: %s", candidate.url, exc)
+    raise ReaderError("未找到可下载的同标题公开 PDF")
+
+
 def _download_pdf_text(url: str) -> str:
     return extract_pdf_text_bounded(download_public_pdf_bytes(url), url)
 
