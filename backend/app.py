@@ -3615,6 +3615,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
 
         normalized_response = ""
         last_failure_message = "论文分析没有返回内容"
+        previous_stream_error: Exception | None = None
         for attempt_index, (attempt_content, context_limit) in enumerate(analysis_attempts):
             if attempt_index:
                 yield {"event": "final", "data": ""}
@@ -3634,6 +3635,18 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                     "论文内证据锚点和关键方法/实验细节的前提下，精简重复叙述，"
                     "优先写完第 3 节和最后的完整总结句。"
                 )
+            # The active Sub2API DeepSeek model accepts 16k output tokens;
+            # its configured 8k cap repeatedly exhausted before any final
+            # answer on this paper. Raise it only after a proven truncation,
+            # and only for this verified gateway/model combination.
+            retry_token_budget = (
+                16_384
+                if attempt_index
+                and isinstance(previous_stream_error, LLMOutputTruncatedError)
+                and selected_config.get("provider_key") == "sub2api"
+                and str(selected_config.get("model_name") or "").casefold() == "deepseek-v4-flash"
+                else None
+            )
             full_response: list[str] = []
             stream_error: Exception | None = None
             try:
@@ -3645,6 +3658,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                         if attempt_index
                         else "paper_analysis_stream"
                     ),
+                    **({"max_tokens": retry_token_budget} if retry_token_budget else {}),
                 ):
                     if stream_chunk.kind == "reasoning":
                         yield {"event": "reasoning", "data": stream_chunk.content}
@@ -3683,6 +3697,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                     }
                 break
 
+            previous_stream_error = stream_error
             if stream_error:
                 last_failure_message = "上游模型连接中断"
                 if completion_error:

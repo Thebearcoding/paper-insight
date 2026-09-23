@@ -148,7 +148,8 @@ async def test_paper_analysis_retries_truncated_non_glm_with_shorter_context(mon
     assert "full paper text" in fake_llm.calls[0][0]
     assert "short core text" in fake_llm.calls[1][0]
     assert "精简重复叙述" in fake_llm.calls[1][1]["_analysis_instruction"]
-    assert "max_tokens" not in fake_llm.calls[1][1]
+    assert fake_llm.calls[1][1]["max_tokens"] == 16_384
+    assert "max_tokens" not in fake_llm.calls[0][1]
     assert events[-1]["event"] == "done"
     assert updates == [("paper-1", COMPLETE_REPORT)]
 
