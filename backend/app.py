@@ -3560,6 +3560,10 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             return
 
         is_glm_proxy_analysis = is_glm_proxy_config(selected_config)
+        is_deepseek_claude_proxy = (
+            selected_config.get("provider_key") == "sub2api"
+            and str(selected_config.get("model_name") or "").casefold() == "deepseek-v4-flash"
+        )
         analysis_metadata = {
             "source": "fulltext" if paper_content else "metadata",
             "warning": content_error,
@@ -3639,12 +3643,14 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
             # its configured 8k cap repeatedly exhausted before any final
             # answer on this paper. Raise it only after a proven truncation,
             # and only for this verified gateway/model combination.
+            # This gateway/model accepts a disabled-thinking request; leaving
+            # it implicit consumed both 8k and 16k output budgets on reasoning
+            # before the grounded report could finish.
             retry_token_budget = (
                 16_384
                 if attempt_index
                 and isinstance(previous_stream_error, LLMOutputTruncatedError)
-                and selected_config.get("provider_key") == "sub2api"
-                and str(selected_config.get("model_name") or "").casefold() == "deepseek-v4-flash"
+                and is_deepseek_claude_proxy
                 else None
             )
             full_response: list[str] = []
@@ -3658,6 +3664,7 @@ async def get_paper_analysis(paper_id: str, reanalyze: bool = False):
                         if attempt_index
                         else "paper_analysis_stream"
                     ),
+                    **({"thinking": {"type": "disabled"}} if is_deepseek_claude_proxy else {}),
                     **({"max_tokens": retry_token_budget} if retry_token_budget else {}),
                 ):
                     if stream_chunk.kind == "reasoning":
