@@ -36,6 +36,9 @@ REPORT = """## 1. 论文解决的任务
 材料没有可靠对比数值。总结而言，应在论文限定的实验条件下理解结论。"""
 
 
+DEEP_REPORT = REPORT.replace("任务定义。", "任务定义。" + "相关方法细节与证据。" * 500)
+
+
 def configure(monkeypatch, *, stream_error=None):
     saved = []
     enrichments = []
@@ -129,6 +132,147 @@ async def test_truncated_report_never_overwrites_previous_report(monkeypatch):
     assert saved == [] and enrichments == []
     assert events[-1]["event"] == "error"
     assert "token 上限" in events[-1]["data"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_key", "model_name", "override_output"),
+    [
+        ("sub2api", "deepseek-v4-flash", True),
+        ("deepseek", "deepseek-v4-flash", False),
+        ("deepseek", "deepseek-chat", False),
+        ("sub2api", "other-model", False),
+    ],
+)
+async def test_zotero_truncation_retries_without_saving_partial_report(
+    monkeypatch, provider_key, model_name, override_output,
+):
+    saved, _, _ = configure(monkeypatch)
+    calls = []
+
+    class TruncatedThenComplete:
+        def public_config(self):
+            return {"provider_key": provider_key, "model_name": model_name}
+
+        def is_configured(self):
+            return True
+
+        async def get_response_stream_events(self, prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            if len(calls) == 1:
+                # A report can look structurally complete yet still have an
+                # explicit upstream length finish reason. Never accept it.
+                yield LLMStreamChunk(kind="content", content=DEEP_REPORT)
+                raise LLMOutputTruncatedError("output limit")
+            assert saved == []
+            yield LLMStreamChunk(kind="content", content=DEEP_REPORT + "\n\n重试完成。")
+
+    monkeypatch.setattr(app_module, "llm", SimpleNamespace(select=lambda *_: TruncatedThenComplete()))
+    monkeypatch.setattr(
+        app_module, "compact_zotero_analysis_context",
+        lambda context, *, max_tokens: "论文全文：\n精简后的方法和实验内容",
+    )
+    response = await app_module.analyze_my_zotero_item("P1", reanalyze=True, user={"id": "u1"})
+    events = [event async for event in response.body_iterator]
+
+    assert len(calls) == 2
+    assert calls[0][0] != calls[1][0]
+    assert "精简重复叙述" in calls[1][1]["_analysis_instruction"]
+    assert calls[0][1]["_usage_context"] == "zotero_analysis_stream"
+    assert calls[1][1]["_usage_context"] == "zotero_analysis_stream_fallback"
+    if override_output:
+        assert calls[0][1]["thinking"] == calls[1][1]["thinking"] == {"type": "disabled"}
+        assert "max_tokens" not in calls[0][1]
+        assert calls[1][1]["max_tokens"] == 16_384
+    else:
+        assert all("thinking" not in kwargs and "max_tokens" not in kwargs for _, kwargs in calls)
+    assert saved[0][2] == DEEP_REPORT + "\n\n重试完成。"
+    assert events[-1]["event"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_proxy_retries_truncation_even_when_context_is_already_short(monkeypatch):
+    saved, _, _ = configure(monkeypatch)
+    calls = []
+
+    class ShortContextProxy:
+        def public_config(self):
+            return {"provider_key": "sub2api", "model_name": "deepseek-v4-flash"}
+
+        def is_configured(self):
+            return True
+
+        async def get_response_stream_events(self, prompt, **kwargs):
+            calls.append(kwargs)
+            yield LLMStreamChunk(kind="content", content=DEEP_REPORT)
+            if len(calls) == 1:
+                raise LLMOutputTruncatedError("output limit")
+
+    monkeypatch.setattr(app_module, "llm", SimpleNamespace(select=lambda *_: ShortContextProxy()))
+    response = await app_module.analyze_my_zotero_item("P1", reanalyze=True, user={"id": "u1"})
+    events = [event async for event in response.body_iterator]
+
+    assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 16_384
+    assert saved[0][2] == DEEP_REPORT
+    assert events[-1]["event"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_proxy_structure_retry_does_not_raise_output_cap_without_truncation(monkeypatch):
+    saved, _, _ = configure(monkeypatch)
+    calls = []
+
+    class StructurallyIncompleteProxy:
+        def public_config(self):
+            return {"provider_key": "sub2api", "model_name": "deepseek-v4-flash"}
+
+        def is_configured(self):
+            return True
+
+        async def get_response_stream_events(self, prompt, **kwargs):
+            calls.append(kwargs)
+            yield LLMStreamChunk(
+                kind="content", content="## 1. 论文解决的任务\n\n仅返回第一节。" if len(calls) == 1 else DEEP_REPORT,
+            )
+
+    monkeypatch.setattr(app_module, "llm", SimpleNamespace(select=lambda *_: StructurallyIncompleteProxy()))
+    response = await app_module.analyze_my_zotero_item("P1", reanalyze=True, user={"id": "u1"})
+    events = [event async for event in response.body_iterator]
+
+    assert len(calls) == 2
+    assert all("max_tokens" not in kwargs for kwargs in calls)
+    assert saved[0][2] == DEEP_REPORT
+    assert events[-1]["event"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_proxy_repeated_truncation_preserves_previous_report(monkeypatch):
+    saved, enrichments, item = configure(monkeypatch)
+    calls = []
+
+    class AlwaysTruncatedProxy:
+        def public_config(self):
+            return {"provider_key": "sub2api", "model_name": "deepseek-v4-flash"}
+
+        def is_configured(self):
+            return True
+
+        async def get_response_stream_events(self, prompt, **kwargs):
+            calls.append(kwargs)
+            yield LLMStreamChunk(kind="content", content=REPORT)
+            raise LLMOutputTruncatedError("output limit")
+
+    monkeypatch.setattr(app_module, "llm", SimpleNamespace(select=lambda *_: AlwaysTruncatedProxy()))
+    response = await app_module.analyze_my_zotero_item("P1", reanalyze=True, user={"id": "u1"})
+    events = [event async for event in response.body_iterator]
+
+    assert len(calls) == 2
+    assert saved == [] and enrichments == []
+    assert item["llm_response"] == "旧报告"
+    assert events[-1]["event"] == "error"
+    assert "output limit" in events[-1]["data"]
+    assert not any(event.get("event") == "done" for event in events)
 
 
 @pytest.mark.asyncio

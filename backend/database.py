@@ -6012,3 +6012,104 @@ def reset_stale_paper_translations() -> None:
             conn.commit()
 
     _run_with_retry(operation, "reset_stale_paper_translations")
+
+
+# Zotero attachment translations have a separate, user-owned cache key.
+_ZOTERO_TRANSLATION_COLUMNS = """
+    id, user_id, item_key, attachment_key, attachment_version, lang_out, service,
+    status, progress, remote_task_id, error, created_at, updated_at
+"""
+
+
+def get_zotero_attachment_translation(
+    user_id: str, item_key: str, attachment_key: str, version: int,
+    lang_out: str, service: str,
+) -> dict | None:
+    def operation() -> dict | None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""SELECT {_ZOTERO_TRANSLATION_COLUMNS}
+                    FROM zotero_attachment_translations
+                    WHERE user_id = %s AND item_key = %s AND attachment_key = %s
+                      AND attachment_version = %s AND lang_out = %s AND service = %s""",
+                    (user_id, item_key, attachment_key, version, lang_out, service),
+                )
+                return _normalize_translation_row(cur.fetchone())
+    return _run_with_retry(operation, "get_zotero_attachment_translation")
+
+
+def claim_zotero_attachment_translation(
+    user_id: str, item_key: str, attachment_key: str, version: int,
+    lang_out: str, service: str,
+) -> tuple[dict, bool]:
+    """Atomically start or reuse a task; only one process may claim a key."""
+    def operation() -> tuple[dict, bool]:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""INSERT INTO zotero_attachment_translations
+                    (user_id, item_key, attachment_key, attachment_version, lang_out, service)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id, item_key, attachment_key, attachment_version, lang_out, service)
+                    DO UPDATE SET status = 'pending', progress = 0, remote_task_id = NULL,
+                                  error = NULL, updated_at = now()
+                    WHERE zotero_attachment_translations.status IN ('error', 'expired')
+                    RETURNING {_ZOTERO_TRANSLATION_COLUMNS}""",
+                    (user_id, item_key, attachment_key, version, lang_out, service),
+                )
+                row = cur.fetchone()
+                claimed = row is not None
+                if not claimed:
+                    cur.execute(
+                        f"""SELECT {_ZOTERO_TRANSLATION_COLUMNS}
+                        FROM zotero_attachment_translations
+                        WHERE user_id = %s AND item_key = %s AND attachment_key = %s
+                          AND attachment_version = %s AND lang_out = %s AND service = %s""",
+                        (user_id, item_key, attachment_key, version, lang_out, service),
+                    )
+                    row = cur.fetchone()
+            conn.commit()
+        return _normalize_translation_row(row), claimed
+    return _run_with_retry(operation, "claim_zotero_attachment_translation")
+
+
+def update_zotero_attachment_translation(
+    translation_id: str, *, status: str | None = None, progress: int | None = None,
+    remote_task_id: str | None = None, error: str | None = None,
+) -> None:
+    assignments = ["updated_at = now()"]
+    params: list[object] = []
+    if status is not None:
+        assignments.append("status = %s")
+        params.append(status)
+    if progress is not None:
+        assignments.append("progress = %s")
+        params.append(max(0, min(int(progress), 100)))
+    if remote_task_id is not None:
+        assignments.append("remote_task_id = %s")
+        params.append(remote_task_id)
+    if error is not None:
+        assignments.append("error = %s")
+        params.append(error)
+    params.append(int(translation_id))
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE zotero_attachment_translations SET {', '.join(assignments)} WHERE id = %s",
+                    params,
+                )
+            conn.commit()
+    _run_with_retry(operation, "update_zotero_attachment_translation")
+
+
+def reset_stale_zotero_attachment_translations() -> None:
+    def operation() -> None:
+        with _get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE zotero_attachment_translations
+                    SET status = 'error', error = '服务重启，请重新翻译', updated_at = now()
+                    WHERE status IN ('pending', 'progress')""")
+            conn.commit()
+    _run_with_retry(operation, "reset_stale_zotero_attachment_translations")

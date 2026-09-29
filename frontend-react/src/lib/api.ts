@@ -321,6 +321,26 @@ export async function fetchZoteroItem(itemKey: string): Promise<ZoteroItem> {
   return apiFetch<ZoteroItem>(zoteroItemApiPath(itemKey));
 }
 
+export interface ZoteroTranslationStatus {
+  status: 'idle' | 'pending' | 'progress' | 'success' | 'expired' | 'error';
+  progress: number;
+  mono_url: string | null;
+  dual_url: string | null;
+  error: string | null;
+}
+
+export function zoteroTranslationPath(itemKey: string, attachmentKey: string): string {
+  return zoteroItemApiPath(itemKey, `/attachments/${encodeURIComponent(attachmentKey)}/translation`);
+}
+
+export async function fetchZoteroTranslation(itemKey: string, attachmentKey: string): Promise<ZoteroTranslationStatus> {
+  return apiFetch<ZoteroTranslationStatus>(zoteroTranslationPath(itemKey, attachmentKey));
+}
+
+export async function startZoteroTranslation(itemKey: string, attachmentKey: string): Promise<ZoteroTranslationStatus> {
+  return apiFetch<ZoteroTranslationStatus>(zoteroTranslationPath(itemKey, attachmentKey), { method: 'POST' });
+}
+
 export async function fetchSelectableLlmModels(refresh = true): Promise<SelectableLlmCatalog> {
   const params = new URLSearchParams({ refresh: String(refresh) });
   return apiFetch<SelectableLlmCatalog>(`/me/llm/models?${params.toString()}`);

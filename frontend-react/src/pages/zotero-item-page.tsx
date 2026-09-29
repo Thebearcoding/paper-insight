@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Cpu, ExternalLink, FileText, Images, Loader2, RefreshCw, Sparkles, Table2, Tags, UploadCloud } from 'lucide-react';
+import { ArrowLeft, Cpu, Download, ExternalLink, FileText, Images, Languages, Loader2, RefreshCw, Sparkles, Table2, Tags, UploadCloud } from 'lucide-react';
 
 import { ChatPanel } from '@/components/chat-panel';
 import { ReasoningStreamPanel } from '@/components/reasoning-stream-panel';
@@ -20,6 +20,9 @@ import {
   fetchSelectableLlmModels,
   fetchZoteroConnection,
   fetchZoteroItem,
+  fetchZoteroTranslation,
+  startZoteroTranslation,
+  apiUrl,
   generateZoteroEnrichment,
   streamSse,
   writebackZoteroEnrichment,
@@ -37,6 +40,7 @@ import type {
   ZoteroConnection,
   ZoteroItem,
 } from '@/types';
+import type { ZoteroTranslationStatus } from '@/lib/api';
 
 
 interface ZoteroItemPageProps {
@@ -139,6 +143,52 @@ function AnalysisAsset({ figure, itemTitle }: { figure: ZoteroAnalysisFigure; it
         </div>
       </figcaption>
     </figure>
+  );
+}
+
+function ZoteroAttachmentTranslation({ itemKey, attachment }: { itemKey: string; attachment: ZoteroItem }) {
+  const [status, setStatus] = useState<ZoteroTranslationStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const attachmentKey = attachment.item_key;
+  const eligible = attachment.content_type?.toLowerCase() === 'application/pdf' &&
+    !['linked_file', 'linked_url'].includes(attachment.link_mode?.toLowerCase() ?? '');
+
+  useEffect(() => {
+    if (!eligible) return;
+    let active = true;
+    const refresh = () => void fetchZoteroTranslation(itemKey, attachmentKey)
+      .then((value) => { if (active) { setStatus(value); setError(null); } })
+      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : '查询失败'); });
+    refresh();
+    const timer = window.setInterval(() => {
+      if (active && (status?.status === 'pending' || status?.status === 'progress')) refresh();
+    }, 2500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [eligible, itemKey, attachmentKey, attachment.item_version, status?.status]);
+
+  if (attachment.content_type?.toLowerCase() !== 'application/pdf') return null;
+  const running = busy || status?.status === 'pending' || status?.status === 'progress';
+  return (
+    <div className="rounded-xl border border-slate-200 p-4 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span className="min-w-0 break-all font-medium text-slate-700">{attachment.filename || attachment.title || attachmentKey}</span>
+        {eligible ? <Button variant="outline" size="sm" disabled={running} onClick={() => {
+          setBusy(true); setError(null);
+          void startZoteroTranslation(itemKey, attachmentKey)
+            .then(setStatus)
+            .catch((reason) => setError(reason instanceof Error ? reason.message : '启动翻译失败'))
+            .finally(() => setBusy(false));
+        }}><Languages className="mr-2 h-4 w-4" />{status?.status === 'expired' || status?.status === 'error' ? '重新翻译' : '翻译 PDF'}</Button> : null}
+      </div>
+      {!eligible ? <p className="mt-2 text-amber-700">此附件为本地链接或网址链接，Zotero 云端没有可供翻译的 PDF。</p> : null}
+      {running ? <p className="mt-2 text-blue-700">正在翻译{status?.progress ? ` · ${status.progress}%` : '…'}</p> : null}
+      {error || status?.error ? <p role="alert" className="mt-2 text-red-700">{error || status?.error}</p> : null}
+      {status?.status === 'success' ? <div className="mt-3 flex flex-wrap gap-3">
+        {([['mono_url', '中文版'], ['dual_url', '双语版']] as const).map(([field, label]) =>
+          status[field] ? <a key={field} className="inline-flex items-center text-blue-700 hover:underline" href={apiUrl(status[field])}><Download className="mr-1 h-4 w-4" />{label}</a> : null)}
+      </div> : null}
+    </div>
   );
 }
 
@@ -455,9 +505,17 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
         <div className="mt-6 flex flex-wrap gap-3 text-sm">
           {item.url ? <a href={item.url} target="_blank" rel="noreferrer" className="inline-flex items-center font-medium text-blue-600 hover:underline">原始链接 <ExternalLink className="ml-1 h-4 w-4" /></a> : null}
           {item.doi ? <span className="text-slate-500">DOI: {item.doi}</span> : null}
-          <span className="text-slate-500">PDF 附件 {attachments.length} 个</span>
+          <span className="text-slate-500">PDF 附件 {attachments.filter((attachment) => attachment.content_type?.toLowerCase() === 'application/pdf').length} 个</span>
         </div>
       </section>
+
+      {attachments.some((attachment) => attachment.content_type?.toLowerCase() === 'application/pdf') ? (
+        <section className="rounded-[32px] bg-white p-6 shadow-sm ring-1 ring-black/5 sm:p-8">
+          <h2 className="mb-2 flex items-center gap-2 text-xl font-semibold text-[#172033]"><Languages className="h-5 w-5 text-[#ff9900]" />PDF 翻译</h2>
+          <p className="mb-4 text-sm text-slate-500">从你的 Zotero 云端 PDF 附件翻译；译文下载仅对当前账号开放，临时结果过期后可重新翻译。</p>
+          <div className="space-y-3">{attachments.map((attachment) => <ZoteroAttachmentTranslation key={attachment.item_key} itemKey={itemKey} attachment={attachment} />)}</div>
+        </section>
+      ) : null}
 
       <section className="rounded-[32px] bg-white p-6 shadow-sm ring-1 ring-black/5 sm:p-8">
         <div className="flex flex-col gap-3 border-b border-[#eef2f7] pb-4 sm:flex-row sm:items-center sm:justify-between">

@@ -664,7 +664,7 @@ def compact_zotero_analysis_context(
     compact_fulltext = select_paper_main_text(fulltext.strip(), fulltext_limit)
     return (
         compact_metadata
-        + "\n\n模型输入范围：以下内容来自论文 PDF 主文；为适配当前模型代理，"
+        + "\n\n模型输入范围：以下内容来自论文 PDF 主文；为控制模型输入长度，"
         + "超长参考文献、附录和补充材料可能已省略。\n\n"
         + separator
         + compact_fulltext

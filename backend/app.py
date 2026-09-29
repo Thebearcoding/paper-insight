@@ -121,6 +121,10 @@ from database import (
     get_zotero_chat_sessions,
     get_zotero_connection,
     get_zotero_item,
+    get_zotero_attachment_translation,
+    claim_zotero_attachment_translation,
+    update_zotero_attachment_translation,
+    reset_stale_zotero_attachment_translations,
     get_arxiv_papers,
     get_conference_papers,
     get_hf_daily_papers,
@@ -208,6 +212,7 @@ from pdf_translation import (
     mark_translation_expired,
     remote_result_state,
     start_translation_task,
+    start_zotero_translation_task,
     stream_translation_result,
     translation_enabled,
     translation_service_config,
@@ -874,6 +879,7 @@ async def lifespan(app: FastAPI):
         # 否则前端会一直轮询一个永远不会推进的状态。
         try:
             await asyncio.to_thread(reset_stale_paper_translations)
+            await asyncio.to_thread(reset_stale_zotero_attachment_translations)
         except DatabaseError as exc:
             logger.warning("PDF 翻译状态恢复失败: %s", exc)
 
@@ -2030,6 +2036,10 @@ async def analyze_my_zotero_item(
             context, source, warning = await load_zotero_reading_context(user_id, item)
             analysis_context = context
             is_glm_proxy_analysis = is_glm_proxy_config(selected_config)
+            is_deepseek_claude_proxy = (
+                str(selected_config.get("provider_key") or "").casefold() == "sub2api"
+                and str(selected_config.get("model_name") or "").casefold() == "deepseek-v4-flash"
+            )
             glm_context_limit: int | None = None
             if is_glm_proxy_analysis:
                 glm_context_limit = (
@@ -2134,9 +2144,22 @@ async def analyze_my_zotero_item(
                     analysis_attempts.append(
                         (fallback_context, ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT)
                     )
+            elif not is_glm_proxy_analysis:
+                # Retry with less competing context when the report is incomplete.
+                # This applies to official DeepSeek too, but provider-specific
+                # output settings below are reserved for the verified proxy model.
+                fallback_context = compact_zotero_analysis_context(
+                    context,
+                    max_tokens=ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT,
+                )
+                if fallback_context != analysis_context or is_deepseek_claude_proxy:
+                    analysis_attempts.append(
+                        (fallback_context, ZOTERO_ANALYSIS_PROXY_FALLBACK_TOKEN_LIMIT)
+                    )
 
             normalized = ""
             accepted_stream_error: Exception | None = None
+            previous_stream_error: Exception | None = None
             used_fallback_limit: int | None = None
             last_failure_message = "论文分析没有返回内容"
             for attempt_index, (attempt_context, fallback_limit) in enumerate(analysis_attempts):
@@ -2145,21 +2168,40 @@ async def analyze_my_zotero_item(
                     yield {
                         "event": "status",
                         "data": (
-                            "首次长文请求未返回可保存正文，正在使用 "
-                            f"{fallback_limit:,} token 的 PDF 核心上下文自动重试..."
+                            "首次请求中断或报告不完整，正在使用 "
+                            f"{fallback_limit:,} token 的论文核心上下文自动重试..."
                         ),
                     }
                 chunks: list[str] = []
                 stream_error: Exception | None = None
+                attempt_instruction = analysis_instruction
+                if attempt_index:
+                    attempt_instruction += (
+                        "\n这是完整报告的重试，请在保留三个固定章节、必要的小节、"
+                        "论文内证据锚点和关键方法/实验细节的前提下，精简重复叙述，"
+                        "优先写完第 3 节和最后的完整总结句。"
+                    )
+                # The verified Sub2API deepseek-v4-flash accepts disabled
+                # thinking; raise its output cap only after a proven truncation.
+                # Official DeepSeek and other providers keep their own settings.
+                retry_token_budget = (
+                    16_384
+                    if attempt_index
+                    and isinstance(previous_stream_error, LLMOutputTruncatedError)
+                    and is_deepseek_claude_proxy
+                    else None
+                )
                 try:
                     async for stream_chunk in selected_llm.get_response_stream_events(
                         attempt_context,
-                        _analysis_instruction=analysis_instruction,
+                        _analysis_instruction=attempt_instruction,
                         _usage_context=(
                             "zotero_analysis_stream_fallback"
                             if attempt_index
                             else "zotero_analysis_stream"
                         ),
+                        **({"thinking": {"type": "disabled"}} if is_deepseek_claude_proxy else {}),
+                        **({"max_tokens": retry_token_budget} if retry_token_budget else {}),
                     ):
                         if stream_chunk.kind == "reasoning":
                             yield {"event": "reasoning", "data": stream_chunk.content}
@@ -2178,8 +2220,13 @@ async def analyze_my_zotero_item(
                     )
 
                 candidate = normalize_zotero_report("".join(chunks))
+                previous_stream_error = stream_error
                 if not candidate:
-                    last_failure_message = "论文分析没有返回正式正文"
+                    last_failure_message = (
+                        f"上游返回的论文分析不完整（{stream_error}）"
+                        if isinstance(stream_error, LLMOutputTruncatedError)
+                        else "论文分析没有返回正式正文"
+                    )
                     continue
                 completion_error = str(stream_error) if isinstance(stream_error, LLMOutputTruncatedError) else (
                     zotero_stream_recovery_error(
@@ -2213,7 +2260,7 @@ async def analyze_my_zotero_item(
             if used_fallback_limit:
                 fallback_warning = (
                     "供应商首轮未返回可保存正文，已自动使用 "
-                    f"{used_fallback_limit:,} token 的 PDF 核心上下文重试完成"
+                    f"{used_fallback_limit:,} token 的论文核心上下文重试完成"
                 )
                 warning = f"{warning}；{fallback_warning}" if warning else fallback_warning
                 analysis_metadata["warning"] = warning
@@ -3433,6 +3480,135 @@ async def download_paper_translation(paper_id: str, kind: str):
             raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE) from exc
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
+    return _TranslationDownloadResponse(stream, first_chunk, headers=headers)
+
+
+# Zotero PDFs are private: these endpoints require the owning user and a
+# current cloud PDF child on every request, including finished downloads.
+async def _owned_zotero_pdf(user_id: str, item_key: str, attachment_key: str) -> dict:
+    try:
+        item = await asyncio.to_thread(get_zotero_item, user_id, item_key)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+    if not item:
+        raise HTTPException(status_code=404, detail="Zotero 条目不存在")
+    attachment = next((child for child in item.get("children") or []
+                       if child.get("item_key") == attachment_key
+                       and child.get("parent_item_key") == item_key
+                       and child.get("item_type") == "attachment"), None)
+    if not attachment:
+        raise HTTPException(status_code=404, detail="该条目没有此 PDF 附件")
+    if str(attachment.get("content_type") or "").lower() != "application/pdf":
+        raise HTTPException(status_code=400, detail="该附件不是 PDF")
+    if str(attachment.get("link_mode") or "").lower() in {"linked_file", "linked_url"}:
+        raise HTTPException(status_code=400, detail="链接附件未存储在 Zotero 云端，无法翻译")
+    return attachment
+
+
+def _zotero_translation_payload(row: dict | None, item_key: str, attachment_key: str) -> dict:
+    status = str(row.get("status") or "idle") if row else "idle"
+    base = f"/me/zotero/items/{quote(item_key, safe='')}/attachments/{quote(attachment_key, safe='')}/translation"
+    return {
+        "status": status, "progress": int(row.get("progress") or 0) if row else 0,
+        "error": row.get("error") if row else None,
+        "mono_url": f"{base}/mono" if status == "success" else None,
+        "dual_url": f"{base}/dual" if status == "success" else None,
+    }
+
+
+async def _zotero_translation_row(user_id: str, item_key: str, attachment: dict, *, verify_remote: bool = True):
+    cfg = translation_service_config()
+    row = await asyncio.to_thread(get_zotero_attachment_translation,
+                                  user_id, item_key, attachment["item_key"],
+                                  int(attachment.get("item_version") or 0), cfg.lang_out, cfg.service)
+    if verify_remote and row and row["status"] == "success" and row.get("remote_task_id"):
+        if await asyncio.to_thread(remote_result_state, cfg, str(row["remote_task_id"])) == "gone":
+            await asyncio.to_thread(update_zotero_attachment_translation, row["id"],
+                                    status="expired", error=EXPIRED_ERROR_MESSAGE)
+            row = {**row, "status": "expired", "error": EXPIRED_ERROR_MESSAGE}
+    return row
+
+
+@app.post("/me/zotero/items/{item_key}/attachments/{attachment_key}/translation")
+async def start_my_zotero_translation(
+    item_key: str, attachment_key: str, response: Response,
+    user: dict = Depends(require_current_user),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    if not translation_enabled():
+        raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
+    attachment = await _owned_zotero_pdf(user["id"], item_key, attachment_key)
+    try:
+        existing = await _zotero_translation_row(user["id"], item_key, attachment)
+        if existing and existing["status"] in {"success", "pending", "progress"}:
+            return _zotero_translation_payload(existing, item_key, attachment_key)
+        cfg = translation_service_config()
+        row, claimed = await asyncio.to_thread(claim_zotero_attachment_translation,
+            user["id"], item_key, attachment_key, int(attachment.get("item_version") or 0),
+            cfg.lang_out, cfg.service)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+    if claimed:
+        start_zotero_translation_task(user["id"], item_key, attachment_key,
+                                      int(attachment.get("item_version") or 0), row["id"])
+    return _zotero_translation_payload(row, item_key, attachment_key)
+
+
+@app.get("/me/zotero/items/{item_key}/attachments/{attachment_key}/translation")
+async def get_my_zotero_translation(
+    item_key: str, attachment_key: str, response: Response,
+    user: dict = Depends(require_current_user),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    if not translation_enabled():
+        raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
+    attachment = await _owned_zotero_pdf(user["id"], item_key, attachment_key)
+    try:
+        row = await _zotero_translation_row(user["id"], item_key, attachment)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+    return _zotero_translation_payload(row, item_key, attachment_key)
+
+
+@app.get("/me/zotero/items/{item_key}/attachments/{attachment_key}/translation/{kind}")
+async def download_my_zotero_translation(
+    item_key: str, attachment_key: str, kind: str,
+    user: dict = Depends(require_current_user),
+):
+    if not translation_enabled():
+        raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
+    if kind not in TRANSLATION_KINDS:
+        raise HTTPException(status_code=404, detail="未知的翻译产物类型")
+    attachment = await _owned_zotero_pdf(user["id"], item_key, attachment_key)
+    try:
+        row = await _zotero_translation_row(user["id"], item_key, attachment)
+    except DatabaseError as exc:
+        raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
+    if row and row["status"] == "expired":
+        raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE)
+    if not row or row["status"] != "success" or not row.get("remote_task_id"):
+        raise HTTPException(status_code=404, detail="翻译结果尚未就绪")
+    cfg = translation_service_config()
+    task_id = str(row["remote_task_id"])
+    state = await asyncio.to_thread(remote_result_state, cfg, task_id)
+    if state == "gone":
+        await asyncio.to_thread(update_zotero_attachment_translation, row["id"],
+                                status="expired", error=EXPIRED_ERROR_MESSAGE)
+        raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE)
+    if state != "success":
+        raise HTTPException(status_code=503, detail="pdf2zh 服务暂时不可用，请稍后重试")
+    stream = stream_translation_result(cfg, task_id, kind)
+    try:
+        first_chunk = await anext(stream)
+    except TranslationDownloadError as exc:
+        await stream.aclose()
+        if exc.status_code == 410 or (exc.upstream_status_code == 400 and
+                await asyncio.to_thread(remote_result_state, cfg, task_id) == "gone"):
+            await asyncio.to_thread(update_zotero_attachment_translation, row["id"],
+                                    status="expired", error=EXPIRED_ERROR_MESSAGE)
+            raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    headers = {**_translation_download_headers(attachment_key, kind), "Cache-Control": "private, no-store"}
     return _TranslationDownloadResponse(stream, first_chunk, headers=headers)
 
 
