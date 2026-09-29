@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import paper_figures
+from paper_resources import ResolvedDocument
 from utils import ReaderError
 
 
@@ -261,6 +262,8 @@ def test_force_refresh_skips_existing_zotero_framework_figure(tmp_path, monkeypa
     cached_file = tmp_path / "framework-cached.png"
     cached_file.write_bytes(ONE_PIXEL_PNG)
     monkeypatch.setattr(paper_figures, "zotero_figure_path", lambda *_args: cached_file)
+    monkeypatch.setattr(paper_figures, "_is_public_url", lambda url: url == "https://example.org/paper.pdf")
+    monkeypatch.setattr(paper_figures, "resolve_public_document", lambda *_args: (None, []))
     item = {
         "item_key": "PAPER1",
         "analysis_figures": [
@@ -268,6 +271,8 @@ def test_force_refresh_skips_existing_zotero_framework_figure(tmp_path, monkeypa
                 "id": "cached",
                 "kind": "framework",
                 "filename": cached_file.name,
+                "source": "pdf-caption-crop",
+                "source_url": "https://example.org/paper.pdf",
                 "label": "Figure 1",
             }
         ],
@@ -294,6 +299,101 @@ def test_force_refresh_skips_existing_zotero_framework_figure(tmp_path, monkeypa
 
     assert cached == item["analysis_figures"][0]
     assert refreshed is None
+
+
+def test_zotero_assets_ignore_private_cache_and_never_download_attachment(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_figures, "zotero_figure_root", lambda: tmp_path)
+    monkeypatch.setattr(paper_figures, "resolve_public_document", lambda *_args: (None, []))
+    monkeypatch.setattr(paper_figures, "_is_public_url", lambda url: url == "https://example.org/paper.pdf")
+    monkeypatch.setattr(paper_figures, "download_public_pdf_bytes", lambda *args, **kwargs: b"public-pdf")
+    monkeypatch.setattr(paper_figures, "extract_framework_figure_from_pdf_bounded", lambda *_args: None)
+    monkeypatch.setattr(paper_figures, "extract_results_table_from_pdf_bounded", lambda *_args: None)
+
+    class ForbiddenClient:
+        def fetch_fulltext(self, *args):
+            raise AssertionError("Zotero full text must not be fetched")
+
+        def download_attachment(self, *args):
+            raise AssertionError("Zotero PDF must not be downloaded")
+
+    item = {
+        "item_key": "PAPER1",
+        "analysis_figures": [
+            {"kind": "framework", "filename": "framework-private.png", "source_url": "zotero-attachment"},
+            {"kind": "results_table", "filename": "results_table-private.png", "source_url": "zotero-attachment"},
+            {"kind": "results_table", "source_url": "zotero-attachment", "table_data": {"rows": [[{"text": "private"}]]}},
+        ],
+    }
+    directory = paper_figures._zotero_figure_directory("user", "PAPER1")
+    directory.mkdir(parents=True)
+    (directory / "framework-private.png").write_bytes(ONE_PIXEL_PNG)
+    (directory / "results_table-private.png").write_bytes(ONE_PIXEL_PNG)
+    assets = paper_figures.extract_and_save_zotero_analysis_assets(
+        user_id="user", zotero_user_id=123, item=item,
+        children=[{"item_key": "PDF1", "item_type": "attachment", "content_type": "application/pdf"}],
+        client=ForbiddenClient(), reading_context="",
+    )
+    assert assets == []
+
+
+@pytest.mark.parametrize("kind", ["framework", "results_table"])
+def test_zotero_pdf_assets_use_resolved_public_pdf_without_zotero_calls(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(paper_figures, "zotero_figure_root", lambda: tmp_path)
+    url = "https://example.org/open.pdf"
+    calls = []
+    monkeypatch.setattr(
+        paper_figures, "resolve_public_document",
+        lambda *_args: (ResolvedDocument("Public body", url, "openalex"), []),
+    )
+    def download(public_url, **kwargs):
+        calls.append(public_url)
+        return b"public-pdf"
+    monkeypatch.setattr(paper_figures, "download_public_pdf_bytes", download)
+    asset = paper_figures.FrameworkFigureAsset(
+        label="Figure 1" if kind == "framework" else "Table 1",
+        caption="Public asset", source="pdf-caption-crop", source_url=url,
+        image_bytes=ONE_PIXEL_PNG,
+    )
+    extractor = ("extract_framework_figure_from_pdf_bounded" if kind == "framework"
+                 else "extract_results_table_from_pdf_bounded")
+    monkeypatch.setattr(paper_figures, extractor, lambda pdf, source_url: asset if (pdf, source_url) == (b"public-pdf", url) else None)
+
+    class ForbiddenClient:
+        def download_attachment(self, *args):
+            raise AssertionError("Zotero PDF must not be downloaded")
+
+    extract = (paper_figures.extract_and_save_zotero_framework_figure if kind == "framework"
+               else paper_figures.extract_and_save_zotero_results_table)
+    saved = extract(
+        user_id="user", zotero_user_id=123, item={"item_key": "PAPER1"},
+        children=[{"item_key": "PDF1", "item_type": "attachment", "content_type": "application/pdf"}],
+        client=ForbiddenClient(), reading_context="",
+    )
+    assert saved and saved["source_url"] == url and saved["kind"] == kind
+    assert calls == [url]
+
+
+def test_zotero_figure_uses_direct_public_attachment_url(tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_figures, "zotero_figure_root", lambda: tmp_path)
+    url = "https://example.org/paper.pdf"
+    monkeypatch.setattr(
+        paper_figures, "resolve_public_document",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("direct candidate should suffice")),
+    )
+    monkeypatch.setattr(paper_figures, "download_public_pdf_bytes", lambda candidate, **kwargs: b"public-pdf" if candidate == url else b"")
+    monkeypatch.setattr(
+        paper_figures, "extract_framework_figure_from_pdf_bounded",
+        lambda pdf, source_url: paper_figures.FrameworkFigureAsset(
+            label="Figure 1", caption="Overview", source="pdf-caption-crop",
+            source_url=source_url, image_bytes=ONE_PIXEL_PNG,
+        ) if (pdf, source_url) == (b"public-pdf", url) else None,
+    )
+    saved = paper_figures.extract_and_save_zotero_framework_figure(
+        user_id="user", zotero_user_id=123, item={"item_key": "PAPER1"},
+        children=[{"item_key": "PDF1", "item_type": "attachment", "url": url}],
+        client=object(), reading_context="",
+    )
+    assert saved and saved["source_url"] == url
 
 
 def test_public_analysis_assets_use_public_cache_without_zotero_identity(tmp_path, monkeypatch):

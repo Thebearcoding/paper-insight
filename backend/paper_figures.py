@@ -1019,6 +1019,12 @@ def _cached_zotero_asset(
     for cached in item.get("analysis_figures") or []:
         if not isinstance(cached, dict) or cached.get("kind") != kind:
             continue
+        # Old Zotero assets may have been cropped from private attachments.
+        # Reuse only assets whose recorded source is a public resource.
+        if cached.get("source") not in {"arxiv-html", "arxiv-html-table", "pdf-caption-crop"}:
+            continue
+        if not _is_public_url(str(cached.get("source_url") or "")):
+            continue
         if kind == RESULTS_TABLE_KIND and isinstance(cached.get("table_data"), dict):
             rows = cached["table_data"].get("rows")
             if isinstance(rows, list) and rows:
@@ -1038,8 +1044,6 @@ def _extract_asset_from_available_pdfs(
     *,
     item: dict[str, Any],
     children: list[dict[str, Any]],
-    zotero_user_id: int,
-    client: Any,
     reading_context: str,
     extractor: Callable[[bytes, str], FrameworkFigureAsset | None],
     asset_name: str,
@@ -1050,45 +1054,36 @@ def _extract_asset_from_available_pdfs(
         public_urls.append(public_pdf_match.group(1).strip())
 
     seen_urls: set[str] = set()
-    for public_pdf_url in public_urls:
-        if public_pdf_url in seen_urls:
-            continue
-        seen_urls.add(public_pdf_url)
-        try:
-            pdf_bytes = download_public_pdf_bytes(
-                public_pdf_url,
-                total_timeout_seconds=PDF_DOWNLOAD_TIMEOUT_SECONDS,
-            )
-            asset = extractor(pdf_bytes, public_pdf_url)
-        except (ReaderError, requests.RequestException, ValueError) as exc:
-            logger.info("Unable to extract %s from public PDF %s: %s", asset_name, public_pdf_url, exc)
-            continue
-        if asset:
-            return asset
 
-    for attachment in children:
-        if attachment.get("item_type") != "attachment":
-            continue
-        content_type = str(attachment.get("content_type") or "").casefold()
-        filename = str(attachment.get("filename") or "").casefold()
-        if content_type != "application/pdf" and not filename.endswith(".pdf"):
-            continue
-        if str(attachment.get("link_mode") or "").casefold() in {"linked_file", "linked_url"}:
-            continue
-        try:
-            pdf_bytes = client.download_attachment(zotero_user_id, str(attachment["item_key"]))
-            asset = extractor(pdf_bytes, "zotero-attachment")
-        except Exception as exc:
-            logger.info(
-                "Unable to extract %s from Zotero attachment %s: %s",
-                asset_name,
-                attachment.get("item_key"),
-                exc,
-            )
-            continue
-        if asset:
-            return asset
-    return None
+    def try_urls(urls: list[str]) -> FrameworkFigureAsset | None:
+        for public_pdf_url in urls:
+            if public_pdf_url in seen_urls:
+                continue
+            seen_urls.add(public_pdf_url)
+            try:
+                pdf_bytes = download_public_pdf_bytes(
+                    public_pdf_url,
+                    total_timeout_seconds=PDF_DOWNLOAD_TIMEOUT_SECONDS,
+                )
+                asset = extractor(pdf_bytes, public_pdf_url)
+            except (ReaderError, requests.RequestException, ValueError) as exc:
+                logger.info("Unable to extract %s from public PDF %s: %s", asset_name, public_pdf_url, exc)
+                continue
+            if asset:
+                return asset
+        return None
+
+    asset = try_urls(public_urls)
+    if asset:
+        return asset
+
+    # DOI/title lookups can discover public PDFs absent from the Zotero URL fields.
+    try:
+        resolved, _ = resolve_public_document(item, children)
+    except (ReaderError, requests.RequestException, ValueError) as exc:
+        logger.info("Unable to resolve public document for %s: %s", asset_name, exc)
+        return None
+    return try_urls([resolved.url]) if resolved and resolved.url else None
 
 
 def extract_and_save_zotero_framework_figure(
@@ -1124,8 +1119,6 @@ def extract_and_save_zotero_framework_figure(
     asset = _extract_asset_from_available_pdfs(
         item=item,
         children=children,
-        zotero_user_id=zotero_user_id,
-        client=client,
         reading_context=reading_context,
         extractor=extract_framework_figure_from_pdf_bounded,
         asset_name="framework figure",
@@ -1168,8 +1161,6 @@ def extract_and_save_zotero_results_table(
     asset = _extract_asset_from_available_pdfs(
         item=item,
         children=children,
-        zotero_user_id=zotero_user_id,
-        client=client,
         reading_context=reading_context,
         extractor=extract_results_table_from_pdf_bounded,
         asset_name="SOTA results table",
@@ -1215,7 +1206,10 @@ def extract_and_save_zotero_analysis_assets(
     extras = [
         entry
         for entry in item.get("analysis_figures") or []
-        if isinstance(entry, dict) and entry.get("kind") not in known_kinds
+        if isinstance(entry, dict)
+        and entry.get("kind") not in known_kinds
+        and entry.get("source") in {"arxiv-html", "arxiv-html-table", "pdf-caption-crop"}
+        and _is_public_url(str(entry.get("source_url") or ""))
     ]
     return [asset for asset in assets if asset] + extras
 

@@ -121,10 +121,10 @@ from database import (
     get_zotero_chat_sessions,
     get_zotero_connection,
     get_zotero_item,
-    get_zotero_attachment_translation,
-    claim_zotero_attachment_translation,
-    update_zotero_attachment_translation,
-    reset_stale_zotero_attachment_translations,
+    get_zotero_public_translation,
+    claim_zotero_public_translation,
+    update_zotero_public_translation,
+    reset_stale_zotero_public_translations,
     get_arxiv_papers,
     get_conference_papers,
     get_hf_daily_papers,
@@ -879,7 +879,7 @@ async def lifespan(app: FastAPI):
         # 否则前端会一直轮询一个永远不会推进的状态。
         try:
             await asyncio.to_thread(reset_stale_paper_translations)
-            await asyncio.to_thread(reset_stale_zotero_attachment_translations)
+            await asyncio.to_thread(reset_stale_zotero_public_translations)
         except DatabaseError as exc:
             logger.warning("PDF 翻译状态恢复失败: %s", exc)
 
@@ -3480,34 +3480,25 @@ async def download_paper_translation(paper_id: str, kind: str):
             raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE) from exc
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
+    if kind == "side-by-side":
+        return Response(content=side_by_side, media_type="application/pdf", headers=headers)
     return _TranslationDownloadResponse(stream, first_chunk, headers=headers)
 
 
-# Zotero PDFs are private: these endpoints require the owning user and a
-# current cloud PDF child on every request, including finished downloads.
-async def _owned_zotero_pdf(user_id: str, item_key: str, attachment_key: str) -> dict:
+# All translation operations are scoped to the signed-in owner's current item.
+async def _owned_zotero_translation_item(user_id: str, item_key: str) -> dict:
     try:
         item = await asyncio.to_thread(get_zotero_item, user_id, item_key)
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
     if not item:
         raise HTTPException(status_code=404, detail="Zotero 条目不存在")
-    attachment = next((child for child in item.get("children") or []
-                       if child.get("item_key") == attachment_key
-                       and child.get("parent_item_key") == item_key
-                       and child.get("item_type") == "attachment"), None)
-    if not attachment:
-        raise HTTPException(status_code=404, detail="该条目没有此 PDF 附件")
-    if str(attachment.get("content_type") or "").lower() != "application/pdf":
-        raise HTTPException(status_code=400, detail="该附件不是 PDF")
-    if str(attachment.get("link_mode") or "").lower() in {"linked_file", "linked_url"}:
-        raise HTTPException(status_code=400, detail="链接附件未存储在 Zotero 云端，无法翻译")
-    return attachment
+    return item
 
 
-def _zotero_translation_payload(row: dict | None, item_key: str, attachment_key: str) -> dict:
+def _zotero_translation_payload(row: dict | None, item_key: str) -> dict:
     status = str(row.get("status") or "idle") if row else "idle"
-    base = f"/me/zotero/items/{quote(item_key, safe='')}/attachments/{quote(attachment_key, safe='')}/translation"
+    base = f"/me/zotero/items/{quote(item_key, safe='')}/translation"
     return {
         "status": status, "progress": int(row.get("progress") or 0) if row else 0,
         "error": row.get("error") if row else None,
@@ -3516,72 +3507,68 @@ def _zotero_translation_payload(row: dict | None, item_key: str, attachment_key:
     }
 
 
-async def _zotero_translation_row(user_id: str, item_key: str, attachment: dict, *, verify_remote: bool = True):
+async def _zotero_translation_row(user_id: str, item: dict):
     cfg = translation_service_config()
-    row = await asyncio.to_thread(get_zotero_attachment_translation,
-                                  user_id, item_key, attachment["item_key"],
-                                  int(attachment.get("item_version") or 0), cfg.lang_out, cfg.service)
-    if verify_remote and row and row["status"] == "success" and row.get("remote_task_id"):
+    row = await asyncio.to_thread(get_zotero_public_translation,
+                                  user_id, item["item_key"], int(item.get("item_version") or 0),
+                                  cfg.lang_out, cfg.service)
+    if row and row["status"] == "success" and row.get("remote_task_id"):
         if await asyncio.to_thread(remote_result_state, cfg, str(row["remote_task_id"])) == "gone":
-            await asyncio.to_thread(update_zotero_attachment_translation, row["id"],
+            await asyncio.to_thread(update_zotero_public_translation, row["id"],
                                     status="expired", error=EXPIRED_ERROR_MESSAGE)
             row = {**row, "status": "expired", "error": EXPIRED_ERROR_MESSAGE}
     return row
 
 
-@app.post("/me/zotero/items/{item_key}/attachments/{attachment_key}/translation")
+@app.post("/me/zotero/items/{item_key}/translation")
 async def start_my_zotero_translation(
-    item_key: str, attachment_key: str, response: Response,
-    user: dict = Depends(require_current_user),
+    item_key: str, response: Response, user: dict = Depends(require_current_user),
 ):
     response.headers["Cache-Control"] = "private, no-store"
     if not translation_enabled():
         raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
-    attachment = await _owned_zotero_pdf(user["id"], item_key, attachment_key)
+    item = await _owned_zotero_translation_item(user["id"], item_key)
     try:
-        existing = await _zotero_translation_row(user["id"], item_key, attachment)
+        existing = await _zotero_translation_row(user["id"], item)
         if existing and existing["status"] in {"success", "pending", "progress"}:
-            return _zotero_translation_payload(existing, item_key, attachment_key)
+            return _zotero_translation_payload(existing, item_key)
         cfg = translation_service_config()
-        row, claimed = await asyncio.to_thread(claim_zotero_attachment_translation,
-            user["id"], item_key, attachment_key, int(attachment.get("item_version") or 0),
-            cfg.lang_out, cfg.service)
+        row, claimed = await asyncio.to_thread(claim_zotero_public_translation,
+            user["id"], item_key, int(item.get("item_version") or 0), cfg.lang_out, cfg.service)
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
     if claimed:
-        start_zotero_translation_task(user["id"], item_key, attachment_key,
-                                      int(attachment.get("item_version") or 0), row["id"])
-    return _zotero_translation_payload(row, item_key, attachment_key)
+        start_zotero_translation_task(user["id"], item_key,
+                                      int(item.get("item_version") or 0), row["id"])
+    return _zotero_translation_payload(row, item_key)
 
 
-@app.get("/me/zotero/items/{item_key}/attachments/{attachment_key}/translation")
+@app.get("/me/zotero/items/{item_key}/translation")
 async def get_my_zotero_translation(
-    item_key: str, attachment_key: str, response: Response,
-    user: dict = Depends(require_current_user),
+    item_key: str, response: Response, user: dict = Depends(require_current_user),
 ):
     response.headers["Cache-Control"] = "private, no-store"
     if not translation_enabled():
         raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
-    attachment = await _owned_zotero_pdf(user["id"], item_key, attachment_key)
+    item = await _owned_zotero_translation_item(user["id"], item_key)
     try:
-        row = await _zotero_translation_row(user["id"], item_key, attachment)
+        row = await _zotero_translation_row(user["id"], item)
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
-    return _zotero_translation_payload(row, item_key, attachment_key)
+    return _zotero_translation_payload(row, item_key)
 
 
-@app.get("/me/zotero/items/{item_key}/attachments/{attachment_key}/translation/{kind}")
+@app.get("/me/zotero/items/{item_key}/translation/{kind}")
 async def download_my_zotero_translation(
-    item_key: str, attachment_key: str, kind: str,
-    user: dict = Depends(require_current_user),
+    item_key: str, kind: str, user: dict = Depends(require_current_user),
 ):
     if not translation_enabled():
         raise HTTPException(status_code=503, detail="PDF 翻译功能未启用")
     if kind not in TRANSLATION_KINDS:
         raise HTTPException(status_code=404, detail="未知的翻译产物类型")
-    attachment = await _owned_zotero_pdf(user["id"], item_key, attachment_key)
+    item = await _owned_zotero_translation_item(user["id"], item_key)
     try:
-        row = await _zotero_translation_row(user["id"], item_key, attachment)
+        row = await _zotero_translation_row(user["id"], item)
     except DatabaseError as exc:
         raise HTTPException(status_code=502, detail="Database temporarily unavailable") from exc
     if row and row["status"] == "expired":
@@ -3592,7 +3579,7 @@ async def download_my_zotero_translation(
     task_id = str(row["remote_task_id"])
     state = await asyncio.to_thread(remote_result_state, cfg, task_id)
     if state == "gone":
-        await asyncio.to_thread(update_zotero_attachment_translation, row["id"],
+        await asyncio.to_thread(update_zotero_public_translation, row["id"],
                                 status="expired", error=EXPIRED_ERROR_MESSAGE)
         raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE)
     if state != "success":
@@ -3604,11 +3591,11 @@ async def download_my_zotero_translation(
         await stream.aclose()
         if exc.status_code == 410 or (exc.upstream_status_code == 400 and
                 await asyncio.to_thread(remote_result_state, cfg, task_id) == "gone"):
-            await asyncio.to_thread(update_zotero_attachment_translation, row["id"],
+            await asyncio.to_thread(update_zotero_public_translation, row["id"],
                                     status="expired", error=EXPIRED_ERROR_MESSAGE)
             raise HTTPException(status_code=410, detail=EXPIRED_ERROR_MESSAGE) from exc
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    headers = {**_translation_download_headers(attachment_key, kind), "Cache-Control": "private, no-store"}
+    headers = {**_translation_download_headers(item_key, kind), "Cache-Control": "private, no-store"}
     return _TranslationDownloadResponse(stream, first_chunk, headers=headers)
 
 

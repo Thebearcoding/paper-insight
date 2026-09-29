@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { fetchOnlineSearchPapers, streamSse } from './api';
+import { fetchOnlineSearchPapers, fetchZoteroTranslation, startZoteroTranslation, streamSse, zoteroTranslationPath } from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -80,6 +80,24 @@ describe('streamSse', () => {
     expect(chunks).toEqual(['partial']);
     expect(events).toContainEqual(['final', '# Heading\n  indented']);
     expect(events).toContainEqual(['done', '']);
+  });
+});
+
+describe('Zotero public PDF translation', () => {
+  it('uses the item endpoint instead of a cloud attachment endpoint', async () => {
+    const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {
+      void args;
+      return new Response(JSON.stringify({ status: 'idle', progress: 0 }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    expect(zoteroTranslationPath('A B')).toBe('/me/zotero/items/A%20B/translation');
+    await fetchZoteroTranslation('A B');
+    await startZoteroTranslation('A B');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/me/zotero/items/A%20B/translation');
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST' });
   });
 });
 

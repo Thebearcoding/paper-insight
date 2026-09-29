@@ -329,16 +329,16 @@ export interface ZoteroTranslationStatus {
   error: string | null;
 }
 
-export function zoteroTranslationPath(itemKey: string, attachmentKey: string): string {
-  return zoteroItemApiPath(itemKey, `/attachments/${encodeURIComponent(attachmentKey)}/translation`);
+export function zoteroTranslationPath(itemKey: string): string {
+  return zoteroItemApiPath(itemKey, '/translation');
 }
 
-export async function fetchZoteroTranslation(itemKey: string, attachmentKey: string): Promise<ZoteroTranslationStatus> {
-  return apiFetch<ZoteroTranslationStatus>(zoteroTranslationPath(itemKey, attachmentKey));
+export async function fetchZoteroTranslation(itemKey: string): Promise<ZoteroTranslationStatus> {
+  return apiFetch<ZoteroTranslationStatus>(zoteroTranslationPath(itemKey));
 }
 
-export async function startZoteroTranslation(itemKey: string, attachmentKey: string): Promise<ZoteroTranslationStatus> {
-  return apiFetch<ZoteroTranslationStatus>(zoteroTranslationPath(itemKey, attachmentKey), { method: 'POST' });
+export async function startZoteroTranslation(itemKey: string): Promise<ZoteroTranslationStatus> {
+  return apiFetch<ZoteroTranslationStatus>(zoteroTranslationPath(itemKey), { method: 'POST' });
 }
 
 export async function fetchSelectableLlmModels(refresh = true): Promise<SelectableLlmCatalog> {

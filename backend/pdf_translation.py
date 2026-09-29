@@ -30,13 +30,12 @@ from config import settings
 from database import (
     DatabaseError,
     create_paper_translation,
-    get_zotero_connection,
-    update_zotero_attachment_translation,
+    update_zotero_public_translation,
     get_latest_paper_translation,
     get_paper_translation,
     update_paper_translation,
 )
-from paper_resources import ReaderError, download_matching_title_pdf_bytes, download_public_pdf_bytes
+from paper_resources import ReaderError, download_item_public_pdf_bytes, download_matching_title_pdf_bytes, download_public_pdf_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -511,55 +510,36 @@ def _current_pdf_url(paper_id: str) -> str:
     return str(paper.get("pdf") or "")
 
 
-# Zotero tasks never fall back to public PDF URLs: the source is the owner's
-# cloud attachment, fetched with that owner's encrypted API credential.
+# Zotero translations use only publicly downloadable PDFs matching the item.
 def start_zotero_translation_task(
-    user_id: str, item_key: str, attachment_key: str, version: int, translation_id: str,
+    user_id: str, item_key: str, version: int, translation_id: str,
 ) -> None:
-    task = asyncio.create_task(_run_zotero_translation(
-        user_id, item_key, attachment_key, version, translation_id
-    ))
-    _running_tasks[f"zotero:{translation_id}"] = task
-    task.add_done_callback(lambda _t: _running_tasks.pop(f"zotero:{translation_id}", None))
+    task = asyncio.create_task(_run_zotero_translation(user_id, item_key, version, translation_id))
+    _running_tasks[f"zotero-public:{translation_id}"] = task
+    task.add_done_callback(lambda _t: _running_tasks.pop(f"zotero-public:{translation_id}", None))
 
 
 async def _run_zotero_translation(
-    user_id: str, item_key: str, attachment_key: str, version: int, translation_id: str,
+    user_id: str, item_key: str, version: int, translation_id: str,
 ) -> None:
     from database import get_zotero_item
-    from zotero import ZoteroClient, ZoteroError
 
     cfg = translation_service_config()
     async with _task_semaphore():
         started_at = time.monotonic()
-        remote_task_id = None
         try:
-            # Revalidate ownership, attachment relationship and version immediately
-            # before fetching; a Zotero sync can remove or replace an attachment.
             item = await asyncio.to_thread(get_zotero_item, user_id, item_key)
-            attachment = next((child for child in (item or {}).get("children", [])
-                               if child.get("item_key") == attachment_key
-                               and child.get("parent_item_key") == item_key
-                               and child.get("item_type") == "attachment"
-                               and int(child.get("item_version") or 0) == version
-                               and str(child.get("content_type") or "").lower() == "application/pdf"
-                               and str(child.get("link_mode") or "").lower() not in
-                                   {"linked_file", "linked_url"}), None)
-            if not attachment:
-                raise TranslationError("PDF 附件已更新或不可访问，请同步 Zotero 后重试")
-            connection = await asyncio.to_thread(get_zotero_connection, user_id, True)
-            if not connection:
-                raise TranslationError("Zotero 连接已断开，请重新连接")
+            if not item or int(item.get("item_version") or 0) != version:
+                raise TranslationError("文献条目已更新或不可访问，请同步 Zotero 后重试")
             pdf_bytes = await asyncio.to_thread(
-                ZoteroClient(connection["api_key"]).download_attachment,
-                int(connection["zotero_user_id"]), attachment_key,
+                download_item_public_pdf_bytes, item, item.get("children") or [],
             )
             if not pdf_bytes.startswith(b"%PDF-"):
-                raise TranslationError("Zotero 附件不是有效的 PDF")
+                raise TranslationError("公开来源返回的不是有效 PDF")
             async with httpx.AsyncClient() as client:
                 remote_task_id = await submit_translation(client, cfg, pdf_bytes)
                 del pdf_bytes
-                await asyncio.to_thread(update_zotero_attachment_translation,
+                await asyncio.to_thread(update_zotero_public_translation,
                                         translation_id, remote_task_id=remote_task_id, status="progress")
                 while True:
                     if time.monotonic() - started_at > settings.pdf_translation.task_timeout_seconds:
@@ -572,15 +552,15 @@ async def _run_zotero_translation(
                     if status["state"] == "error":
                         raise TranslationError("pdf2zh 翻译任务失败")
                     if status["state"] == "progress":
-                        await asyncio.to_thread(update_zotero_attachment_translation,
+                        await asyncio.to_thread(update_zotero_public_translation,
                                                 translation_id, status="progress", progress=status["progress"])
-            await asyncio.to_thread(update_zotero_attachment_translation,
+            await asyncio.to_thread(update_zotero_public_translation,
                                     translation_id, status="success", progress=100)
-        except (TranslationError, ZoteroError) as exc:
-            logger.warning("Zotero attachment translation failed: %s", exc)
-            await asyncio.to_thread(update_zotero_attachment_translation,
+        except (TranslationError, ReaderError) as exc:
+            logger.warning("Zotero public PDF translation failed: %s", exc)
+            await asyncio.to_thread(update_zotero_public_translation,
                                     translation_id, status="error", error=str(exc)[:500])
         except Exception as exc:  # noqa: BLE001 - background task must record failures
-            logger.exception("Zotero attachment translation crashed")
-            await asyncio.to_thread(update_zotero_attachment_translation,
+            logger.exception("Zotero public PDF translation crashed")
+            await asyncio.to_thread(update_zotero_public_translation,
                                     translation_id, status="error", error=f"内部错误: {exc}"[:500])

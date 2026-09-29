@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import json
 import logging
 import re
 import shutil
@@ -16,10 +15,9 @@ from config import REPO_ROOT, settings
 from paper_resources import (
     build_repository_context,
     discover_code_repositories,
-    extract_pdf_text_bounded,
     resolve_public_document,
 )
-from utils import ReaderError, _TOKEN_ENCODING, truncate_content_for_llm
+from utils import _TOKEN_ENCODING, truncate_content_for_llm
 
 
 logger = logging.getLogger(__name__)
@@ -533,13 +531,6 @@ def _cache_dir() -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
-def _cache_paths(user_id: str, attachment_key: str) -> tuple[Path, Path]:
-    safe_user = re.sub(r"[^A-Za-z0-9._-]", "_", str(user_id))
-    safe_key = re.sub(r"[^A-Za-z0-9._-]", "_", attachment_key)
-    base = _cache_dir() / safe_user
-    return base / f"{safe_key}.txt", base / f"{safe_key}.json"
-
-
 def delete_user_cache(user_id: str) -> None:
     safe_user = re.sub(r"[^A-Za-z0-9._-]", "_", str(user_id))
     root = _cache_dir().resolve()
@@ -548,36 +539,6 @@ def delete_user_cache(user_id: str) -> None:
         raise ZoteroContentError("无效的 Zotero 缓存路径")
     if target.exists():
         shutil.rmtree(target)
-
-
-def _read_cached_content(user_id: str, attachment_key: str, version: int) -> str | None:
-    content_path, meta_path = _cache_paths(user_id, attachment_key)
-    if not content_path.exists() or not meta_path.exists():
-        return None
-    try:
-        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-        if _as_int(metadata.get("version"), -1) != version:
-            return None
-        content = content_path.read_text(encoding="utf-8").strip()
-        return content or None
-    except (OSError, ValueError, TypeError):
-        return None
-
-
-def _write_cached_content(
-    user_id: str,
-    attachment_key: str,
-    version: int,
-    source: str,
-    content: str,
-) -> None:
-    content_path, meta_path = _cache_paths(user_id, attachment_key)
-    content_path.parent.mkdir(parents=True, exist_ok=True)
-    content_path.write_text(content, encoding="utf-8")
-    meta_path.write_text(
-        json.dumps({"version": version, "source": source}, ensure_ascii=False),
-        encoding="utf-8",
-    )
 
 
 def _creator_name(creator: Any) -> str:
@@ -727,80 +688,8 @@ def get_item_reading_context(
     client: ZoteroClient,
 ) -> tuple[str, str, str | None]:
     metadata = build_metadata_context(item, children)
-    attachments = [
-        child
-        for child in children
-        if child.get("item_type") == "attachment"
-        and (
-            str(child.get("content_type") or "").lower() == "application/pdf"
-            or str(child.get("filename") or "").lower().endswith(".pdf")
-        )
-    ]
-    primary_attachments = [
-        attachment
-        for attachment in attachments
-        if ".compare." not in str(attachment.get("filename") or "").casefold()
-    ]
-    if primary_attachments:
-        attachments = primary_attachments
-    errors: list[str] = []
-    if not attachments:
-        errors.append("该条目没有可用的 Zotero PDF 附件")
-    for attachment in attachments:
-        key = str(attachment["item_key"])
-        version = _as_int(attachment.get("item_version"))
-        cached = _read_cached_content(user_id, key, version)
-        if cached:
-            return (
-                build_reading_context(
-                    metadata,
-                    item=item,
-                    children=children,
-                    content=cached,
-                    content_source="Zotero 正文缓存",
-                ),
-                "cache",
-                None,
-            )
-
-        try:
-            content = client.fetch_fulltext(zotero_user_id, key)
-            source = "zotero-fulltext"
-            if not content:
-                link_mode = str(attachment.get("link_mode") or "").casefold()
-                if link_mode == "linked_file":
-                    errors.append("Zotero 附件是本地 linked_file，云端不保存该文件")
-                    continue
-                if link_mode == "linked_url":
-                    errors.append("Zotero 附件是 linked_url，将尝试公开地址")
-                    continue
-                pdf_bytes = client.download_attachment(zotero_user_id, key)
-                content = extract_pdf_text_bounded(pdf_bytes, f"zotero:{key}")
-                source = "attachment-pdf"
-            content = content.strip()
-            if content:
-                _write_cached_content(user_id, key, version, source, content)
-                return (
-                    build_reading_context(
-                        metadata,
-                        item=item,
-                        children=children,
-                        content=content,
-                        content_source=(
-                            "Zotero 已索引全文"
-                            if source == "zotero-fulltext"
-                            else "Zotero 云端 PDF"
-                        ),
-                    ),
-                    source,
-                    None,
-                )
-        except (ZoteroError, ReaderError) as exc:
-            errors.append(str(exc))
-            logger.info("Unable to read Zotero attachment %s: %s", key, exc)
-
+    # Zotero attachment keys and legacy per-user text caches are never sources of paper body text.
     public_document, public_errors = resolve_public_document(item, children)
-    errors.extend(public_errors)
     if public_document:
         return (
             build_reading_context(
@@ -815,9 +704,10 @@ def get_item_reading_context(
             None,
         )
 
-    reason = "；".join(dict.fromkeys(errors)) or "未能读取 Zotero PDF 正文"
+    if public_errors:
+        logger.info("No public full text for Zotero item %s: %s", item.get("item_key"), public_errors)
     return (
         build_reading_context(metadata, item=item, children=children),
         "metadata",
-        reason,
+        "仅元数据模式：未找到可读取的公开论文全文；报告仅依据 Zotero 条目元数据、笔记和批注，未读取论文正文。",
     )

@@ -78,90 +78,85 @@ def test_normalize_item_keeps_parent_notes_annotations_and_tags():
     assert result["collections"] == ["COLL1"]
 
 
-def test_get_item_reading_context_prefers_zotero_indexed_fulltext(monkeypatch, tmp_path: Path):
+def test_get_item_reading_context_uses_public_fulltext_instead_of_zotero_or_legacy_cache(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(zotero, "_cache_dir", lambda: tmp_path)
+    cached_dir = tmp_path / "user-1"
+    cached_dir.mkdir()
+    (cached_dir / "PDF1.txt").write_text("PRIVATE_OLD_BODY", encoding="utf-8")
+    (cached_dir / "PDF1.json").write_text('{"version": 2, "source": "zotero-fulltext"}', encoding="utf-8")
+    monkeypatch.setattr(
+        zotero,
+        "resolve_public_document",
+        lambda item, children: (
+            ResolvedDocument("Public paper body", "https://example.org/paper.pdf", "zotero-item-url"),
+            [],
+        ),
+    )
+    monkeypatch.setattr(zotero, "build_repository_context", lambda urls: "")
 
-    class FakeClient:
-        def fetch_fulltext(self, zotero_user_id: int, attachment_key: str) -> str:
-            assert zotero_user_id == 123
-            assert attachment_key == "PDF1"
-            return "A sufficiently useful indexed paper body."
+    class ForbiddenClient:
+        def fetch_fulltext(self, *args):
+            raise AssertionError("Zotero indexed full text must not be fetched")
 
-        def download_attachment(self, zotero_user_id: int, attachment_key: str) -> bytes:
-            raise AssertionError("indexed full text should avoid attachment download")
+        def download_attachment(self, *args):
+            raise AssertionError("Zotero attachment must not be downloaded")
 
     context, source, warning = zotero.get_item_reading_context(
         user_id="user-1",
         zotero_user_id=123,
-        item={
-            "item_key": "PAPER1",
-            "item_type": "journalArticle",
-            "title": "A Paper",
-            "creators": [],
-            "tags": [],
-        },
+        item={"item_key": "PAPER1", "item_type": "journalArticle", "title": "A Paper"},
         children=[
-            {
-                "item_key": "PDF1",
-                "item_version": 2,
-                "item_type": "attachment",
-                "content_type": "application/pdf",
-                "filename": "paper.pdf",
-            }
+            {"item_key": "PDF1", "item_version": 2, "item_type": "attachment",
+             "content_type": "application/pdf", "filename": "paper.pdf"},
+            {"note": "My reading note", "annotation_text": "Highlighted claim"},
         ],
-        client=FakeClient(),
+        client=ForbiddenClient(),
     )
 
-    assert source == "zotero-fulltext"
+    assert source == "public-document:zotero-item-url"
     assert warning is None
-    assert "A sufficiently useful indexed paper body." in context
-    assert (tmp_path / "user-1" / "PDF1.txt").exists()
+    assert "Public paper body" in context
+    assert "PRIVATE_OLD_BODY" not in context
+    assert "My reading note" in context
+    assert "Highlighted claim" in context
+    assert (cached_dir / "PDF1.txt").read_text(encoding="utf-8") == "PRIVATE_OLD_BODY"
 
 
-def test_get_item_reading_context_skips_compare_pdf_when_primary_exists(monkeypatch, tmp_path: Path):
+def test_get_item_reading_context_metadata_only_without_public_pdf(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(zotero, "_cache_dir", lambda: tmp_path)
+    cached_dir = tmp_path / "user-1"
+    cached_dir.mkdir()
+    (cached_dir / "PDF1.txt").write_text("PRIVATE_OLD_BODY", encoding="utf-8")
+    (cached_dir / "PDF1.json").write_text('{"version": 2, "source": "attachment-pdf"}', encoding="utf-8")
+    monkeypatch.setattr(
+        zotero, "resolve_public_document",
+        lambda item, children: (None, ["Zotero 资源不存在"]),
+    )
+    monkeypatch.setattr(zotero, "build_repository_context", lambda urls: "")
 
-    class FakeClient:
-        def fetch_fulltext(self, zotero_user_id: int, attachment_key: str) -> str:
-            assert zotero_user_id == 123
-            assert attachment_key == "PRIMARY"
-            return "The primary paper body."
+    class ForbiddenClient:
+        def fetch_fulltext(self, *args):
+            raise AssertionError("private indexed text must not be fetched")
 
-        def download_attachment(self, zotero_user_id: int, attachment_key: str) -> bytes:
-            raise AssertionError("indexed primary full text should avoid attachment download")
+        def download_attachment(self, *args):
+            raise AssertionError("private PDF must not be fetched")
 
     context, source, warning = zotero.get_item_reading_context(
         user_id="user-1",
         zotero_user_id=123,
-        item={
-            "item_key": "PAPER1",
-            "item_type": "journalArticle",
-            "title": "A Paper",
-            "creators": [],
-            "tags": [],
-        },
-        children=[
-            {
-                "item_key": "COMPARE",
-                "item_version": 1,
-                "item_type": "attachment",
-                "content_type": "application/pdf",
-                "filename": "paper.compare.pdf",
-            },
-            {
-                "item_key": "PRIMARY",
-                "item_version": 1,
-                "item_type": "attachment",
-                "content_type": "application/pdf",
-                "filename": "paper.pdf",
-            },
-        ],
-        client=FakeClient(),
+        item={"item_key": "PAPER1", "item_type": "journalArticle", "title": "A Paper"},
+        children=[{"item_key": "PDF1", "item_version": 2, "item_type": "attachment",
+                   "content_type": "application/pdf", "filename": "paper.pdf"},
+                  {"note": "My reading note"}],
+        client=ForbiddenClient(),
     )
 
-    assert source == "zotero-fulltext"
-    assert warning is None
-    assert "The primary paper body." in context
+    assert source == "metadata"
+    assert warning and "仅元数据模式" in warning and "公开论文全文" in warning
+    assert "Zotero 资源不存在" not in warning
+    assert "PRIVATE_OLD_BODY" not in context
+    assert "论文全文：" not in context
+    assert "My reading note" in context
 
 
 def test_build_metadata_context_includes_user_notes_and_annotations():

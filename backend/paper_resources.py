@@ -442,7 +442,9 @@ def _is_public_url(url: str) -> bool:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
         return False
     hostname = parsed.hostname.casefold()
-    if hostname == "localhost" or hostname.endswith(".local"):
+    # Never treat a Zotero API/file endpoint as a public paper source.
+    if (hostname == "localhost" or hostname.endswith(".local") or
+            hostname in {"zotero.org", "www.zotero.org"} or hostname.endswith(".zotero.org")):
         return False
     try:
         default_port = 443 if parsed.scheme == "https" else 80
@@ -513,6 +515,39 @@ def download_public_pdf_bytes(
         finally:
             response.close()
     raise ReaderError("PDF 下载重定向次数过多")
+
+
+def download_item_public_pdf_bytes(item: dict[str, Any], children: list[dict[str, Any]]) -> bytes:
+    """Find a real public PDF for this item; never use Zotero file endpoints or caches."""
+    seen: set[str] = set()
+    errors: list[str] = []
+
+    def try_candidates(candidates: list[DocumentCandidate]) -> bytes | None:
+        for candidate in candidates:
+            if candidate.url in seen:
+                continue
+            seen.add(candidate.url)
+            try:
+                return download_public_pdf_bytes(candidate.url)
+            except (ReaderError, requests.RequestException, ValueError) as exc:
+                errors.append(f"{candidate.source}: {exc}")
+                logger.info("Unable to download public PDF %s: %s", candidate.url, exc)
+        return None
+
+    result = try_candidates(direct_document_candidates(item, children))
+    if result is not None:
+        return result
+    for provider in (semantic_scholar_candidates, crossref_candidates,
+                     openalex_candidates, openalex_title_candidates):
+        try:
+            candidates = provider(item)
+        except (requests.RequestException, ValueError) as exc:
+            errors.append(f"{provider.__name__}: {exc}")
+            continue
+        result = try_candidates(candidates)
+        if result is not None:
+            return result
+    raise ReaderError("未找到与当前文献匹配且可下载的公开 PDF；请检查条目的 DOI、arXiv 或公开论文链接")
 
 
 def download_matching_title_pdf_bytes(title: str, original_url: str) -> bytes:

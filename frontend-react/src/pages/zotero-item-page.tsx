@@ -146,18 +146,14 @@ function AnalysisAsset({ figure, itemTitle }: { figure: ZoteroAnalysisFigure; it
   );
 }
 
-function ZoteroAttachmentTranslation({ itemKey, attachment }: { itemKey: string; attachment: ZoteroItem }) {
+function ZoteroPublicTranslation({ itemKey }: { itemKey: string }) {
   const [status, setStatus] = useState<ZoteroTranslationStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const attachmentKey = attachment.item_key;
-  const eligible = attachment.content_type?.toLowerCase() === 'application/pdf' &&
-    !['linked_file', 'linked_url'].includes(attachment.link_mode?.toLowerCase() ?? '');
 
   useEffect(() => {
-    if (!eligible) return;
     let active = true;
-    const refresh = () => void fetchZoteroTranslation(itemKey, attachmentKey)
+    const refresh = () => void fetchZoteroTranslation(itemKey)
       .then((value) => { if (active) { setStatus(value); setError(null); } })
       .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : '查询失败'); });
     refresh();
@@ -165,24 +161,22 @@ function ZoteroAttachmentTranslation({ itemKey, attachment }: { itemKey: string;
       if (active && (status?.status === 'pending' || status?.status === 'progress')) refresh();
     }, 2500);
     return () => { active = false; window.clearInterval(timer); };
-  }, [eligible, itemKey, attachmentKey, attachment.item_version, status?.status]);
+  }, [itemKey, status?.status]);
 
-  if (attachment.content_type?.toLowerCase() !== 'application/pdf') return null;
   const running = busy || status?.status === 'pending' || status?.status === 'progress';
   return (
     <div className="rounded-xl border border-slate-200 p-4 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <span className="min-w-0 break-all font-medium text-slate-700">{attachment.filename || attachment.title || attachmentKey}</span>
-        {eligible ? <Button variant="outline" size="sm" disabled={running} onClick={() => {
+        <span className="text-slate-700">按当前文献的 DOI、arXiv 或公开链接查找 PDF</span>
+        <Button variant="outline" size="sm" disabled={running} onClick={() => {
           setBusy(true); setError(null);
-          void startZoteroTranslation(itemKey, attachmentKey)
+          void startZoteroTranslation(itemKey)
             .then(setStatus)
             .catch((reason) => setError(reason instanceof Error ? reason.message : '启动翻译失败'))
             .finally(() => setBusy(false));
-        }}><Languages className="mr-2 h-4 w-4" />{status?.status === 'expired' || status?.status === 'error' ? '重新翻译' : '翻译 PDF'}</Button> : null}
+        }}><Languages className="mr-2 h-4 w-4" />{status?.status === 'expired' || status?.status === 'error' ? '重新翻译' : '翻译公开 PDF'}</Button>
       </div>
-      {!eligible ? <p className="mt-2 text-amber-700">此附件为本地链接或网址链接，Zotero 云端没有可供翻译的 PDF。</p> : null}
-      {running ? <p className="mt-2 text-blue-700">正在翻译{status?.progress ? ` · ${status.progress}%` : '…'}</p> : null}
+      {running ? <p className="mt-2 text-blue-700">正在查找并翻译公开 PDF{status?.progress ? ` · ${status.progress}%` : '…'}</p> : null}
       {error || status?.error ? <p role="alert" className="mt-2 text-red-700">{error || status?.error}</p> : null}
       {status?.status === 'success' ? <div className="mt-3 flex flex-wrap gap-3">
         {([['mono_url', '中文版'], ['dual_url', '双语版']] as const).map(([field, label]) =>
@@ -509,13 +503,11 @@ export function ZoteroItemPage({ itemKey }: ZoteroItemPageProps) {
         </div>
       </section>
 
-      {attachments.some((attachment) => attachment.content_type?.toLowerCase() === 'application/pdf') ? (
-        <section className="rounded-[32px] bg-white p-6 shadow-sm ring-1 ring-black/5 sm:p-8">
-          <h2 className="mb-2 flex items-center gap-2 text-xl font-semibold text-[#172033]"><Languages className="h-5 w-5 text-[#ff9900]" />PDF 翻译</h2>
-          <p className="mb-4 text-sm text-slate-500">从你的 Zotero 云端 PDF 附件翻译；译文下载仅对当前账号开放，临时结果过期后可重新翻译。</p>
-          <div className="space-y-3">{attachments.map((attachment) => <ZoteroAttachmentTranslation key={attachment.item_key} itemKey={itemKey} attachment={attachment} />)}</div>
-        </section>
-      ) : null}
+      <section className="rounded-[32px] bg-white p-6 shadow-sm ring-1 ring-black/5 sm:p-8">
+        <h2 className="mb-2 flex items-center gap-2 text-xl font-semibold text-[#172033]"><Languages className="h-5 w-5 text-[#ff9900]" />PDF 翻译</h2>
+        <p className="mb-4 text-sm text-slate-500">只查找当前文献的公开 PDF，不下载 Zotero 云端附件；找不到可下载版本时会显示原因。译文仅对当前账号开放，临时结果过期后可重新翻译。</p>
+        <ZoteroPublicTranslation itemKey={itemKey} />
+      </section>
 
       <section className="rounded-[32px] bg-white p-6 shadow-sm ring-1 ring-black/5 sm:p-8">
         <div className="flex flex-col gap-3 border-b border-[#eef2f7] pb-4 sm:flex-row sm:items-center sm:justify-between">
