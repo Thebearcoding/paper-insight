@@ -1,6 +1,6 @@
 -- Private translation task pointers, scoped to the owning Zotero item and attachment.
 -- pdf2zh holds results in its temporary cache; no attachment bytes are stored here.
-CREATE TABLE zotero_attachment_translations (
+CREATE TABLE IF NOT EXISTS zotero_attachment_translations (
     id BIGSERIAL PRIMARY KEY,
     user_id UUID NOT NULL,
     item_key TEXT NOT NULL,
@@ -18,5 +18,5 @@ CREATE TABLE zotero_attachment_translations (
     FOREIGN KEY (user_id, attachment_key) REFERENCES zotero_items(user_id, item_key) ON DELETE CASCADE,
     UNIQUE (user_id, item_key, attachment_key, attachment_version, lang_out, service)
 );
-CREATE INDEX zotero_attachment_translations_owner_idx
+CREATE INDEX IF NOT EXISTS zotero_attachment_translations_owner_idx
     ON zotero_attachment_translations (user_id, item_key, attachment_key);
