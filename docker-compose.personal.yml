@@ -55,6 +55,9 @@ services:
     # 版面模型在翻译子进程内延迟加载，每个任务后回收子进程。
     # 此上限同时覆盖 worker、Flask、模型、PDF 工作集及 Redis；空闲用量不足以验收。
     mem_limit: 768m
+    # 长论文的逐页工作集可能超过 RAM 上限。cgroup v1 的 swappiness=0 会在
+    # swap 仍有余量时直接杀掉任务；显式设置，避免继承主机以前的默认值。
+    mem_swappiness: 10
     cpus: 0.75
     pids_limit: 256
     stop_grace_period: 30s

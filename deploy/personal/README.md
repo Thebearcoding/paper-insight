@@ -238,6 +238,22 @@ A drop-in under `/etc/sysctl.d/` is not enough on its own, because
 `/etc/sysctl.d/99-sysctl.conf` is a symlink to `/etc/sysctl.conf` and therefore
 loads last.
 
+The pdf2zh overlay also sets `mem_swappiness: 10`. On 2026-10-08, the 35-page
+Mem-Gallery paper (`2026.acl-long.1892`) failed twice at pages 30 and 33:
+the kernel reported `CONSTRAINT_MEMCG` at the 768 MiB RAM limit, with no swap
+used despite a 1536 MiB RAM-plus-swap allowance and over 3 GiB of free host
+swap. The running container's cgroup had `memory.swappiness=0`; changing the
+host sysctl alone had not changed that existing cgroup. The explicit Compose
+setting prevents a recreated container from inheriting that old default.
+It requires host swap and cgroup v1 support; the total working set is still
+bounded by the container's RAM-plus-swap allowance.
+
+After setting the live cgroup to 10, the in-flight retry finished in 701.48
+seconds. Its RAM-plus-swap high-water mark was 842 MiB; no further OOM kill was
+recorded. Both public downloads were verified as readable PDFs: 35 Chinese
+pages and 70 alternating English/Chinese pages. This validates this paper on
+this host, rather than a general upper bound for all PDFs or concurrent load.
+
 **Docker daemon memory.** Every deploy builds a new tagged `paper-insight:<sha>`
 image, and `docker image prune -f` only removes untagged ones, so the images
 accumulated: after 66 of them plus 289 build-cache records, `dockerd` itself held
