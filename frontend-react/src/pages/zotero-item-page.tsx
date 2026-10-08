@@ -179,7 +179,7 @@ function ZoteroPublicTranslation({ itemKey }: { itemKey: string }) {
       {running ? <p className="mt-2 text-blue-700">正在查找并翻译公开 PDF{status?.progress ? ` · ${status.progress}%` : '…'}</p> : null}
       {error || status?.error ? <p role="alert" className="mt-2 text-red-700">{error || status?.error}</p> : null}
       {status?.status === 'success' ? <div className="mt-3 flex flex-wrap gap-3">
-        {([['mono_url', '中文版'], ['dual_url', '双语版']] as const).map(([field, label]) =>
+        {([['mono_url', '中文版'], ['dual_url', '左右对照版']] as const).map(([field, label]) =>
           status[field] ? <a key={field} className="inline-flex items-center text-blue-700 hover:underline" href={apiUrl(status[field])}><Download className="mr-1 h-4 w-4" />{label}</a> : null)}
       </div> : null}
     </div>

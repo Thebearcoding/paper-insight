@@ -169,6 +169,14 @@ return 503, and invalid PDF responses return 502. After streaming starts, a
 connection failure aborts the transfer; it cannot be converted into a JSON error.
 The response retains bounded buffering, attachment filenames, and `no-store`.
 
+The bilingual download places the original English page on the left and its
+Chinese translation on the right of a single wide page. The worker composes
+pdf2zh's alternating page pairs once before caching the result in Redis, so
+downloads still stream the cached bytes. Text stays searchable, figures and
+formulas remain PDF contents, and hyperlinks retain their destinations on the
+paired pages. The Chinese-only output is unchanged. Existing alternating
+results need reformatting or regeneration after this change.
+
 On 2026-09-22, an isolated container using the production image with the patched
 startup and cleanup scripts completed two real one-page English-to-Chinese
 translations, before and after explicitly running periodic cleanup (15.70 and

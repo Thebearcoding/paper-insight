@@ -554,11 +554,11 @@ export function PaperPage({ paperId }: PaperPageProps) {
                         href={apiUrl(translation.dual_url ?? '#')}
                         target="_blank"
                         rel="noreferrer"
-                        title="下载中英双语 PDF 到本机（服务端只做临时缓存，服务重启后需重新翻译）"
+                        title="下载左右对照 PDF：左侧英文原文，右侧中文译文（临时缓存）"
                       >
                         <Button variant="outline" className="rounded-full border-[#bbf7d0] bg-[#f0fdf4] text-[#16a34a]">
                           <Languages className="mr-1.5 h-4 w-4" />
-                          双语 PDF
+                          左右对照 PDF
                         </Button>
                       </a>
                       <a
